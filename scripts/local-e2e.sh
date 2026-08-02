@@ -248,7 +248,8 @@ import json, sys
 
 d = json.load(open(sys.argv[1], encoding="utf-8"))
 assert d["status"] == "EXECUTED", d
-print(f"已回收 {len(d['reclaim'])} 个，释放 {d['freed_bytes']} 字节")
+assert d["strategy"] == "hard-delete", d
+print(f"已回收 {len(d['reclaimed'])} 个（{d['strategy']}），释放 {d['freed_bytes']} 字节")
 PY
 [ -d "$release_a" ] || { printf 'FAIL: 回收删掉了带 .keep 的 release\n' >&2; exit 1; }
 for r in "$release_b" "$release_c"; do

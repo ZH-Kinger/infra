@@ -274,7 +274,34 @@ lakeFS 核对 Commit 是否存在，**核对不了就一律不删**——宁可�
 不要随手调小。占用探测做成了可注入的接口，接上真实的 DLC 作业查询之后才谈得上
 缩短保护期。
 
-删除本身是「先原子改名进 `.trash`，再慢慢 rmtree」：
+#### 两种策略，语义完全不同
+
+回收有两种做法，它们**不是同一件事的两种实现**：
+
+| | `hard-delete` | `cpfs-evict` |
+|---|---|---|
+| release 目录 | 消失 | **还在**，元数据保留 |
+| PAI Dataset Version | 悬空，挂载会失败 | **仍然有效** |
+| 再次训练 | 要重跑 `materialize` | **访问时按需从 OSS 加载** |
+| 最坏情况 | 数据不可用 | 一次冷读的性能损失 |
+| 适用范围 | 任何 POSIX 文件系统 | 需 CPFS 数据流动；**灵骏 BMCPFS 不支持 Evict** |
+
+`cpfs-evict` 用的是 CPFS 数据流动的 `Evict` 任务（`DataType=Data`，只释放数据块、
+保留元数据）。它释放的是**缓存**而不是数据，所以安全要求本该比硬删低得多——
+但在真实环境验证之前，两者用同一套闸门。
+
+三个前提，任一不满足就失败而不是降级：
+
+1. release 路径必须落在某个已建好的 DataFlow 下面（Evict 的含义是「把缓存还给
+   源存储」，没有源存储无从谈起）；
+2. 文件系统必须支持 Evict（灵骏 BMCPFS 不支持）；
+3. 传给 API 的是**文件系统内部路径**，不是挂载路径——和 `pai-request` 的
+   `release_dir` / `--filesystem-path` 是同一个坑，靠 `--cpfs-mount-prefix` 换算。
+
+**找不到 DataFlow 时绝不静默退化成硬删。** 那是最危险的失败模式：操作者以为
+「只是释放了缓存」，实际目录已经没了。
+
+`hard-delete` 的删除是「先原子改名进 `.trash`，再慢慢 rmtree」：
 
 ```
 <dataset>/<commit>/  --rename-->  .trash/<dataset>/<commit>  --rmtree-->  ∅

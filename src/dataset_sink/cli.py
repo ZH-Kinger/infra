@@ -32,6 +32,8 @@ from .materializer import Materializer, certify_prepared_release, verify_release
 from .pai import CpfsRegistration, build_create_dataset_version_request
 from .reclaim import (
     AssumeRecoverable,
+    CpfsEvictStrategy,
+    HardDeleteStrategy,
     LakeFSCommitProbe,
     execute_plan,
     plan_reclaim,
@@ -204,6 +206,28 @@ def build_parser() -> argparse.ArgumentParser:
     reclaim.add_argument("--lakefs-api-endpoint")
     reclaim.add_argument("--lakefs-access-key-id")
     reclaim.add_argument("--lakefs-secret-access-key")
+    reclaim.add_argument(
+        "--strategy",
+        choices=("hard-delete", "cpfs-evict"),
+        default="hard-delete",
+        help=(
+            "hard-delete：目录整个删掉，PAI 版本会指向不存在的路径，再训练要重跑 "
+            "materialize；任何 POSIX 文件系统可用。"
+            "cpfs-evict：用 CPFS 数据流动释放数据块、保留元数据，PAI 版本仍然有效、"
+            "访问时按需从 OSS 加载；要求路径已被某个 DataFlow 管理，且灵骏 BMCPFS "
+            "不支持 Evict。"
+        ),
+    )
+    reclaim.add_argument("--cpfs-filesystem-id", help="--strategy cpfs-evict 时必填")
+    reclaim.add_argument(
+        "--cpfs-mount-prefix",
+        help=(
+            "CPFS 挂载点，用于把挂载视角路径换算成文件系统内部路径。"
+            "如挂载在 /mnt/cpfs 就填 /mnt/cpfs。填错会作用到错误的目录上"
+        ),
+    )
+    reclaim.add_argument("--region", help="--strategy cpfs-evict 时必填")
+    reclaim.add_argument("--profile", help="aliyun CLI profile")
     reclaim.add_argument("--sweep-trash", action="store_true", help="顺带清掉 .trash 里的残骸")
     reclaim.add_argument(
         "--execute",
@@ -570,6 +594,27 @@ def _reclaim(args: argparse.Namespace) -> dict:
             )
         probe = LakeFSCommitProbe(_lakefs_commit_exists(endpoint, key, secret))
 
+    if args.strategy == "cpfs-evict":
+        missing = [
+            name
+            for name, value in (
+                ("--cpfs-filesystem-id", args.cpfs_filesystem_id),
+                ("--cpfs-mount-prefix", args.cpfs_mount_prefix),
+                ("--region", args.region),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(f"--strategy cpfs-evict 需要: {', '.join(missing)}")
+        strategy = CpfsEvictStrategy(
+            filesystem_id=args.cpfs_filesystem_id,
+            region=args.region,
+            mount_prefix=args.cpfs_mount_prefix,
+            profile=args.profile,
+        )
+    else:
+        strategy = HardDeleteStrategy(args.target_root)
+
     plan = plan_reclaim(
         releases,
         now=datetime.now(timezone.utc),
@@ -579,10 +624,11 @@ def _reclaim(args: argparse.Namespace) -> dict:
         include_incomplete=args.include_incomplete,
         recoverability_probe=probe,
     )
-    result = execute_plan(plan, args.target_root, execute=args.execute)
+    result = execute_plan(plan, args.target_root, execute=args.execute, strategy=strategy)
 
     payload: dict = {
         "status": "EXECUTED" if args.execute else "DRY_RUN",
+        "strategy": result.strategy,
         "scanned": len(releases),
         "reclaim": [
             {
@@ -597,6 +643,7 @@ def _reclaim(args: argparse.Namespace) -> dict:
         "reclaimable_bytes": plan.reclaimable_bytes,
         "reclaimable_gib": round(plan.reclaimable_bytes / (1024**3), 3),
         "freed_bytes": result.freed_bytes,
+        "reclaimed": [{"release": r, "outcome": note} for r, note in result.reclaimed],
         "skipped": [{"release": r, "reason": why} for r, why in result.skipped],
     }
     if args.sweep_trash:

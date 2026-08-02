@@ -261,10 +261,32 @@ touch /mnt/cpfs/datasets/robotics/<commit>/.keep
 如果 `--execute` 中途被杀，`.trash/` 里会留下残骸——它们已经不在数据集命名空间里，
 不影响正确性，下次带 `--sweep-trash` 跑一遍即可。
 
+#### 用 CPFS Evict 代替硬删
+
+如果 CPFS 上这些 release 已经由数据流动（DataFlow）管理，优先用 `cpfs-evict`：
+
+```bash
+dataset-sink reclaim /mnt/cpfs/datasets \
+  --strategy cpfs-evict \
+  --cpfs-filesystem-id cpfs-xxxxxxxxxxxxxxxx \
+  --cpfs-mount-prefix /mnt/cpfs \
+  --region cn-hangzhou \
+  --lakefs-api-endpoint "$LAKEFS_API_ENDPOINT" --execute
+```
+
+它只释放数据块、保留元数据，所以 **PAI Dataset Version 不会失效**，下次训练访问
+时 CPFS 自动从 OSS 加载，不用重跑 `materialize`。代价是第一次访问会慢。
+
+`--cpfs-mount-prefix` 用来把挂载视角路径换算成文件系统内部路径，**填错会作用到
+错误的目录上**。找不到覆盖该路径的 DataFlow 时命令会失败，不会退化成硬删。
+
+灵骏 BMCPFS 不支持 Evict，只能用 `hard-delete`。
+
 ### 2.5.1 回收后要不要同步 PAI
 
-回收只删 CPFS 上的目录，**不动 PAI Dataset Version**。所以会出现「版本记录还在、
-挂载会失败」的状态。两种处理方式：
+`hard-delete` 只删 CPFS 上的目录，**不动 PAI Dataset Version**，所以会出现
+「版本记录还在、挂载会失败」的状态。（用 `cpfs-evict` 就没这个问题，元数据还在，
+挂载仍然有效。）两种处理方式：
 
 - **留着**：版本记录本身是有价值的审计痕迹，且重新 `materialize` 回来之后就恢复可用。
 - **删掉**：需要先确认没有作业引用它。注意 `deny_destructive` 策略 Deny 了

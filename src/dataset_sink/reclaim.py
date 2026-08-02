@@ -316,16 +316,198 @@ def plan_reclaim(
 
 
 # ---------------------------------------------------------------------------
+# 两种回收策略
+#
+# 它们不是同一件事的两种实现，语义差别很大：
+#
+#                     硬删                    CPFS Evict
+#   release 目录      消失                    **还在**，元数据保留
+#   PAI 版本          悬空，挂载会失败        **仍然有效**
+#   再次训练          要重跑 materialize      **访问时按需从 OSS 加载**
+#   最坏情况          数据不可用              一次冷读的性能损失
+#
+# 所以 Evict 的安全要求本来就该低得多——它释放的是缓存，不是数据。
+# 但在真实环境验证过之前，默认仍按硬删的严格程度设闸门。
+# ---------------------------------------------------------------------------
+
+
+class ReclaimStrategy(Protocol):
+    """怎么把一个 release 占的空间还回去。"""
+
+    name: str
+
+    def reclaim(self, release: ReleaseInfo) -> str:
+        """执行回收，返回一句人可读的结果描述。"""
+        ...
+
+
+class HardDeleteStrategy:
+    """先原子改名进 .trash，再慢慢 rmtree。
+
+    rename 是原子的元数据操作，release 一瞬间从数据集命名空间里消失，
+    **不存在「删了一半的 release」被消费方看到的窗口**——这是 `_READY`
+    最后写入那条规则的反向应用。
+
+    任何 POSIX 文件系统都能用，不依赖 CPFS 特性。代价是删掉之后
+    PAI Dataset Version 会指向一个不存在的路径。
+    """
+
+    name = "hard-delete"
+
+    def __init__(self, target_root: Path) -> None:
+        self.root = Path(target_root).resolve()
+
+    def reclaim(self, release: ReleaseInfo) -> str:
+        trash_dir = self.root / TRASH_DIR / release.dataset
+        trash_dir.mkdir(parents=True, exist_ok=True)
+        grave = _unique_grave(trash_dir, release.commit_id)
+        release.path.rename(grave)
+        # rmtree 放在锁外由调用方做：它可能很慢，而此时目录已经不在
+        # 数据集命名空间里，继续占着锁只会挡住同一个 Commit 的重新发布。
+        self._pending = grave
+        return f"已移入 {TRASH_DIR}，待清理"
+
+    def finalize(self) -> None:
+        grave = getattr(self, "_pending", None)
+        if grave is not None:
+            shutil.rmtree(grave, ignore_errors=True)
+            self._pending = None
+
+
+class CpfsEvictStrategy:
+    """用 CPFS 数据流动的 Evict 释放数据块，保留元数据。
+
+    Evict 之后文件仍可列出、`release.json` 与 `_READY` 仍可读，访问数据时
+    CPFS 按需从绑定的 OSS 源存储加载。所以 **PAI Dataset Version 不会失效**，
+    也不需要重跑 materialize——这是它比硬删好的地方。
+
+    三个前提，任一不满足都会失败而不是降级：
+
+    1. 该 release 的路径必须落在某个已建好的**数据流动（DataFlow）**下面。
+       Evict 的含义是「把缓存还给源存储」，没有源存储就无从谈起。
+    2. 文件系统必须支持 Evict。官方文档明写灵骏 BMCPFS 只支持
+       Import/Export/StreamImport/StreamExport，**不支持 Evict**。
+    3. 传给 API 的是**文件系统内部路径**，不是挂载路径。这两者是不同坐标系，
+       和 `pai-request` 的 `release_dir` / `--filesystem-path` 是同一个坑。
+    """
+
+    name = "cpfs-evict"
+
+    def __init__(
+        self,
+        *,
+        filesystem_id: str,
+        region: str,
+        mount_prefix: str,
+        runner=None,
+        cli_path: str = "aliyun",
+        profile: Optional[str] = None,
+    ) -> None:
+        self.filesystem_id = filesystem_id
+        self.region = region
+        self.mount_prefix = mount_prefix.rstrip("/")
+        self.cli_path = cli_path
+        self.profile = profile
+        self._runner = runner
+        self._dataflows: Optional[List[dict]] = None
+
+    # -- 路径换算 ---------------------------------------------------------
+
+    def filesystem_path(self, release: ReleaseInfo) -> str:
+        """挂载视角路径 → 文件系统内部路径。"""
+        mount = str(release.path)
+        if self.mount_prefix and not mount.startswith(self.mount_prefix):
+            raise DatasetSinkError(
+                f"release 路径 {mount} 不在挂载点 {self.mount_prefix} 下面。"
+                "reclaim 用的是挂载视角，而 CPFS API 要的是文件系统内部视角，"
+                "两者靠 --cpfs-mount-prefix 换算，填错会作用到错误的目录上。"
+            )
+        inner = mount[len(self.mount_prefix) :] if self.mount_prefix else mount
+        return inner if inner.startswith("/") else "/" + inner
+
+    # -- 与阿里云交互 -----------------------------------------------------
+
+    def _run(self, args: Sequence[str]) -> dict:
+        from .aliyun_cli import CommandResult, _parse_result, _subprocess_runner
+
+        runner = self._runner or _subprocess_runner
+        command = [self.cli_path, "--region", self.region]
+        if self.profile:
+            command.extend(["--profile", self.profile])
+        command.extend(args)
+        result = runner(command)
+        if not isinstance(result, CommandResult):  # pragma: no cover - 仅防御
+            raise DatasetSinkError("runner 必须返回 CommandResult")
+        return _parse_result(result, args[1] if len(args) > 1 else args[0])
+
+    def _load_dataflows(self) -> List[dict]:
+        if self._dataflows is None:
+            payload = self._run(["nas", "DescribeDataFlows", "--FileSystemId", self.filesystem_id])
+            flows = payload.get("DataFlowInfo", {}) if isinstance(payload, dict) else {}
+            self._dataflows = flows.get("DataFlow", []) if isinstance(flows, dict) else []
+        return self._dataflows
+
+    def _dataflow_for(self, inner_path: str) -> str:
+        """找到覆盖这个路径的 DataFlow。
+
+        找不到就报错而不是退化成硬删：两者语义不同，静默切换会让操作者
+        以为「只是释放了缓存」，实际上目录已经被删掉了。
+        """
+        best_id = None
+        best_len = -1
+        for flow in self._load_dataflows():
+            fs_path = str(flow.get("FileSystemPath") or "/").rstrip("/") or "/"
+            covered = inner_path == fs_path or inner_path.startswith(
+                fs_path if fs_path.endswith("/") else fs_path + "/"
+            )
+            if covered and len(fs_path) > best_len:
+                best_id, best_len = flow.get("DataFlowId"), len(fs_path)
+        if not best_id:
+            raise DatasetSinkError(
+                f"{inner_path} 不在任何数据流动的范围内，无法 Evict。\n"
+                "Evict 的含义是把缓存还给源存储，所以该路径必须先由一个绑定了 OSS "
+                "的 DataFlow 管理。用 `aliyun nas DescribeDataFlows --FileSystemId "
+                f"{self.filesystem_id}` 确认，或改用 --strategy hard-delete。"
+            )
+        return str(best_id)
+
+    def reclaim(self, release: ReleaseInfo) -> str:
+        inner = self.filesystem_path(release)
+        flow_id = self._dataflow_for(inner)
+        payload = self._run(
+            [
+                "nas",
+                "CreateDataFlowTask",
+                "--FileSystemId",
+                self.filesystem_id,
+                "--DataFlowId",
+                flow_id,
+                "--TaskAction",
+                "Evict",
+                # 只释放数据块，保留元数据——这正是 Evict 相对硬删的价值。
+                "--DataType",
+                "Data",
+                # Directory 要求首尾都是斜杠。
+                "--Directory",
+                inner if inner.endswith("/") else inner + "/",
+            ]
+        )
+        task_id = payload.get("TaskId") if isinstance(payload, dict) else None
+        return f"已提交 Evict 任务 {task_id or '(无 TaskId)'}（DataFlow {flow_id}）"
+
+
+# ---------------------------------------------------------------------------
 # 执行
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class ReclaimResult:
-    deleted: Tuple[str, ...]
+    reclaimed: Tuple[Tuple[str, str], ...]
     skipped: Tuple[Tuple[str, str], ...]
     freed_bytes: int
     executed: bool
+    strategy: str
 
 
 def execute_plan(
@@ -333,24 +515,25 @@ def execute_plan(
     target_root: Path,
     *,
     execute: bool = False,
+    strategy: Optional[ReclaimStrategy] = None,
 ) -> ReclaimResult:
-    """执行回收计划。默认 dry-run，`execute=True` 才真删。
+    """执行回收计划。默认 dry-run，`execute=True` 才真动手。
 
-    每个 release 在删除前会拿**和 materialize / certify 同一把锁**，并在锁内
+    每个 release 在处理前会拿**和 materialize / certify 同一把锁**，并在锁内
     重新核对前置条件。否则可能出现「计划生成时该目录可回收，执行时另一个进程
     正好在往同一个 Commit 发布」。
     """
     root = Path(target_root).resolve()
-    trash_root = root / TRASH_DIR
+    strategy = strategy or HardDeleteStrategy(root)
 
-    deleted: List[str] = []
+    reclaimed: List[Tuple[str, str]] = []
     skipped: List[Tuple[str, str]] = []
     freed = 0
 
     for decision in plan.reclaim:
         release = decision.release
         if not execute:
-            deleted.append(release.label)
+            reclaimed.append((release.label, f"[dry-run] 将用 {strategy.name} 回收"))
             freed += release.size_bytes
             continue
 
@@ -369,25 +552,26 @@ def execute_plan(
                 skipped.append((release.label, f"执行前被打上了 {KEEP_MARKER}"))
                 continue
 
-            trash_dir = trash_root / release.dataset
-            trash_dir.mkdir(parents=True, exist_ok=True)
-            grave = _unique_grave(trash_dir, release.commit_id)
+            try:
+                note = strategy.reclaim(release)
+            except DatasetSinkError as exc:
+                skipped.append((release.label, str(exc)))
+                continue
 
-            # rename 是原子的：release 一瞬间从命名空间消失，
-            # 不存在「删了一半」被消费方看到的窗口。
-            release.path.rename(grave)
+        # 慢活儿放锁外（硬删的 rmtree）：此时目录已经不在命名空间里了。
+        finalize = getattr(strategy, "finalize", None)
+        if finalize is not None:
+            finalize()
 
-        # rmtree 放在锁外：它可能很慢，而此时目录已经不在数据集命名空间里了，
-        # 继续占着锁只会挡住同一个 Commit 的重新发布。
-        shutil.rmtree(grave, ignore_errors=True)
-        deleted.append(release.label)
+        reclaimed.append((release.label, note))
         freed += release.size_bytes
 
     return ReclaimResult(
-        deleted=tuple(deleted),
+        reclaimed=tuple(reclaimed),
         skipped=tuple(skipped),
         freed_bytes=freed,
         executed=execute,
+        strategy=strategy.name,
     )
 
 

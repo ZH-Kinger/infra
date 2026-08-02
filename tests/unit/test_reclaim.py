@@ -7,10 +7,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
+from dataset_sink.aliyun_cli import CommandResult
+from dataset_sink.errors import DatasetSinkError
 from dataset_sink.reclaim import (
     KEEP_MARKER,
     TRASH_DIR,
     AssumeRecoverable,
+    CpfsEvictStrategy,
     ReleaseInfo,
     execute_plan,
     plan_reclaim,
@@ -249,7 +252,7 @@ class ExecuteTests(unittest.TestCase):
         root, plan = self._setup()
         result = execute_plan(plan, root, execute=False)
 
-        self.assertEqual(result.deleted, ("robotics/c_old",))
+        self.assertEqual([r for r, _ in result.reclaimed], ["robotics/c_old"])
         self.assertFalse(result.executed)
         self.assertTrue((root / "robotics" / "c_old").is_dir())  # 还在
 
@@ -257,7 +260,7 @@ class ExecuteTests(unittest.TestCase):
         root, plan = self._setup()
         result = execute_plan(plan, root, execute=True)
 
-        self.assertEqual(result.deleted, ("robotics/c_old",))
+        self.assertEqual([r for r, _ in result.reclaimed], ["robotics/c_old"])
         self.assertFalse((root / "robotics" / "c_old").exists())
         self.assertTrue((root / "robotics" / "c_new").is_dir())  # 保护期内的没动
         self.assertEqual(result.freed_bytes, 100)
@@ -268,7 +271,7 @@ class ExecuteTests(unittest.TestCase):
         (root / "robotics" / "c_old" / KEEP_MARKER).write_text("", encoding="utf-8")
 
         result = execute_plan(plan, root, execute=True)
-        self.assertEqual(result.deleted, ())
+        self.assertEqual(result.reclaimed, ())
         self.assertEqual([label for label, _ in result.skipped], ["robotics/c_old"])
         self.assertTrue((root / "robotics" / "c_old").is_dir())
 
@@ -298,3 +301,126 @@ class ExecuteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeAliyun:
+    """记录调用并给出预设返回，让 Evict 逻辑无需真实 CPFS 即可测试。"""
+
+    def __init__(self, dataflows, task_id="task-1"):
+        self.dataflows = dataflows
+        self.task_id = task_id
+        self.calls = []
+
+    def __call__(self, command):
+        self.calls.append(list(command))
+        if "DescribeDataFlows" in command:
+            body = {"DataFlowInfo": {"DataFlow": self.dataflows}}
+        else:
+            body = {"TaskId": self.task_id}
+        return CommandResult(0, json.dumps(body), "")
+
+    def last(self, flag):
+        cmd = self.calls[-1]
+        return cmd[cmd.index(flag) + 1] if flag in cmd else None
+
+
+class CpfsEvictTests(unittest.TestCase):
+    def _release(self, path="/mnt/cpfs/datasets/robotics/c1"):
+        return ReleaseInfo(
+            dataset="robotics",
+            commit_id="c1",
+            path=Path(path),
+            size_bytes=100,
+            file_count=1,
+            created_at=NOW,
+            manifest_sha256="a" * 64,
+            repository="robotics-data",
+            pinned=False,
+            ready=True,
+        )
+
+    def _strategy(self, runner, mount_prefix="/mnt/cpfs"):
+        return CpfsEvictStrategy(
+            filesystem_id="cpfs-0001baad3c95cb4a",
+            region="cn-hangzhou",
+            mount_prefix=mount_prefix,
+            runner=runner,
+        )
+
+    def test_translates_mount_path_to_filesystem_path(self):
+        # 这两个是不同坐标系，混用会作用到错误的目录上
+        s = self._strategy(FakeAliyun([]))
+        self.assertEqual(
+            s.filesystem_path(self._release("/mnt/cpfs/datasets/robotics/c1")),
+            "/datasets/robotics/c1",
+        )
+
+    def test_rejects_release_outside_the_mount_prefix(self):
+        s = self._strategy(FakeAliyun([]))
+        with self.assertRaises(DatasetSinkError) as ctx:
+            s.filesystem_path(self._release("/elsewhere/robotics/c1"))
+        self.assertIn("不在挂载点", str(ctx.exception))
+
+    def test_submits_evict_task_with_data_only(self):
+        fake = FakeAliyun([{"DataFlowId": "df-1", "FileSystemPath": "/datasets"}])
+        note = self._strategy(fake).reclaim(self._release())
+
+        self.assertIn("df-1", note)
+        self.assertIn("task-1", note)
+        self.assertEqual(fake.last("--TaskAction"), "Evict")
+        # 只释放数据块、保留元数据，正是 Evict 相对硬删的价值所在
+        self.assertEqual(fake.last("--DataType"), "Data")
+        # Directory 要求首尾都是斜杠
+        self.assertEqual(fake.last("--Directory"), "/datasets/robotics/c1/")
+        self.assertEqual(fake.last("--DataFlowId"), "df-1")
+
+    def test_picks_the_most_specific_dataflow(self):
+        fake = FakeAliyun(
+            [
+                {"DataFlowId": "df-root", "FileSystemPath": "/"},
+                {"DataFlowId": "df-deep", "FileSystemPath": "/datasets/robotics"},
+                {"DataFlowId": "df-mid", "FileSystemPath": "/datasets"},
+            ]
+        )
+        self._strategy(fake).reclaim(self._release())
+        self.assertEqual(fake.last("--DataFlowId"), "df-deep")
+
+    def test_sibling_prefix_does_not_count_as_covering(self):
+        # /datasets-old 不覆盖 /datasets/...，不能只靠字符串前缀判断
+        fake = FakeAliyun([{"DataFlowId": "df-x", "FileSystemPath": "/datasets-old"}])
+        with self.assertRaises(DatasetSinkError):
+            self._strategy(fake).reclaim(self._release())
+
+    def test_no_dataflow_fails_instead_of_falling_back_to_delete(self):
+        # 静默退化成硬删是最危险的：操作者以为只释放了缓存，实际目录没了
+        fake = FakeAliyun([])
+        with self.assertRaises(DatasetSinkError) as ctx:
+            self._strategy(fake).reclaim(self._release())
+        self.assertIn("不在任何数据流动的范围内", str(ctx.exception))
+
+    def test_dataflow_lookup_is_cached_across_releases(self):
+        fake = FakeAliyun([{"DataFlowId": "df-1", "FileSystemPath": "/datasets"}])
+        s = self._strategy(fake)
+        s.reclaim(self._release("/mnt/cpfs/datasets/robotics/c1"))
+        s.reclaim(self._release("/mnt/cpfs/datasets/robotics/c1"))
+        describes = [c for c in fake.calls if "DescribeDataFlows" in c]
+        self.assertEqual(len(describes), 1)
+
+    def test_evict_failure_is_reported_as_skipped_not_a_crash(self):
+        tmp = Path(tempfile.mkdtemp())
+        root = _make_root(tmp, [("robotics", "c_old", 300, 100, True, False)])
+        plan = plan_reclaim(
+            scan_releases(root),
+            now=NOW,
+            min_age_days=14,
+            keep_last=0,
+            recoverability_probe=AssumeRecoverable(),
+        )
+        # 挂载前缀对不上 → 策略抛错 → 该条跳过，目录必须原封不动
+        strategy = self._strategy(FakeAliyun([]), mount_prefix="/mnt/cpfs")
+        result = execute_plan(plan, root, execute=True, strategy=strategy)
+
+        self.assertEqual(result.reclaimed, ())
+        self.assertEqual(len(result.skipped), 1)
+        self.assertTrue((root / "robotics" / "c_old").is_dir())
+        self.assertEqual(result.strategy, "cpfs-evict")
