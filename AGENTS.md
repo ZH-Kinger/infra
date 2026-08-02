@@ -16,6 +16,10 @@
 4. **已发布的 release 目录不可改写。** 同 Commit 重复沉降是幂等 no-op；同 Commit 不同 Manifest 必须报错，不许覆盖。
 5. **不引入运行时第三方依赖。** 核心逻辑保持零依赖（`pyproject.toml` 的 `dependencies = []`）；lakeFS/boto3 只在 optional extras 里，并在导入处做降级处理。
 6. **不挂载可变引用。** 代码和模板里不得出现 `latest`、Branch 名或日期作为数据版本标识；只用 Commit ID。
+7. **已发布的 release 路径上禁止配 CPFS 数据流动的 AutoRefresh。**
+   `AutoRefreshPolicy = ImportChanged` 会让 CPFS 目录跟随 OSS 变化，直接破坏
+   release 的不可变性。预热（`Import`）和沉淀（`Export`）是一次性任务，可以用；
+   自动刷新不行。
 
 ## 常用命令
 
@@ -55,6 +59,14 @@ make hooks         # pre-commit run --all-files
 
 ## 已知踩坑
 
+- **CPFS 开通本来就要很久（一小时以上是正常的）。** 长时间 `Pending` 不是卡住，
+  不要据此判定失败去删——而且 `Pending` 状态下 `DeleteFileSystem` 会报
+  `OperationDenied.InvalidState`，删也删不掉。要等就老实等，别自作聪明加自动清理。
+- **CPFS 最小容量 3600 GiB**，且 `advance_100` / `advance_200` 按可用区分别有库存，
+  `Resource.OutOfStock` 很常见；先用 `--DryRun true` 逐个可用区探库存再真建。
+- **CPFS 只支持部分可用区**（本账号 cn-hangzhou 只有 g/h/i），而现有 vSwitch 往往
+  不在这些区里。vSwitch 免费，缺就建。
+- **`nas` 系 API 的 `Description` 不接受中文**，会报 `IllegalCharacters`。
 - **`aliyun` CLI 的 profile 默认 region 可能与资源所在 region 不一致**（本账号 profile 是 `cn-shanghai`，PAI Workspace 在 `cn-hangzhou`）。所有命令显式带 `--region`。
 - **`aiworkspace` 产品必须显式 `--endpoint aiworkspace.<region>.aliyuncs.com`**，否则报 unknown endpoint。
 - **zsh 不做未加引号变量的单词切分。** 不要把多个 CLI flag 塞进一个变量再展开，会被当成单个参数。
