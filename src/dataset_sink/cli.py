@@ -496,6 +496,8 @@ def _commit(args: argparse.Namespace) -> dict:
     metadata = build_commit_metadata(
         manifest=manifest,
         paimon_snapshot_id=args.paimon_snapshot_id,
+        # 记下可读前缀，供后续用 CPFS 数据流动预热这个 Commit。
+        object_store_uri=uri,
     )
     message = args.message or (
         f"dataset-sink import {destination} "
@@ -522,6 +524,7 @@ def _commit(args: argparse.Namespace) -> dict:
         "object_store_uri": result.object_store_uri,
         "destination": destination,
         "manifest_sha256": manifest.sha256,
+        "object_store_uri_recorded": uri,
     }
 
 

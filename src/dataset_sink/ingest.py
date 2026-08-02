@@ -714,6 +714,7 @@ def build_commit_metadata(
     manifest: Manifest,
     scan: Optional[ScanResult] = None,
     paimon_snapshot_id: Optional[str] = None,
+    object_store_uri: Optional[str] = None,
     extra: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
     """构造附在 Commit 上的元数据。
@@ -721,6 +722,11 @@ def build_commit_metadata(
     `manifest_sha256` 是整条链路的关联键：它同时出现在 lakeFS Commit、
     CPFS 的 release.json、PAI Dataset Version 的 Label 和训练容器的环境变量里。
     四处独立记录、交叉校验，任何一处对不上，training-guard 都会拦下来。
+
+    `object_store_uri` 记的是这批字节在对象存储里的**可读前缀**。之所以拿得到
+    这个值，是因为我们建 Commit 一律走零拷贝 import——对象从没被搬进 lakeFS
+    自己的命名空间，物理地址就是原始前缀。有了它，CPFS 数据流动才能按路径把
+    这个 Commit 预热进 CPFS；否则只能退回到逐个对象走 S3 Gateway 拷贝。
     """
     metadata: Dict[str, str] = {
         "manifest_sha256": manifest.sha256,
@@ -733,6 +739,8 @@ def build_commit_metadata(
         metadata["total_bytes"] = str(manifest.declared_size_bytes)
     if paimon_snapshot_id:
         metadata["paimon_snapshot_id"] = paimon_snapshot_id
+    if object_store_uri:
+        metadata["object_store_uri"] = object_store_uri
     if extra:
         metadata.update({str(k): str(v) for k, v in extra.items()})
     return metadata

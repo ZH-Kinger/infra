@@ -381,13 +381,19 @@ class CpfsEvictStrategy:
     CPFS 按需从绑定的 OSS 源存储加载。所以 **PAI Dataset Version 不会失效**，
     也不需要重跑 materialize——这是它比硬删好的地方。
 
-    三个前提，任一不满足都会失败而不是降级：
+    四个前提，任一不满足都会失败而不是降级：
 
-    1. 该 release 的路径必须落在某个已建好的**数据流动（DataFlow）**下面。
+    1. **数据必须已经在源存储里。** Evict 只释放本地数据块，它不负责把数据送去
+       OSS——预热和沉淀都是「复制」，Evict 是唯一真正释放空间的动作，三者不能
+       互相替代。所以对 `certify` 直接在 CPFS 上发布出来的 release，Evict 之前
+       必须确认 OSS 上确实有对应的一份（本项目里由 `archive` 保证）。落在
+       DataFlow 范围内是**必要条件而非充分条件**——路径被管理不等于这批文件
+       已经同步过去了。
+    2. 该 release 的路径必须落在某个已建好的**数据流动（DataFlow）**下面。
        Evict 的含义是「把缓存还给源存储」，没有源存储就无从谈起。
-    2. 文件系统必须支持 Evict。官方文档明写灵骏 BMCPFS 只支持
+    3. 文件系统必须支持 Evict。官方文档明写灵骏 BMCPFS 只支持
        Import/Export/StreamImport/StreamExport，**不支持 Evict**。
-    3. 传给 API 的是**文件系统内部路径**，不是挂载路径。这两者是不同坐标系，
+    4. 传给 API 的是**文件系统内部路径**，不是挂载路径。这两者是不同坐标系，
        和 `pai-request` 的 `release_dir` / `--filesystem-path` 是同一个坑。
     """
 
