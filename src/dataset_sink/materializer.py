@@ -183,11 +183,14 @@ class Materializer:
         release_file = release_dir / "release.json"
         ready_file = release_dir / "_READY"
         if not release_file.exists() or not ready_file.exists():
-            raise ReleaseConflictError(f"incomplete immutable release already exists: {release_dir}")
+            raise ReleaseConflictError(
+                f"incomplete immutable release already exists: {release_dir}"
+            )
         value = json.loads(release_file.read_text(encoding="utf-8"))
         if value.get("manifest_sha256") != manifest_sha256:
             raise ReleaseConflictError(
-                f"release {release_dir} exists with a different manifest; immutable paths cannot be overwritten"
+                f"release {release_dir} exists with a different manifest; "
+                "immutable paths cannot be overwritten"
             )
         return MaterializationResult(**value)
 
@@ -257,7 +260,9 @@ def certify_prepared_release(
     if prepared == root or prepared == Path(prepared.anchor):
         raise ValueError("prepared_dir cannot be the target root or filesystem root")
     if prepared.stat().st_dev != root.stat().st_dev:
-        raise ValueError("prepared_dir and target_root must be on the same filesystem for atomic publish")
+        raise ValueError(
+            "prepared_dir and target_root must be on the same filesystem for atomic publish"
+        )
 
     release_dir = root / dataset / commit_id
     lock_dir = root / ".locks" / dataset
@@ -272,9 +277,7 @@ def certify_prepared_release(
 
         expected_paths = {entry.target_path for entry in manifest.entries}
         actual_paths = {
-            path.relative_to(prepared).as_posix()
-            for path in prepared.rglob("*")
-            if path.is_file()
+            path.relative_to(prepared).as_posix() for path in prepared.rglob("*") if path.is_file()
         }
         if actual_paths != expected_paths:
             missing = sorted(expected_paths - actual_paths)

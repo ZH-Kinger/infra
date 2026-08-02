@@ -54,7 +54,9 @@ case "$arn" in
     ;;
 esac
 
-section "PAI Workspace（region=$REGION）"
+# 变量后面紧跟中文时必须用 ${} 界定：/bin/sh 会把全角字符的字节当成变量名的
+# 一部分，配合 set -u 会报 "REGION?: unbound variable"。
+section "PAI Workspace (region=${REGION})"
 # shellcheck disable=SC2086
 workspaces=$(aliyun aiworkspace GET /api/v1/workspaces $P --region "$REGION" --endpoint "$AIWS_ENDPOINT" 2>&1) || true
 echo "$workspaces" | head -40
@@ -101,14 +103,21 @@ aliyun ims ListOIDCProviders $P 2>&1 | head -20 || true
 
 section "RAM 用户（填 pai_members 的 user_id 用）"
 # shellcheck disable=SC2086
+# f-string 表达式里不能出现反斜杠转义的引号（Python 3.12 之前是语法错误），
+# 所以先取值到变量再格式化。
 aliyun ram ListUsers $P 2>&1 | python3 -c '
 import json,sys
 try:
     d=json.load(sys.stdin)
 except Exception:
-    print("(无法解析，可能无权限)"); raise SystemExit
-for u in d.get("Users",{}).get("User",[]):
-    print(f"  {u.get(\"UserName\",\"?\"):24} UserId={u.get(\"UserId\",\"?\")}")
+    print("(无法解析，可能无权限或未配置凭证)"); raise SystemExit
+users = d.get("Users",{}).get("User",[])
+if not users:
+    print("(没有 RAM 用户)")
+for u in users:
+    name = u.get("UserName","?")
+    uid = u.get("UserId","?")
+    print("  {:24} UserId={}".format(name, uid))
 ' 2>&1 | head -30 || true
 
 draft="$OUT_DIR/access.auto.tfvars.draft"

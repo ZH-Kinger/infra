@@ -27,9 +27,7 @@ class AliyunCliTests(unittest.TestCase):
             commands.append(list(command))
             return CommandResult(0, '{"RequestId":"dry-run"}', "")
 
-        result = register_pai_dataset_version(
-            request(), region="cn-hangzhou", runner=runner
-        )
+        result = register_pai_dataset_version(request(), region="cn-hangzhou", runner=runner)
         self.assertEqual(result["status"], "DRY_RUN")
         self.assertEqual(len(commands), 1)
         self.assertIn("--dryrun", commands[0])
@@ -72,4 +70,3 @@ class AliyunCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

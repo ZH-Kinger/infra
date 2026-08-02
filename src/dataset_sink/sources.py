@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager, closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import BinaryIO, ContextManager, Iterator, Protocol
 
@@ -9,8 +9,7 @@ from .manifest import ManifestEntry
 
 
 class SourceReader(Protocol):
-    def open(self, commit_id: str, entry: ManifestEntry) -> ContextManager[BinaryIO]:
-        ...
+    def open(self, commit_id: str, entry: ManifestEntry) -> ContextManager[BinaryIO]: ...
 
 
 class LocalSourceReader:

@@ -52,11 +52,8 @@ class TrainingGuardTests(unittest.TestCase):
             self.assertEqual(result["guard"], "PASSED")
 
             with self.assertRaises(IntegrityError):
-                validate_training_dataset(
-                    Path(release.release_path), expected_commit="wrong"
-                )
+                validate_training_dataset(Path(release.release_path), expected_commit="wrong")
 
 
 if __name__ == "__main__":
     unittest.main()
-

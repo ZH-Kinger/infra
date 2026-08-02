@@ -29,4 +29,3 @@ def resolve_reference(
     if not commit_id:
         raise RuntimeError(f"lakeFS returned an empty commit for reference {reference!r}")
     return str(commit_id)
-

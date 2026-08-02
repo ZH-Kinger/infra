@@ -17,7 +17,7 @@ class ManifestEntry:
     sha256: Optional[str] = None
 
     @classmethod
-    def from_dict(cls, value: dict, line_number: int) -> "ManifestEntry":
+    def from_dict(cls, value: dict, line_number: int) -> ManifestEntry:
         source_key = value.get("source_key")
         target_path = value.get("target_path")
         if not isinstance(source_key, str) or not source_key.strip():
@@ -35,7 +35,9 @@ class ManifestEntry:
         digest = value.get("sha256")
         if digest is not None:
             if not isinstance(digest, str) or len(digest) != 64:
-                raise ManifestError(f"line {line_number}: sha256 must contain 64 hexadecimal characters")
+                raise ManifestError(
+                    f"line {line_number}: sha256 must contain 64 hexadecimal characters"
+                )
             try:
                 int(digest, 16)
             except ValueError as exc:
@@ -57,7 +59,7 @@ class Manifest:
     raw_bytes: bytes
 
     @classmethod
-    def load(cls, path: Path) -> "Manifest":
+    def load(cls, path: Path) -> Manifest:
         raw = path.read_bytes()
         entries = []
         targets = set()
@@ -73,7 +75,9 @@ class Manifest:
                 raise ManifestError(f"line {line_number}: each line must be a JSON object")
             entry = ManifestEntry.from_dict(value, line_number)
             if entry.target_path in targets:
-                raise ManifestError(f"line {line_number}: duplicate target_path {entry.target_path!r}")
+                raise ManifestError(
+                    f"line {line_number}: duplicate target_path {entry.target_path!r}"
+                )
             targets.add(entry.target_path)
             entries.append(entry)
 
@@ -116,4 +120,3 @@ def dump_manifest(entries: Iterable[ManifestEntry], path: Path) -> None:
             value["sha256"] = entry.sha256
         lines.append(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-

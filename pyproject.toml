@@ -44,10 +44,23 @@ select = [
 ]
 ignore = [
     "S101", # assert is fine in tests
+
+    # 这个包 target py39 并统一使用 typing.Optional/Dict/List。
+    # 改成 PEP 604/585 写法要动 25+ 处注解（含最关键的原子发布路径），
+    # 是纯粹的风格 churn、零功能收益。保持现有风格一致比追新写法重要。
+    "UP006", # non-pep585-annotation: Dict -> dict
+    "UP035", # deprecated-import: typing.Dict 等
+    "UP045", # non-pep604-annotation-optional: Optional[X] -> X | None
 ]
 
 [tool.ruff.lint.per-file-ignores]
 # subprocess with a caller-supplied CLI path is the whole point of aliyun_cli.
 "src/dataset_sink/aliyun_cli.py" = ["S603"]
+
+# os.rename / os.replace 在这里是刻意的：整个发布协议依赖 rename 的原子性，
+# 而 os.replace 的文档明确写了 POSIX 上原子。Path.replace 虽然等价，
+# 但读代码时不如 os.replace 直白地表达「这一步必须原子」。
+"src/dataset_sink/materializer.py" = ["PTH104", "PTH105"]
+
 "tests/**" = ["S105", "S106", "S108"]
 

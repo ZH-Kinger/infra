@@ -49,7 +49,8 @@ make hooks         # pre-commit run --all-files
 
 - Python 目标版本 `py39`，行宽 100，`ruff` 管 lint 和 format，配置在 `pyproject.toml`。
 - 新代码沿用现有风格：`from __future__ import annotations`、`dataclass(frozen=True)` 表示结果对象、错误统一抛 `DatasetSinkError` 子类。
-- Terraform 用 `snake_case`，两空格缩进，变量必须有 `description` 和 `type`，策略优先用 `data "alicloud_ram_policy_document"` 而不是手写 JSON 字符串。
+- Terraform 用 `snake_case`，两空格缩进，变量必须有 `description` 和 `type`。
+- RAM 策略用 `jsonencode` 的 `locals`，不用 `data "alicloud_ram_policy_document"`：前者的渲染结果直接就是 `deploy/ram/*.json` 需要的内容，且不依赖 Provider data source schema。
 - Shell 脚本用 `#!/bin/sh` + `set -eu`，通过 `shellcheck`。
 
 ## 已知踩坑
@@ -57,6 +58,9 @@ make hooks         # pre-commit run --all-files
 - **`aliyun` CLI 的 profile 默认 region 可能与资源所在 region 不一致**（本账号 profile 是 `cn-shanghai`，PAI Workspace 在 `cn-hangzhou`）。所有命令显式带 `--region`。
 - **`aiworkspace` 产品必须显式 `--endpoint aiworkspace.<region>.aliyuncs.com`**，否则报 unknown endpoint。
 - **zsh 不做未加引号变量的单词切分。** 不要把多个 CLI flag 塞进一个变量再展开，会被当成单个参数。
+- **`$VAR` 后面紧跟中文必须写成 `${VAR}`。** `/bin/sh` 会把全角字符的字节当成变量名的一部分，配合 `set -u` 报 `VAR?: unbound variable`。
+- **Python 3.12 之前，f-string 表达式里不能有反斜杠转义的引号。** 在 `python3 -c '...'` 里尤其容易踩到，先取值到变量再格式化。
+- **heredoc 会占用 stdin。** `printf '%s' "$x" | python3 - <<'PY'` 里 python 从 heredoc 读程序，管道数据被丢弃；要传数据就写临时文件。
 - **CPFS 挂载路径 ≠ CPFS 文件系统内部路径。** `pai-request` 的 `release_dir` 是挂载视角，`--filesystem-path` 是文件系统内部视角，两者不能混用。
 - **`terraform` 不在 homebrew-core**（BUSL 许可），需 `brew install hashicorp/tap/terraform`。
 - **本环境 `registry.terraform.io` 被网络策略拦截**，Provider schema 只能靠 `terraform validate` 核对，不要凭记忆写字段。

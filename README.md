@@ -1,263 +1,167 @@
 # lakeFS → CPFS Dataset Sink
 
-把 lakeFS 的不可变 Commit 沉降成 CPFS 上可供阿里云 PAI DSW/DLC 只读挂载的数据集版本。
+把 lakeFS 的不可变 Commit 沉降成 CPFS 上可供阿里云 PAI DSW/DLC 只读挂载的数据集版本，
+并用 Terraform + GitHub Actions 交付这套系统的基础设施与权限。
 
-这个程序解决的是发布边界，而不是用 CPFS 代替 lakeFS：
+这个项目解决的是**发布边界**，不是用 CPFS 替代 lakeFS：
 
 ```text
 lakeFS Commit + Paimon Snapshot + JSONL Manifest
                     ↓
         CPFS .materializing 临时目录
                     ↓
-         大小/SHA-256 完整性校验
+         大小 / SHA-256 完整性校验
                     ↓
     <cpfs-root>/<dataset>/<commit>/_READY
                     ↓
-          PAI Dataset Version 请求
+          PAI Dataset Version 注册
+                    ↓
+        DSW / DLC 只读挂载 + 启动门禁
 ```
 
-## 当前包含
+要立的规矩只有一条：
 
-- lakeFS Tag/Branch 到 Commit ID 的解析。
-- 通过 lakeFS S3 Gateway 读取固定 Commit。
-- 本地源适配器，方便开发和测试。
-- 并行写入 CPFS 临时目录。
-- CPFS-first 场景下校验 Staging 后零复制原子发布。
-- 文件大小和 SHA-256 校验。
-- 同一 Commit 幂等、不同 Manifest 禁止覆盖。
-- CPFS 上的进程锁和原子目录发布。
-- `release.json`、`manifest.jsonl` 和 `_READY` 发布协议。
-- 生成并通过阿里云 CLI 注册 PAI `CreateDatasetVersion`，默认仅 dry-run。
-- DLC/DSW 训练启动门禁：校验 Commit、Manifest checksum 和 Paimon Snapshot。
-- DLC 只读数据集挂载、RAM 最小权限及本地 E2E 示例。
+> **任何投喂给训练的数据集，必须对应 lakeFS 上的一个 Commit Hash；
+> 严禁裸读 OSS，严禁挂载可变 Branch 或 `latest`。**
 
-程序不保存阿里云凭证。生产环境由 CI/CD 使用 RAM Role 的临时身份执行阿里云 CLI；不要把 AccessKey 写入仓库、镜像或聊天记录。
+`training-guard` 让这条规矩成为技术强制点，而不是流程约定——校验不过，训练不启动。
 
-## Manifest 格式
+---
 
-Manifest 是 JSONL，每行一个源对象：
+## 文档
 
-```json
-{"source_key":"raw/episode-000001.tar","target_path":"shards/train-000001.tar","size_bytes":1073741824,"sha256":"<64 hex chars>"}
-```
+| 你是谁 / 想干什么 | 看这篇 |
+|---|---|
+| 想用已发布的数据集训练 | [使用入门](docs/onboarding.md) |
+| 想理解整体设计和取舍 | [整体架构](docs/architecture.md) |
+| 关心权限怎么隔离、怎么防提权 | [权限模型](docs/permissions.md) |
+| 关心流水线怎么跑、审批在哪 | [CI/CD](docs/cicd.md) |
+| 要初始化环境或排查故障 | [运维手册](docs/runbook.md) |
+| 要改这个仓库的代码 | [仓库约定](AGENTS.md) |
 
-字段：
+---
 
-- `source_key`：lakeFS Repository 内的逻辑对象路径。
-- `target_path`：CPFS Release 内的相对路径。
-- `size_bytes`：可选但生产环境建议必填。
-- `sha256`：可选但生产环境建议必填。
+## 快速开始
 
-Paimon/Flink 导出任务负责根据动作类型、质量分和标注状态生成该 Manifest，并把对应的 Paimon Snapshot ID 传给沉降任务。
-
-## 本地验证
-
-不安装任何第三方包即可执行测试：
+不装任何第三方包即可跑通全部本地验证：
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -v
+make test    # 12 个单元测试，离线、无需云凭证
+make e2e     # 全链路演练：沉降 → 深度校验 → 训练门禁 → 生成 PAI 请求
+make help    # 全部可用目标
 ```
 
-本地模拟沉降：
+`make e2e` 在临时 POSIX 目录里模拟 CPFS，不连接阿里云，不产生费用。
+
+---
+
+## 命令一览
 
 ```bash
-mkdir -p /tmp/dataset-source/raw
-printf data > /tmp/dataset-source/raw/sample.bin
+# 从 lakeFS 沉降并发布
+dataset-sink materialize --dataset robotics --repository robotics-data \
+  --ref robotics-v2026.08.02.1 --manifest /work/manifest.jsonl \
+  --source lakefs-s3 --target-root /mnt/cpfs/datasets --workers 32
 
-PYTHONPATH=src python3 -m dataset_sink.cli materialize \
-  --dataset robotics \
-  --repository robotics-data \
-  --commit 6f2b7c91c2 \
-  --manifest examples/manifest.jsonl \
-  --source local \
-  --local-source-root /tmp/dataset-source \
-  --target-root /tmp/cpfs
+# 数据已在 CPFS Staging：零复制原子发布（同文件系统 rename，秒级）
+dataset-sink certify --prepared-dir /mnt/cpfs/staging/batch-001 \
+  --target-root /mnt/cpfs/datasets --dataset robotics \
+  --repository robotics-data --commit 6f2b7c91c2 \
+  --source-reference robotics-v2026.08.02.1 --manifest /work/manifest.jsonl
+
+# 校验（--deep 重算全部 SHA-256）
+dataset-sink verify /mnt/cpfs/datasets/robotics/6f2b7c91c2 --deep
+
+# 生成 PAI 注册请求（纯本地计算，不需要云权限）
+dataset-sink pai-request /mnt/cpfs/datasets/robotics/6f2b7c91c2 \
+  --dataset-id d-example --region cn-hangzhou \
+  --filesystem-id cpfs-example \
+  --filesystem-path /datasets/robotics/6f2b7c91c2 \
+  --uri nas://cpfs-example.cn-hangzhou/datasets/robotics/6f2b7c91c2/
+
+# 注册（默认 dry-run，--execute 才真正写入，且按 Commit 幂等查重）
+dataset-sink register-pai /work/pai-request.json --region cn-hangzhou --execute
+
+# 训练容器内的启动门禁
+dataset-sink training-guard --dataset-root /mnt/dataset \
+  --expected-commit "$DATASET_COMMIT" \
+  --expected-manifest-sha256 "$DATASET_MANIFEST_SHA256"
 ```
 
-验证 Release：
+注意 `release_dir`（执行机上的挂载视角）与 `--filesystem-path`（CPFS 文件系统内部
+视角）是两个不同的坐标，混用是接入期最常见的错误。
 
-```bash
-PYTHONPATH=src python3 -m dataset_sink.cli verify \
-  /tmp/cpfs/robotics/6f2b7c91c2 --deep
-```
+连接真实 lakeFS 需要 `pip install -e '.[all]'` 并注入
+`LAKEFS_API_ENDPOINT` / `LAKEFS_S3_ENDPOINT` / `LAKEFS_ACCESS_KEY_ID` /
+`LAKEFS_SECRET_ACCESS_KEY`。程序本身不保存任何凭证。
 
-默认验证只检查 `release.json`、Manifest 和 `_READY` 的一致性；`--deep` 会重新读取并哈希所有数据文件，适合发布门禁或抽样调度，不建议每个训练任务启动时执行全量深度校验。
+---
 
-## 连接 lakeFS
-
-安装可选依赖：
-
-```bash
-python -m pip install -e '.[all]'
-```
-
-通过环境变量注入 lakeFS 凭证：
-
-```bash
-export LAKEFS_API_ENDPOINT=https://lakefs.internal
-export LAKEFS_S3_ENDPOINT=https://s3.lakefs.internal
-export LAKEFS_ACCESS_KEY_ID='<runtime secret>'
-export LAKEFS_SECRET_ACCESS_KEY='<runtime secret>'
-```
-
-使用 Tag 触发沉降：
-
-```bash
-dataset-sink materialize \
-  --dataset robotics \
-  --repository robotics-data \
-  --ref robotics-v2026.08.02.1 \
-  --lakefs-tag robotics-v2026.08.02.1 \
-  --paimon-snapshot-id 1842 \
-  --manifest /work/manifest.jsonl \
-  --source lakefs-s3 \
-  --target-root /mnt/cpfs/datasets \
-  --workers 32
-```
-
-程序会先解析 Tag，后续所有读取都使用 Commit ID，而不会继续读取可变 Branch。
-
-## 数据已经在 CPFS：零复制发布
-
-如果采集和预处理结果已经写入 CPFS Staging，目录内部应直接采用 Manifest 的 `target_path` 布局：
-
-```text
-/mnt/cpfs/staging/batch-20260802-001/
-└── shards/
-    └── train-000000.bin
-```
-
-完成 OSS 归档和 lakeFS Commit 后执行：
-
-```bash
-dataset-sink certify \
-  --prepared-dir /mnt/cpfs/staging/batch-20260802-001 \
-  --target-root /mnt/cpfs/datasets \
-  --dataset robotics \
-  --repository robotics-data \
-  --source-reference robotics-v2026.08.02.1 \
-  --commit 6f2b7c91c2 \
-  --lakefs-tag robotics-v2026.08.02.1 \
-  --paimon-snapshot-id 1842 \
-  --manifest /work/manifest.jsonl
-```
-
-该命令会全量检查 Staging 中的文件集合、大小和 SHA-256，然后在同一 CPFS 文件系统内通过目录 rename 发布，不会再从 OSS 读取或复制数据。发布后原 Staging 目录不再存在。
-
-## CPFS 发布结果
+## 发布结果与协议
 
 ```text
 /mnt/cpfs/datasets/
-├── .locks/
-├── .materializing/
+├── .locks/                       # 进程锁
+├── .materializing/               # 未完成的沉降只存在于此
 └── robotics/
-    └── 6f2b7c91c2/
-        ├── manifest.jsonl
-        ├── release.json
+    └── 6f2b7c91c2/               # 目录名就是 lakeFS Commit，不可变
         ├── shards/
-        └── _READY
+        ├── manifest.jsonl
+        ├── release.json          # commit / manifest_sha256 / paimon_snapshot_id
+        └── _READY                # 最后写入；没有它的目录一律视为不可用
 ```
 
-PAI 只能挂载 `robotics/6f2b7c91c2/`，不能挂载 `.materializing`、`latest` 或 lakeFS Branch 名称。
+同一 Commit 重复沉降是幂等 no-op；同一 Commit 携带不同 Manifest 会报
+`ReleaseConflictError` 而不是覆盖。PAI 只能挂载 `<dataset>/<commit>/`。
 
-## 生成 PAI Dataset Version 请求
+---
 
-CPFS 在执行沉降程序的机器上可能挂载到 `/mnt/cpfs`，但 PAI OpenAPI 需要 CPFS 文件系统内部路径，所以两者分开传递：
+## 目录结构
 
-```bash
-dataset-sink pai-request \
-  /mnt/cpfs/datasets/robotics/6f2b7c91c2 \
-  --dataset-id d-example \
-  --region cn-hangzhou \
-  --filesystem-id cpfs-example \
-  --filesystem-path /datasets/robotics/6f2b7c91c2 \
-  --uri nas://cpfs-example.cn-hangzhou/datasets/robotics/6f2b7c91c2/ \
-  --output /work/pai-request.json
+```
+src/dataset_sink/   Python 逻辑（零运行时依赖，lakeFS/boto3 在 optional extras）
+tests/unit/         离线单元测试
+tests/integration/  需真实环境，缺环境变量时 skip
+infra/bootstrap/    本地 state：state 后端 + OIDC 信任锚 + 三个 CI 角色
+infra/modules/      ci-oidc-role / dataset-sink-roles / pai-workspace-access
+infra/envs/         dev|prod × platform|access，四套独立 state
+deploy/ram/         RAM 策略副本（自动生成，勿手改）
+deploy/pai/         DLC 作业模板与训练入口
+scripts/            本地演练、策略渲染、只读探测
+docs/               架构 / 权限 / CI/CD / 运维 / 使用
 ```
 
-输出中包含：
+---
 
-- `POST /api/v1/datasets/{DatasetId}/versions`
-- `DataSourceType=CPFS`
-- `SourceId=<lakeFS commit>`
-- `lakefs_commit` 和 `manifest_sha256` 标签
-- CPFS `ImportInfo`
+## 身份隔离摘要
 
-CI/CD 再使用独立的 `DatasetRegisterRole` 调用 PAI OpenAPI。该角色只需要 `paidataset:CreateDatasetVersion`，不需要裸 OSS 读取权限。
+沉降、注册、训练是**三个不同的信任级别**，任何单个身份泄露都不足以完成一次完整的
+数据污染：
 
-先 dry-run 检查阿里云 CLI 的最终请求：
-
-```bash
-dataset-sink register-pai /work/pai-request.json \
-  --region cn-hangzhou \
-  --profile dataset-register
-```
-
-审批通过后才真正注册；执行前会按 lakeFS Commit 查询已有版本，保证幂等，并拒绝相同 Commit 对应不同 Manifest：
-
-```bash
-dataset-sink register-pai /work/pai-request.json \
-  --region cn-hangzhou \
-  --profile dataset-register \
-  --execute
-```
-
-最小 RAM Policy 见 [`deploy/ram/dataset-register-policy.json`](deploy/ram/dataset-register-policy.json)。由于当前 PAI OpenAPI 对这两个 Action 标记为 All Resource，RAM Policy 本身不能进一步限定 Dataset ID；还需要通过 PAI Workspace 成员角色、独立 CI Role 和流水线环境审批做第二层约束。
-
-## PAI 训练启动约束
-
-DSW/DLC 挂载 CPFS Dataset Version 后，训练入口执行：
-
-```bash
-dataset-sink training-guard \
-  --dataset-root /mnt/dataset \
-  --expected-commit "$DATASET_COMMIT" \
-  --expected-manifest-sha256 "$DATASET_MANIFEST_SHA256" \
-  --expected-paimon-snapshot-id "$PAIMON_SNAPSHOT_ID"
-```
-
-完整启动脚本见 [`examples/pai/training-entrypoint.sh`](examples/pai/training-entrypoint.sh)，DLC `CreateJob` 请求骨架见 [`examples/pai/dlc-create-job.template.json`](examples/pai/dlc-create-job.template.json)。其中 `DataSourceId + DataSourceVersion` 固定数据版本、`MountAccess=RO`，挂载到 `/mnt/dataset`；输出目录使用另一个可写挂载。
-
-训练 Runtime Role 不授予 `oss:GetObject` 到 Landing Bucket 或 lakeFS 后端 Bucket。CPFS 的实际可见范围还要由 PAI 的存储权限资源组和 CPFS Fileset/POSIX 权限约束；RAM 只负责“能否提交作业”，不能替代文件系统权限。
-
-## 身份与权限隔离
-
-| 身份 | 能做什么 | 明确不能做什么 |
+| 身份 | 能做 | 明确不能做 |
 |---|---|---|
-| `DatasetMaterializerRole` | 读取 lakeFS Gateway 的固定 Commit；写 CPFS staging/release | 注册 PAI 版本、提交 GPU 训练、覆盖已发布目录 |
-| `DatasetRegisterRole` | `ListDatasetVersions`、`CreateDatasetVersion` | 读取裸 OSS、写 CPFS、提交 DLC |
-| `DlcSubmitRole` | 提交绑定已审批 Dataset Version 的 DLC Job | 改写数据版本、读取 lakeFS/OSS；Policy 见 [`deploy/ram/dlc-submit-policy.json`](deploy/ram/dlc-submit-policy.json) |
-| `TrainingRuntimeRole` | 只读挂载某个 CPFS release；写独立 output/checkpoint | 访问 landing/lakeFS 后端、写训练集 |
-| 研发 RAM 用户 | 在 PAI Workspace 内使用已发布版本 | 获取长期 lakeFS/OSS 密钥、直接改生产 CPFS release |
+| Materializer | 读 lakeFS 固定 Commit、写 CPFS release | 注册 PAI 版本、提交训练 |
+| Register | 注册 Dataset Version | 读 lakeFS 后端、提交训练 |
+| DlcSubmit | 提交绑定已审批版本的 DLC Job | 改写数据版本、读 lakeFS 后端 |
+| TrainingRuntime | 只读已发布归档、写自己的输出 | 读 lakeFS 后端与 staging |
+| 研发用户组 | 使用已发布版本 | 取长期密钥、改写发布物 |
 
-lakeFS Repository 权限、PAI Workspace 权限和阿里云 RAM 是三套不同的授权面，不能互相替代。CI 中使用短期 STS/OIDC 或可信运行时身份；lakeFS 凭证放 Secret 管理服务并只注入沉降任务。
+CI 侧全部走 GitHub OIDC → RAM 角色 → STS 临时凭证，阿里云侧**没有任何长期
+AccessKey**。完整模型（四套授权面、防提权设计、平台硬限制）见
+[权限模型](docs/permissions.md)。
 
-## 本地端到端演练
+---
 
-```bash
-make test
-make e2e
-```
+## 接入真实环境需要什么
 
-`make e2e` 会在临时 POSIX 目录中模拟 CPFS，依次完成沉降、深度校验、训练门禁和 PAI 请求生成，不会连接阿里云，也不会产生云资源费用。
+本地可以完成全部逻辑与测试；联调必须在与 CPFS/PAI 网络相通的环境进行。
+只需提供资源标识和临时授权方式，**不要发送 AK/SK**：
 
-## 生产接入顺序
+- Region、PAI Workspace ID、Dataset ID、DLC Resource/Quota ID
+- CPFS/BMCPFS 文件系统 ID、文件系统内部路径、VPC 挂载点、PAI 所在 VPC/vSwitch
+- lakeFS 内网 API/S3 Gateway 地址、测试 Repository 与 Tag（凭证走 Secret 注入）
+- Paimon 的真实 Manifest 样例与 Snapshot ID
+- 能挂载 CPFS 的自托管 runner 或 ACK Job 环境
 
-1. Paimon/Flink 导出带 checksum 的 JSONL Manifest。
-2. 在 ACK 或 PAI CPU Job 中挂载 CPFS，执行 `dataset-sink materialize`。
-3. 使用只读 lakeFS Credential，仅允许读取指定 Repository。
-4. 沉降成功后生成 PAI Dataset Version 请求。
-5. CI/CD 使用独立 RAM Role 注册版本。
-6. DSW/DLC 只读挂载该版本，并校验 `_READY` 和 Commit ID。
-
-## 接入真实环境所需信息
-
-本地可以完成逻辑和测试；联调必须在与 CPFS/PAI 网络相通的测试环境运行。只需要提供资源标识和临时授权方式，不要发送 AK/SK：
-
-- Region、PAI Workspace ID、现有 Dataset ID、DLC Resource/Quota ID。
-- CPFS/BMCPFS 文件系统 ID、文件系统内部 release 根路径、VPC 挂载点，以及 PAI 所在 VPC/vSwitch。
-- lakeFS 内网 API/S3 Gateway 地址、测试 Repository 和一个测试 Tag；凭证通过 Secret/环境注入。
-- Paimon Manifest 的真实导出样例与 Snapshot ID。
-- CI 平台及它如何扮演 `DatasetMaterializerRole`、`DatasetRegisterRole`、`DlcSubmitRole`。
-
-优先在非生产 Repository、非生产 CPFS Fileset 和独立 PAI Dataset 中跑首轮联调。
+在目标账号执行 `make discover` 可以自动探测大部分 ID 并生成 tfvars 草稿。
+当前已知阻塞项与解除方式见[运维手册](docs/runbook.md)第 0 节。

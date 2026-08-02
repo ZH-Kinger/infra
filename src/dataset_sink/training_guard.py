@@ -21,20 +21,14 @@ def validate_training_dataset(
         raise IntegrityError(
             f"dataset commit mismatch: expected {expected_commit}, found {release.lakefs_commit}"
         )
-    if (
-        expected_manifest_sha256 is not None
-        and release.manifest_sha256 != expected_manifest_sha256
-    ):
+    if expected_manifest_sha256 is not None and release.manifest_sha256 != expected_manifest_sha256:
         raise IntegrityError("dataset manifest checksum does not match the training request")
     if (
         expected_paimon_snapshot_id is not None
         and release.paimon_snapshot_id != expected_paimon_snapshot_id
     ):
-        raise IntegrityError(
-            "dataset Paimon snapshot does not match the training request"
-        )
+        raise IntegrityError("dataset Paimon snapshot does not match the training request")
     result = asdict(release)
     result["guard"] = "PASSED"
     result["deep_verified"] = deep
     return result
-

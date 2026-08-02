@@ -16,4 +16,3 @@ class ReleaseConflictError(DatasetSinkError):
 
 class OptionalDependencyError(DatasetSinkError):
     """An optional integration dependency is not installed."""
-

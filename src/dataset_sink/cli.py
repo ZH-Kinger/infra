@@ -8,8 +8,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Optional, Sequence
 
-from .errors import DatasetSinkError
 from .aliyun_cli import register_pai_dataset_version
+from .errors import DatasetSinkError
 from .lakefs_refs import resolve_reference
 from .manifest import Manifest
 from .materializer import Materializer, certify_prepared_release, verify_release
@@ -154,9 +154,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         else:
             if not args.expected_commit:
-                raise ValueError(
-                    "training-guard requires --expected-commit or DATASET_COMMIT"
-                )
+                raise ValueError("training-guard requires --expected-commit or DATASET_COMMIT")
             result = validate_training_dataset(
                 args.dataset_root,
                 expected_commit=args.expected_commit,

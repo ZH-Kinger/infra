@@ -4,7 +4,7 @@ import json
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence
 
 from .errors import DatasetSinkError, ReleaseConflictError
 
@@ -161,4 +161,3 @@ def _label_value(labels: Sequence[dict], key: str) -> Optional[str]:
             value = label.get("Value")
             return str(value) if value is not None else None
     return None
-
