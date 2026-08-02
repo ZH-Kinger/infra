@@ -23,6 +23,11 @@ output "developer_group_name" {
   value       = var.developer_group_name == "" ? null : alicloud_ram_group.developers[0].group_name
 }
 
+output "developer_user_names" {
+  description = "该组的权威成员列表。审计「谁能用这个环境的数据集」时看这里"
+  value       = var.developer_group_name == "" ? [] : sort(var.developer_user_names)
+}
+
 output "policy_documents" {
   description = <<-EOT
     渲染后的全部策略 JSON，key 为 RAM 策略名。

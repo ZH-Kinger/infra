@@ -140,6 +140,45 @@ resource "alicloud_ram_group" "developers" {
   force      = true
 }
 
+# 组成员：已有的 RAM 用户通过这里接入本项目。
+#
+# Terraform **不接管用户本身**，也不碰他们已有的其他策略，只决定他属不属于
+# 这个组。用户离场时从列表里删掉即可，不影响他的其他权限。
+#
+# 用 alicloud_ram_user_group_attachment 而不是 alicloud_ram_group_membership：
+# 后者虽然能整体管理成员集合（更权威），但自 Provider 1.267.0 起已废弃、
+# 将来会被移除，不值得用一个注定要迁移的资源换这点便利。
+#
+# 代价是逐个绑定不具备「权威集合」语义：有人在控制台手工加进这个组，
+# Terraform 看不见。下面的 check 块负责把这个盲区暴露出来。
+resource "alicloud_ram_user_group_attachment" "developers" {
+  for_each = var.developer_group_name == "" ? toset([]) : toset(var.developer_user_names)
+
+  group_name = alicloud_ram_group.developers[0].group_name
+  user_name  = each.value
+}
+
+# 组成员漂移检测。
+#
+# 这里用 check 而非 precondition 是有意的：check 失败只产生警告，不阻断。
+# 因为首次 apply 时上面的绑定尚未建立，数据源读到的成员必然少于声明值，
+# 用 precondition 会让第一次 apply 直接失败。漂移检测的正确形态就是告警。
+data "alicloud_ram_users" "in_developer_group" {
+  count = var.developer_group_name == "" ? 0 : 1
+
+  group_name = alicloud_ram_group.developers[0].group_name
+}
+
+check "developer_group_has_no_unmanaged_members" {
+  assert {
+    condition = var.developer_group_name == "" ? true : length(setsubtract(
+      toset([for u in data.alicloud_ram_users.in_developer_group[0].users : u.name]),
+      toset(var.developer_user_names),
+    )) == 0
+    error_message = "用户组 ${var.developer_group_name} 里存在不在 developer_user_names 中的成员，说明有人绕过 Terraform 在控制台手工加了人。请把他们补进 tfvars，或从组里移除。"
+  }
+}
+
 resource "alicloud_ram_group_policy_attachment" "developers" {
   for_each = var.developer_group_name == "" ? toset([]) : toset(concat(
     ["${local.name_prefix}-developer"],

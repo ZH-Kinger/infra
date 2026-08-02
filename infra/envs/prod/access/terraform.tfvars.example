@@ -23,6 +23,14 @@ dataset_bucket = "REPLACE-ME-dataset-archive"
 
 developer_group_name = "pai-prod-developers"
 
+# 已有的 RAM 用户通过这里接入本项目，填登录名（不是 UserId）。
+# Terraform 不接管这些用户，只决定他们属不属于这个组。
+#
+# 注意：显式 Deny 优先于任何 Allow。用户入组后，本项目策略里的 Deny 会覆盖
+# 他通过其他策略已有的权限（例如挂着 AliyunOSSFullAccess 的人也读不了
+# lakeFS 后端桶）。加人前先跑 aliyun ram ListPoliciesForUser 审计一下。
+developer_user_names = []
+
 # PAI Workspace ID（纯数字）。探测账号示例：617398
 pai_workspace_id = "REPLACE-ME-workspace-id"
 

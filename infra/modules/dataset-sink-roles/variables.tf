@@ -113,6 +113,29 @@ variable "developer_group_name" {
   default     = ""
 }
 
+variable "developer_user_names" {
+  description = <<-EOT
+    该组的成员，填**已存在**的 RAM 用户登录名（不是 UserId）。
+
+    这份列表是**权威的**：`alicloud_ram_group_membership` 管理整个成员集合，
+    有人在控制台手工加进这个组，下次 plan 就会显示「要把他移除」。
+    这正是我们要的——「谁有这个权限」只有一个答案，就是这份列表。
+
+    重要：Terraform **不接管**这些用户本身，也不碰他们已有的其他策略。
+    但要注意权限叠加：RAM 的有效权限是所有 Allow 的并集，而**显式 Deny
+    优先于任何 Allow**。所以用户一旦入组，本项目策略里的 Deny（例如禁止
+    访问 lakeFS 后端桶、禁止创建长期 AccessKey）会**覆盖**他通过其他策略
+    已经拿到的 Allow。加人之前先确认这不会影响他的本职工作。
+  EOT
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = length(distinct(var.developer_user_names)) == length(var.developer_user_names)
+    error_message = "developer_user_names 中有重复项。"
+  }
+}
+
 variable "tags" {
   description = "附加到支持标签的资源上的标签"
   type        = map(string)

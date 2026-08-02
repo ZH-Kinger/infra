@@ -77,3 +77,12 @@ variable "pai_members" {
   }))
   default = {}
 }
+
+variable "developer_user_names" {
+  description = <<-EOT
+    研发用户组的成员，填已存在的 RAM 用户登录名。这份列表是权威的：
+    手工加进组的人会在下次 plan 里被标记为移除。
+  EOT
+  type        = list(string)
+  default     = []
+}

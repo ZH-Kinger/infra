@@ -44,6 +44,7 @@ module "roles" {
   dataset_bucket        = var.dataset_bucket
 
   developer_group_name = var.developer_group_name
+  developer_user_names = var.developer_user_names
 
   # dev 允许删除：开发环境需要能重建资源做实验。
   # 这也是 dev/prod 唯一的实质性权限差异，改动它等于改变环境定位。

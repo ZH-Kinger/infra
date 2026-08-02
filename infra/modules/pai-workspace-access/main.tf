@@ -15,12 +15,21 @@ locals {
 }
 
 # 管理员数量护栏：管理员能改成员关系，等于能自己提权。
-# 用 check 块而不是 variable validation，因为这个约束跨多个成员、
-# 需要在计划阶段整体评估。
-check "admin_count_within_limit" {
-  assert {
-    condition     = length(local.admin_members) <= var.max_admins
-    error_message = "Workspace ${var.workspace_id} 的管理员数量 ${length(local.admin_members)} 超过上限 ${var.max_admins}：${join(", ", local.admin_members)}。管理员能修改成员关系，等于能自我提权，请收敛后再合并。"
+#
+# 这里必须用 lifecycle precondition，**不能用 check 块**。
+# 实测（terraform 1.15.8）：check 断言失败只产生 Warning，plan 退出码仍是 0，
+# apply 照常执行；precondition 失败才是 Error 并让 plan 退出码为 1。
+# 一个只会打印警告的「护栏」比没有护栏更糟，因为它让人以为有保护。
+#
+# 用 variable validation 做不到：这个约束要跨所有成员整体评估。
+resource "terraform_data" "admin_count_guard" {
+  input = length(local.admin_members)
+
+  lifecycle {
+    precondition {
+      condition     = length(local.admin_members) <= var.max_admins
+      error_message = "Workspace ${var.workspace_id} 的管理员数量 ${length(local.admin_members)} 超过上限 ${var.max_admins}：${join(", ", local.admin_members)}。管理员能修改成员关系，等于能自我提权，请收敛后再合并。"
+    }
   }
 }
 

@@ -41,6 +41,7 @@ module "roles" {
   dataset_bucket        = var.dataset_bucket
 
   developer_group_name = var.developer_group_name
+  developer_user_names = var.developer_user_names
 
   # 生产必须开启删除护栏：Terraform 计划删除或替换关键资源时直接失败，
   # 迫使这类变更走单独审批的 BreakGlass 身份，而不是被流水线静默执行。

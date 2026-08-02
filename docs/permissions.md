@@ -135,7 +135,20 @@ apply 角色的信任策略只接受 `sub = repo:<org>/<repo>:environment:<name>
 ### 4.5 管理员数量护栏
 
 PAI Workspace 管理员能修改成员关系，等于能给自己加权限。
-`pai-workspace-access` 模块里有 `check` 块：生产环境超过 1 个管理员时 plan 直接失败。
+`pai-workspace-access` 模块用 `terraform_data` 上的 `lifecycle precondition`
+限制人数：生产超过 1 人时 plan **报错并退出码 1**。
+
+这里必须用 `precondition` 而不是 `check` 块。实测（terraform 1.15.8）：
+
+| 机制 | 失败时 | plan 退出码 | 能否阻断 apply |
+|---|---|---|---|
+| `check` 块 | Warning | 0 | **否** |
+| `lifecycle precondition` | Error | 1 | 是 |
+
+一个只会打印警告的「护栏」比没有护栏更糟——它让人以为有保护。
+本仓库里 `check` 只用于**漂移检测**（例如发现有人手工往用户组里加人），
+那种场景告警才是正确形态，因为首次 apply 时资源尚未创建，用 `precondition`
+会让第一次 apply 直接失败。
 
 ### 4.6 生产删除护栏
 
@@ -148,7 +161,75 @@ RAM 是云平台侧保护，`prevent_destroy` 是 Terraform 侧保护。
 
 ---
 
-## 5. 长期凭证
+## 5. 已有 RAM 用户怎么接入（继承）
+
+账号里通常已经有一批 RAM 用户，他们各自挂着与本项目无关的策略。
+本项目**不接管**这些用户，也不改动他们已有的权限。
+
+### 接入点是用户组，不是用户
+
+```
+已有 RAM 用户（Terraform 不接管）
+        ↓ alicloud_ram_user_group_attachment
+pai-<env>-developers 用户组（Terraform 管理）
+        ↓ alicloud_ram_group_policy_attachment
+本项目的策略（Terraform 管理）
+```
+
+在 `infra/envs/<env>/access/terraform.tfvars` 里：
+
+```hcl
+developer_group_name = "pai-prod-developers"
+developer_user_names = ["alice", "bob"]   # 已存在的 RAM 用户登录名
+```
+
+用组而不是逐个给用户附策略，是为了让「谁有这个权限」有唯一答案：
+看组成员，而不是逐个用户翻策略。N 个用户共用 1 套策略，改策略只改一处。
+
+### 最重要的一点：Deny 会覆盖他们已有的 Allow
+
+RAM 的有效权限是所有 Allow 的**并集**，但**显式 Deny 优先于任何 Allow**。
+
+所以用户一旦入组，本项目策略里的 Deny 会覆盖他通过其他策略已经拿到的权限。
+举个真实的例子：某用户挂着 `AliyunOSSFullAccess`，入组后本项目的
+`DenyDataPlaneAccess` 会让他**读不了 lakeFS 后端桶**——即使他有 FullAccess。
+
+这既是保护（防止有人绕过发布协议直接读原始数据），也是风险（可能意外阻断
+他的本职工作）。**加人之前先审计他现有的权限**：
+
+```bash
+aliyun ram ListPoliciesForUser --UserName <用户名>
+```
+
+如果他的本职工作需要访问被我们 Deny 的资源，就不要把他放进这个组——
+给他单独建一个组，或者调整策略的资源范围。
+
+### 手工加人会被发现
+
+`alicloud_ram_user_group_attachment` 是逐用户绑定的，不具备「权威集合」语义。
+为此模块里有一个 `check` 块：用 `data "alicloud_ram_users"` 读取组的实际成员，
+与 `developer_user_names` 比对，发现多出来的人就告警。
+
+它是**警告不是错误**（原因见 4.5），所以不会阻断流水线，但会出现在 plan 输出里，
+评审时能看到。
+
+### 迁移建议
+
+面对一个已经有几十个 RAM 用户的账号，不要一次性全塞进组：
+
+1. **先审计**：列出每个用户现有的策略，标出谁挂着 `AliyunRAMFullAccess`、
+   `AdministratorAccess` 这类能绕过整套设计的权限。
+2. **先分类**：谁只需要用数据集（进 developers 组），谁需要运维作业
+   （PAI.AlgoOperator），谁只需要看（Guest）。
+3. **小批量迁移**：先放 2～3 个人，确认他们的日常工作没被 Deny 影响。
+4. **再收窄**：逐步移除他们直接附加的宽泛策略，让权限只来自组。
+5. **最后清理**：撤销长期 AccessKey。
+
+第 1 步不能跳过。**持有 `AliyunRAMFullAccess` 的用户能直接删掉我们所有的
+Deny 语句**，对他而言这套权限设计等于不存在。这类账号要么降权，要么就得承认
+整套模型在他身上不生效。
+
+## 6. 长期凭证
 
 整套设计不使用任何长期 AccessKey：
 
@@ -164,7 +245,7 @@ RAM 是云平台侧保护，`prevent_destroy` 是 Terraform 侧保护。
 
 ---
 
-## 6. 变更流程
+## 7. 变更流程
 
 | 变更类型 | 路径 | 审批 |
 |---|---|---|
@@ -178,7 +259,7 @@ Terraform 收回，而且没有任何记录说明是谁、为什么加的。
 
 ---
 
-## 7. 审计
+## 8. 审计
 
 | 看什么 | 在哪看 |
 |---|---|

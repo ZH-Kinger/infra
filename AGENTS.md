@@ -63,7 +63,9 @@ make hooks         # pre-commit run --all-files
 - **heredoc 会占用 stdin。** `printf '%s' "$x" | python3 - <<'PY'` 里 python 从 heredoc 读程序，管道数据被丢弃；要传数据就写临时文件。
 - **CPFS 挂载路径 ≠ CPFS 文件系统内部路径。** `pai-request` 的 `release_dir` 是挂载视角，`--filesystem-path` 是文件系统内部视角，两者不能混用。
 - **`terraform` 不在 homebrew-core**（BUSL 许可），需 `brew install hashicorp/tap/terraform`。
-- **本环境 `registry.terraform.io` 被网络策略拦截**，Provider schema 只能靠 `terraform validate` 核对，不要凭记忆写字段。
+- **本环境 `registry.terraform.io` 被网络策略拦截**，Provider schema 只能靠 `terraform validate` 核对，不要凭记忆写字段。查资源真名的最快方式是 `terraform providers schema -json` 后用 Python 过滤。
+- **`check` 块失败只产生 Warning，plan 退出码仍是 0，挡不住 apply。** 要真正阻断必须用 `lifecycle precondition`（Error，退出码 1）。`check` 只适合漂移检测这类「首次 apply 时必然不成立」的场景。
+- **`terraform init` 只设 `TF_PLUGIN_CACHE_DIR` 不够**：它仍会去 GitHub 取 `SHA256SUMS`。完全离线要用 `filesystem_mirror` + `TF_CLI_CONFIG_FILE`。
 
 ## 提交约定
 
