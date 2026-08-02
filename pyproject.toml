@@ -61,6 +61,7 @@ ignore = [
 # 而 os.replace 的文档明确写了 POSIX 上原子。Path.replace 虽然等价，
 # 但读代码时不如 os.replace 直白地表达「这一步必须原子」。
 "src/dataset_sink/materializer.py" = ["PTH104", "PTH105"]
+"src/dataset_sink/ingest.py" = ["PTH105"]
 
 "tests/**" = ["S105", "S106", "S108"]
 

@@ -10,8 +10,19 @@ from typing import Optional, Sequence
 
 from .aliyun_cli import register_pai_dataset_version
 from .errors import DatasetSinkError
+from .ingest import (
+    LocalObjectWriter,
+    OssObjectWriter,
+    archive_staging,
+    build_commit_metadata,
+    import_and_commit,
+    object_store_uri_for,
+    scan_staging,
+    summarize_entries,
+    validate_destination,
+)
 from .lakefs_refs import resolve_reference
-from .manifest import Manifest
+from .manifest import Manifest, dump_manifest
 from .materializer import Materializer, certify_prepared_release, verify_release
 from .pai import CpfsRegistration, build_create_dataset_version_request
 from .sources import LakeFSS3SourceReader, LocalSourceReader
@@ -44,6 +55,57 @@ def build_parser() -> argparse.ArgumentParser:
     materialize.add_argument("--lakefs-secret-access-key")
     materialize.add_argument("--lakefs-region", default="us-east-1")
     materialize.add_argument("--no-verify-tls", action="store_true")
+
+    # ---- CPFS 上处理完的数据接入版本体系：scan → archive → commit ----
+    #
+    # 这三步补齐 certify 的前置条件：certify --commit 要求 Commit 已存在，
+    # 而用户在 CPFS 上预处理出来的新数据并没有 Commit。
+
+    scan = commands.add_parser(
+        "scan",
+        help="扫描 CPFS staging 目录，生成带 size 与 sha256 的 manifest",
+    )
+    scan.add_argument("staging_dir", type=Path)
+    scan.add_argument("--output", type=Path, required=True)
+    scan.add_argument("--workers", type=int, default=8)
+
+    archive = commands.add_parser(
+        "archive",
+        help="把 staging 归档到对象存储（冷归档，也是 lakeFS Commit 指向的持久位置）",
+    )
+    archive.add_argument("staging_dir", type=Path)
+    archive.add_argument("--manifest", type=Path, required=True)
+    archive.add_argument("--prefix", required=True, help="对象存储内的前缀，如 staging/batch-001")
+    archive.add_argument("--target", choices=("oss", "local"), default="oss")
+    archive.add_argument("--bucket", help="OSS 桶名（--target oss 时必填）")
+    archive.add_argument("--endpoint-url", help="OSS S3 兼容端点（--target oss 时必填）")
+    archive.add_argument("--local-root", type=Path, help="--target local 时的落地目录")
+    archive.add_argument("--access-key-id", help="留空则回落到环境变量")
+    archive.add_argument("--secret-access-key")
+    archive.add_argument("--security-token", help="使用 STS 临时凭证时提供")
+    archive.add_argument("--workers", type=int, default=8)
+    archive.add_argument("--no-verify-tls", action="store_true")
+
+    commit = commands.add_parser(
+        "commit",
+        help="从归档前缀零拷贝导入 lakeFS 并产生 Commit（不搬运数据）",
+    )
+    commit.add_argument("--repository", required=True)
+    commit.add_argument("--branch", default="main")
+    commit.add_argument(
+        "--object-store-uri",
+        required=True,
+        help="桶级 URI，如 s3://my-bucket。与 --prefix 拼成 import 源",
+    )
+    commit.add_argument("--prefix", required=True, help="与 archive 时使用的前缀一致")
+    commit.add_argument("--destination", required=True, help="Commit 内的目标路径")
+    commit.add_argument("--manifest", type=Path, required=True)
+    commit.add_argument("--message")
+    commit.add_argument("--tag", help="同名 Tag 已存在会报错，不会静默覆盖")
+    commit.add_argument("--paimon-snapshot-id")
+    commit.add_argument("--lakefs-api-endpoint")
+    commit.add_argument("--lakefs-access-key-id")
+    commit.add_argument("--lakefs-secret-access-key")
 
     certify = commands.add_parser(
         "certify",
@@ -125,6 +187,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if args.command == "materialize":
             result = _materialize(args)
+        elif args.command == "scan":
+            result = _scan(args)
+        elif args.command == "archive":
+            result = _archive(args)
+        elif args.command == "commit":
+            result = _commit(args)
         elif args.command == "certify":
             result = asdict(
                 certify_prepared_release(
@@ -167,6 +235,97 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except (DatasetSinkError, ValueError, OSError) as exc:
         print(f"dataset-sink: {exc}", file=sys.stderr)
         return 2
+
+
+def _scan(args: argparse.Namespace) -> dict:
+    result = scan_staging(args.staging_dir, workers=args.workers)
+    dump_manifest(result.entries, args.output)
+    # 立刻回读一次，让输出里的 manifest_sha256 就是下游会用到的那一个，
+    # 而不是在这里重算一遍（重算容易和 dump 的序列化细节不一致）。
+    manifest = Manifest.load(args.output)
+    payload = summarize_entries(result.entries)
+    payload.update(
+        {
+            "manifest": str(args.output),
+            "manifest_sha256": manifest.sha256,
+        }
+    )
+    return payload
+
+
+def _archive(args: argparse.Namespace) -> dict:
+    manifest = Manifest.load(args.manifest)
+
+    if args.target == "local":
+        if args.local_root is None:
+            raise ValueError("--target local 需要 --local-root")
+        writer = LocalObjectWriter(args.local_root)
+    else:
+        if not args.bucket or not args.endpoint_url:
+            raise ValueError("--target oss 需要 --bucket 与 --endpoint-url")
+        writer = OssObjectWriter(
+            bucket=args.bucket,
+            endpoint_url=args.endpoint_url,
+            access_key_id=args.access_key_id or os.getenv("OSS_ACCESS_KEY_ID"),
+            secret_access_key=(args.secret_access_key or os.getenv("OSS_ACCESS_KEY_SECRET")),
+            verify_tls=not args.no_verify_tls,
+        )
+        token = args.security_token or os.getenv("OSS_SECURITY_TOKEN")
+        if token:
+            # boto3 客户端已经建好，这里补上会话令牌以支持 STS 临时凭证。
+            writer.client._request_signer._credentials.token = token  # noqa: SLF001
+
+    result = archive_staging(
+        args.staging_dir,
+        manifest,
+        writer,
+        prefix=args.prefix,
+        workers=args.workers,
+    )
+    return {
+        "uploaded": result.uploaded,
+        "skipped_existing": result.skipped_existing,
+        "total_bytes": result.total_bytes,
+        "prefix": result.prefix,
+        "manifest_sha256": manifest.sha256,
+    }
+
+
+def _commit(args: argparse.Namespace) -> dict:
+    manifest = Manifest.load(args.manifest)
+    destination = validate_destination(args.destination)
+    uri = object_store_uri_for(args.object_store_uri, args.prefix)
+
+    metadata = build_commit_metadata(
+        manifest=manifest,
+        paimon_snapshot_id=args.paimon_snapshot_id,
+    )
+    message = args.message or (
+        f"dataset-sink import {destination} "
+        f"({len(manifest.entries)} objects, manifest {manifest.sha256[:12]})"
+    )
+
+    result = import_and_commit(
+        repository=args.repository,
+        branch=args.branch,
+        object_store_uri=uri,
+        destination=destination,
+        message=message,
+        metadata=metadata,
+        tag=args.tag,
+        endpoint=args.lakefs_api_endpoint or os.getenv("LAKEFS_API_ENDPOINT"),
+        access_key_id=args.lakefs_access_key_id or os.getenv("LAKEFS_ACCESS_KEY_ID"),
+        secret_access_key=(args.lakefs_secret_access_key or os.getenv("LAKEFS_SECRET_ACCESS_KEY")),
+    )
+    return {
+        "commit_id": result.commit_id,
+        "branch": result.branch,
+        "tag": result.tag,
+        "ingested_objects": result.ingested_objects,
+        "object_store_uri": result.object_store_uri,
+        "destination": destination,
+        "manifest_sha256": manifest.sha256,
+    }
 
 
 def _materialize(args: argparse.Namespace) -> dict:
