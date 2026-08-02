@@ -1,0 +1,22 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "nas:DeleteFileSystem",
+        "nas:DeleteFileset",
+        "nas:DeleteMountTarget",
+        "oss:DeleteBucket",
+        "paidataset:DeleteDataset",
+        "paidataset:DeleteDatasetVersion",
+        "paiworkspace:DeleteWorkspace",
+        "paiworkspace:DeleteMembers"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "DenyDestructiveOperations"
+    }
+  ],
+  "Version": "1"
+}

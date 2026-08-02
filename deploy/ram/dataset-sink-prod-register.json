@@ -1,0 +1,53 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "paidataset:CreateDatasetVersion",
+        "paidataset:ListDatasetVersions",
+        "paidataset:GetDatasetVersion",
+        "paidataset:GetDataset",
+        "paidataset:ListDatasets"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "RegisterDatasetVersion"
+    },
+    {
+      "Action": [
+        "paiworkspace:GetWorkspace",
+        "paiworkspace:ListWorkspaces"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "ReadWorkspaceContext"
+    },
+    {
+      "Action": [
+        "oss:GetObject",
+        "oss:PutObject",
+        "oss:DeleteObject"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:LAKEFS_BACKEND_BUCKET",
+        "acs:oss:*:ACCOUNT_ID:LAKEFS_BACKEND_BUCKET/*"
+      ],
+      "Sid": "DenyRawDataAccess"
+    },
+    {
+      "Action": [
+        "paidlc:CreateJob"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "DenyTrainingSubmission"
+    }
+  ],
+  "Version": "1"
+}

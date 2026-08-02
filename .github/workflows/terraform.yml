@@ -1,0 +1,193 @@
+name: Terraform
+
+on:
+  pull_request:
+    paths: ["infra/**", ".github/workflows/terraform.yml"]
+  push:
+    branches: [main]
+    paths: ["infra/**", ".github/workflows/terraform.yml"]
+
+# id-token: write 只是允许本 Job 取 GitHub OIDC token，
+# 它本身不授予任何阿里云权限——权限完全由 RAM 角色的信任策略决定。
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+# 基础设施变更不能并发：两条流水线同时 apply 会互相覆盖 state。
+# cancel-in-progress 必须为 false，取消一个正在 apply 的 Job 会留下脏锁。
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.15.8"
+  ALIBABA_CLOUD_OIDC_AUDIENCE: github-actions
+
+jobs:
+  plan:
+    name: Plan ${{ matrix.layer }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: infra/envs/dev/platform
+            layer: dev-platform
+          - dir: infra/envs/dev/access
+            layer: dev-access
+          - dir: infra/envs/prod/platform
+            layer: prod-platform
+          - dir: infra/envs/prod/access
+            layer: prod-access
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # plan 用只读角色。它的 OIDC sub 是 repo:<org>/<repo>:pull_request，
+      # 而 fork 的 PR 也会产生这个 sub——所以这个角色必须完全无写权限。
+      - name: 假设 TerraformPlanRole
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ vars.ALIBABA_CLOUD_PLAN_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
+          audience: ${{ env.ALIBABA_CLOUD_OIDC_AUDIENCE }}
+          role-session-name: tf-plan-${{ github.run_id }}
+
+      - name: 写入 backend 配置
+        run: |
+          cat > /tmp/backend.hcl <<EOF
+          bucket              = "${{ vars.TF_STATE_BUCKET }}"
+          region              = "${{ vars.ALIBABA_CLOUD_REGION }}"
+          tablestore_endpoint = "${{ vars.TF_STATE_LOCK_ENDPOINT }}"
+          tablestore_table    = "${{ vars.TF_STATE_LOCK_TABLE }}"
+          encrypt             = true
+          EOF
+
+      - name: Init
+        run: terraform -chdir=${{ matrix.dir }} init -input=false -backend-config=/tmp/backend.hcl
+
+      - name: Plan
+        id: plan
+        run: |
+          terraform -chdir=${{ matrix.dir }} plan -input=false -lock-timeout=5m \
+            -out=tfplan -no-color | tee /tmp/plan-${{ matrix.layer }}.txt
+
+      # apply 必须消费**这个** tfplan，而不是重新 plan：
+      # 否则审批时看到的变更和实际执行的变更可能不一致，审批就只是仪式。
+      - name: 上传 plan 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ matrix.layer }}-${{ github.sha }}
+          path: |
+            ${{ matrix.dir }}/tfplan
+            /tmp/plan-${{ matrix.layer }}.txt
+          retention-days: 5
+
+      - name: 检测危险变更
+        run: |
+          set -euo pipefail
+          plan_txt=/tmp/plan-${{ matrix.layer }}.txt
+          if grep -qE '^\s*# .* will be destroyed|must be replaced' "$plan_txt"; then
+            echo "::warning::${{ matrix.layer }} 的 plan 包含删除或替换操作，审批前请逐条确认。"
+          fi
+          # 权限层的任何变更都要在 PR 里被显式看见。
+          if [ "${{ matrix.layer }}" = "prod-access" ] && grep -qE '^Plan: [1-9]' "$plan_txt"; then
+            echo "::warning::生产权限层有变更，需要安全评审（见 CODEOWNERS）。"
+          fi
+
+      - name: 评论到 PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/plan-${{ matrix.layer }}.txt', 'utf8');
+            const truncated = body.length > 60000 ? body.slice(0, 60000) + '\n...(已截断，完整内容见 Actions 日志)' : body;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### Terraform plan — \`${{ matrix.layer }}\`\n\n<details><summary>展开</summary>\n\n\`\`\`hcl\n${truncated}\n\`\`\`\n\n</details>`,
+            });
+
+  apply:
+    name: Apply ${{ matrix.layer }}
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      # 权限层和基础设施层不并行：两者都要写 state，且审批人不同。
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        include:
+          - dir: infra/envs/dev/platform
+            layer: dev-platform
+            environment: development
+            role_var: ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN
+          - dir: infra/envs/dev/access
+            layer: dev-access
+            environment: development
+            role_var: ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN
+          - dir: infra/envs/prod/platform
+            layer: prod-platform
+            environment: production
+            role_var: ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN
+          - dir: infra/envs/prod/access
+            layer: prod-access
+            # 权限层单独用一个 Environment，可以配置不同的审批人
+            # （见 .github/CODEOWNERS：权限面需要安全团队评审）。
+            environment: production-access
+            role_var: ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN
+
+    # 人工审批在这里生效：Environment 的 required reviewers 会阻塞该 Job，
+    # 同时 OIDC token 的 sub 会变成 repo:<org>/<repo>:environment:<name>，
+    # 这正是 apply 角色信任策略里唯一接受的 sub。审批和授权是同一件事。
+    environment: ${{ matrix.environment }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: 假设 Apply 角色
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ vars[matrix.role_var] }}
+          oidc-provider-arn: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
+          audience: ${{ env.ALIBABA_CLOUD_OIDC_AUDIENCE }}
+          role-session-name: tf-apply-${{ github.run_id }}
+
+      - name: 下载已审批的 plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ matrix.layer }}-${{ github.sha }}
+          path: /tmp/artifact
+
+      - name: 写入 backend 配置
+        run: |
+          cat > /tmp/backend.hcl <<EOF
+          bucket              = "${{ vars.TF_STATE_BUCKET }}"
+          region              = "${{ vars.ALIBABA_CLOUD_REGION }}"
+          tablestore_endpoint = "${{ vars.TF_STATE_LOCK_ENDPOINT }}"
+          tablestore_table    = "${{ vars.TF_STATE_LOCK_TABLE }}"
+          encrypt             = true
+          EOF
+
+      - name: Init
+        run: terraform -chdir=${{ matrix.dir }} init -input=false -backend-config=/tmp/backend.hcl
+
+      - name: Apply（执行审批过的那一份 plan）
+        run: |
+          set -euo pipefail
+          cp "/tmp/artifact/${{ matrix.dir }}/tfplan" "${{ matrix.dir }}/tfplan"
+          terraform -chdir=${{ matrix.dir }} apply -input=false -lock-timeout=5m -no-color tfplan

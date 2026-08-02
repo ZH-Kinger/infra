@@ -1,0 +1,69 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "paiworkspace:GetWorkspace",
+        "paiworkspace:ListWorkspaces",
+        "paiworkspace:ListMembers",
+        "paidataset:GetDataset",
+        "paidataset:ListDatasets",
+        "paidataset:ListDatasetVersions",
+        "paidataset:GetDatasetVersion",
+        "paidlc:GetJob",
+        "paidlc:ListJobs",
+        "paidlc:GetPodLogs"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "BrowsePaiWorkspaceAndDatasets"
+    },
+    {
+      "Action": [
+        "oss:GetObject",
+        "oss:PutObject",
+        "oss:DeleteObject",
+        "oss:ListObjects"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:LAKEFS_BACKEND_BUCKET",
+        "acs:oss:*:ACCOUNT_ID:LAKEFS_BACKEND_BUCKET/*",
+        "acs:oss:*:ACCOUNT_ID:DATASET_BUCKET/staging/*"
+      ],
+      "Sid": "DenyDataPlaneAccess"
+    },
+    {
+      "Action": [
+        "ram:CreateAccessKey",
+        "ram:UpdateAccessKey",
+        "ram:ListAccessKeys",
+        "ram:CreateUser",
+        "ram:AttachPolicyToUser",
+        "ram:CreatePolicy",
+        "ram:CreateRole",
+        "ram:UpdateRole"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "DenyLongLivedCredentials"
+    },
+    {
+      "Action": [
+        "paidataset:CreateDatasetVersion",
+        "paidataset:UpdateDatasetVersion",
+        "paidataset:DeleteDatasetVersion",
+        "paidataset:DeleteDataset"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "DenyDatasetMutation"
+    }
+  ],
+  "Version": "1"
+}

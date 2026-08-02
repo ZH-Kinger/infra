@@ -1,0 +1,71 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "oss:GetObject",
+        "oss:GetObjectMeta",
+        "oss:ListObjects"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:DATASET_BUCKET",
+        "acs:oss:*:ACCOUNT_ID:DATASET_BUCKET/datasets/*"
+      ],
+      "Sid": "ReadPublishedReleaseArchive"
+    },
+    {
+      "Action": [
+        "oss:PutObject",
+        "oss:GetObject",
+        "oss:DeleteObject",
+        "oss:ListObjects",
+        "oss:AbortMultipartUpload"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:DATASET_BUCKET",
+        "acs:oss:*:ACCOUNT_ID:DATASET_BUCKET/output/*"
+      ],
+      "Sid": "WriteTrainingOutput"
+    },
+    {
+      "Action": [
+        "nas:DescribeFileSystems",
+        "nas:DescribeMountTargets"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "MountPublishedDataset"
+    },
+    {
+      "Action": [
+        "oss:GetObject",
+        "oss:PutObject",
+        "oss:ListObjects",
+        "oss:DeleteObject"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:LAKEFS_BACKEND_BUCKET",
+        "acs:oss:*:ACCOUNT_ID:LAKEFS_BACKEND_BUCKET/*",
+        "acs:oss:*:ACCOUNT_ID:DATASET_BUCKET/staging/*"
+      ],
+      "Sid": "DenyLakeFSBackendAndStaging"
+    },
+    {
+      "Action": [
+        "paidataset:CreateDatasetVersion",
+        "paidataset:DeleteDatasetVersion",
+        "paidlc:CreateJob"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "DenyDatasetAndJobMutation"
+    }
+  ],
+  "Version": "1"
+}

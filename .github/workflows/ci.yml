@@ -5,11 +5,48 @@ on:
   push:
     branches: [main]
 
+# 这条流水线不接触任何云凭证：它只做代码校验。
+# 需要云身份的操作在 terraform.yml 和 dataset-release.yml 里。
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  lint:
+    name: Python lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e '.[dev]'
+      - run: python -m ruff check src tests
+      - run: python -m ruff format --check src tests
+
   test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 是 requires-python 的下限，3.11 是镜像里的运行版本。
+        # 两端都测，避免只在开发机的版本上能跑。
+        python-version: ["3.9", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install -e .
+      # 单元测试必须在无网络、无云凭证的环境下通过。
+      - run: python -m unittest discover -s tests -v
+
+  e2e:
+    name: Local end-to-end
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,5 +54,57 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m pip install -e .
-      - run: python -m unittest discover -s tests -v
+      # 临时目录模拟 CPFS，不连阿里云，不产生费用。
+      - run: make e2e
 
+  shell:
+    name: Shell lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - run: shellcheck scripts/*.sh deploy/pai/*.sh
+
+  terraform:
+    name: Terraform validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive infra
+
+      # -backend=false 让校验不需要任何云凭证，PR 阶段就能发现 schema 错误。
+      - name: Terraform validate（逐目录）
+        run: |
+          set -euo pipefail
+          for dir in $(find infra -name '*.tf' -exec dirname {} \; | sort -u); do
+            echo "::group::$dir"
+            terraform -chdir="$dir" init -backend=false -input=false -no-color
+            terraform -chdir="$dir" validate -no-color
+            echo "::endgroup::"
+          done
+
+  ram-policies-in-sync:
+    name: RAM 策略副本与 Terraform 一致
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+
+      # deploy/ram/*.json 是给人看的策略副本，必须与 Terraform 渲染结果一致，
+      # 否则评审时看的是过期内容。这里重新渲染并要求无 diff。
+      - name: 重新渲染并比对
+        run: |
+          ./scripts/render-ram-policies.sh
+          if ! git diff --exit-code -- deploy/ram; then
+            echo "::error::deploy/ram/*.json 与 Terraform 渲染结果不一致，请在本地执行 make render-ram 后提交。"
+            exit 1
+          fi

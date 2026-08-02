@@ -1,0 +1,56 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "paidlc:CreateJob",
+        "paidlc:GetJob",
+        "paidlc:ListJobs",
+        "paidlc:StopJob",
+        "paidlc:GetPodLogs"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "SubmitAndObserveTrainingJobs"
+    },
+    {
+      "Action": [
+        "paidataset:GetDataset",
+        "paidataset:ListDatasetVersions",
+        "paidataset:GetDatasetVersion"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "ResolveDatasetVersion"
+    },
+    {
+      "Action": [
+        "paidataset:CreateDatasetVersion",
+        "paidataset:UpdateDatasetVersion",
+        "paidataset:DeleteDatasetVersion",
+        "paidataset:DeleteDataset"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "DenyDatasetMutation"
+    },
+    {
+      "Action": [
+        "oss:GetObject",
+        "oss:ListObjects"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:LAKEFS_BACKEND_BUCKET",
+        "acs:oss:*:ACCOUNT_ID:LAKEFS_BACKEND_BUCKET/*"
+      ],
+      "Sid": "DenyLakeFSBackendAccess"
+    }
+  ],
+  "Version": "1"
+}

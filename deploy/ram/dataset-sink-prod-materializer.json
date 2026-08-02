@@ -1,0 +1,67 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "oss:GetObject",
+        "oss:GetObjectMeta",
+        "oss:HeadObject"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:LAKEFS_BACKEND_BUCKET/*"
+      ],
+      "Sid": "ReadLakeFSBackendObjects"
+    },
+    {
+      "Action": [
+        "oss:ListObjects",
+        "oss:GetBucketInfo"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:LAKEFS_BACKEND_BUCKET"
+      ],
+      "Sid": "ListLakeFSBackendBucket"
+    },
+    {
+      "Action": [
+        "oss:GetObject",
+        "oss:PutObject",
+        "oss:ListObjects"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:DATASET_BUCKET",
+        "acs:oss:*:ACCOUNT_ID:DATASET_BUCKET/staging/*"
+      ],
+      "Sid": "ReadWriteStagingArchive"
+    },
+    {
+      "Action": [
+        "nas:DescribeFileSystems",
+        "nas:DescribeMountTargets",
+        "nas:DescribeFilesets",
+        "nas:DescribeProtocolService"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "DescribeCpfsForMount"
+    },
+    {
+      "Action": [
+        "paidataset:CreateDatasetVersion",
+        "paidataset:DeleteDatasetVersion",
+        "paidlc:CreateJob",
+        "paidlc:StopJob"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "DenyDatasetRegistrationAndTraining"
+    }
+  ],
+  "Version": "1"
+}
