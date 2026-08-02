@@ -61,6 +61,44 @@
         "*"
       ],
       "Sid": "DenyDatasetRegistrationAndTraining"
+    },
+    {
+      "Action": [
+        "oss:GetObject",
+        "oss:GetObjectMeta",
+        "oss:HeadObject"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:LEGACY_BUCKET/LEGACY_PREFIX/*"
+      ],
+      "Sid": "ReadImportedLegacyObjects"
+    },
+    {
+      "Action": [
+        "oss:ListObjects",
+        "oss:GetBucketInfo"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:LEGACY_BUCKET"
+      ],
+      "Sid": "ListImportedLegacyBuckets"
+    },
+    {
+      "Action": [
+        "oss:PutObject",
+        "oss:DeleteObject",
+        "oss:DeleteObjects",
+        "oss:AbortMultipartUpload",
+        "oss:PutObjectTagging",
+        "oss:RestoreObject"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:LEGACY_BUCKET/LEGACY_PREFIX/*"
+      ],
+      "Sid": "DenyMutatingImportedLegacyObjects"
     }
   ],
   "Version": "1"

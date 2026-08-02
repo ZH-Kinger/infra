@@ -81,6 +81,30 @@ variable "dataset_release_prefix" {
   default     = "datasets"
 }
 
+variable "imported_data_prefixes" {
+  description = <<-EOT
+    已被 lakeFS 零拷贝 import 引用的存量数据前缀。
+
+    存量数据大多本来就在 OSS 上。这类数据不需要再归档一遍：直接 import 建
+    Commit 即可，全程不搬字节。但 import 是**零拷贝**的——Commit 只记录对象的
+    物理地址，字节仍然只有原处那一份。因此这些前缀一旦被 import，就必须变成
+    只读区：删除或覆盖其中的对象，等于让已发布的 Commit 悬空，版本记录还在但
+    数据没了，且没有任何东西会在当时报错。
+
+    在这里列出的前缀会：给沉降角色只读权限（scan-oss 需要列举和读取），
+    并对全部五个身份 Deny 写入与删除。
+
+    注意这只约束本模块管理的身份。持有 AliyunOSSFullAccess 的既有 RAM 用户
+    仍然能删——真正的兜底是桶级 Policy + 版本控制 + 合规保留策略，
+    见 docs/permissions.md。
+  EOT
+  type = list(object({
+    bucket = string
+    prefix = string
+  }))
+  default = []
+}
+
 variable "training_runtime_service_principals" {
   description = <<-EOT
     训练运行角色的可信服务主体。PAI DLC/DSW 以服务身份扮演该角色，

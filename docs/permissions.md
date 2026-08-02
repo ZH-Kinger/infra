@@ -309,6 +309,49 @@ managed_group_arns  = ["acs:ram:*:<账号>:group/pai-*", ...]
 本仓库预留了 `tags` 但**没有实现资源组**——需要的话再加，改动集中在
 `infra/bootstrap` 的 ARN 构造和各资源的 `resource_group_id` 参数。
 
+## 6.1 被 import 引用的存量前缀
+
+存量数据大多本来就在 OSS 上。这类数据不用迁移：`scan-oss` 列举出 manifest，
+`commit` 零拷贝 import 建 Commit，全程不搬字节。
+
+代价是一条新的、**不由 RAM 天然表达**的约束：
+
+> 一个前缀一旦被 import，其中的对象就不能再删除或覆盖。
+
+因为零拷贝的含义是 Commit 只记录对象的物理地址，字节仍然只有原处那一份。删掉它
+等于让已发布的 Commit 悬空——版本记录还在，数据没了，而且**当时不会有任何东西
+报错**。要等到下一次 `materialize` 或 `verify --deep` 才暴露，那时可能已经过了
+数周，也早已无法判断是谁删的。
+
+在 `infra/envs/*/access/terraform.tfvars` 里登记这些前缀：
+
+```hcl
+imported_data_prefixes = [
+  { bucket = "legacy-data", prefix = "legacy/robotics" },
+]
+```
+
+Terraform 会据此生成两组语句：
+
+| 语句 | 作用于 | 效果 |
+|---|---|---|
+| `ReadImportedLegacyObjects` / `ListImportedLegacyBuckets` | 沉降角色 | 允许 `scan-oss` 列举和读取 |
+| `DenyMutatingImportedLegacyObjects` | **全部五个身份** | Deny `PutObject` / `DeleteObject` / `DeleteObjects` / `AbortMultipartUpload` 等 |
+
+显式 Deny 优先于任何 Allow，所以即使某个角色另有整桶写权限，也过不去。
+
+**这层防护有明确的边界，不要高估它。** RAM 身份策略只约束本模块管理的那五个身份。
+账号里任何持有 `AliyunOSSFullAccess` 的既有 RAM 用户——比如 [§5](#5-已有-ram-用户怎么接入继承)
+提到的那些——仍然能删掉这些对象。真正的兜底是三样东西，都在 OSS 侧而不是 RAM 侧：
+
+1. **桶级 Policy**：作用于所有访问者，不管其身份策略怎么写；
+2. **版本控制**：删除只产生删除标记，对象可恢复；
+3. **合规保留策略（WORM）**：保留期内连主账号都删不掉。
+
+第 3 条是唯一能挡住主账号误操作的手段。存放被 import 引用的存量数据的桶应该开启它。
+
+---
+
 ## 7. 长期凭证
 
 整套设计不使用任何长期 AccessKey：

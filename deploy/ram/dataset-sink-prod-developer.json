@@ -63,6 +63,21 @@
         "*"
       ],
       "Sid": "DenyDatasetMutation"
+    },
+    {
+      "Action": [
+        "oss:PutObject",
+        "oss:DeleteObject",
+        "oss:DeleteObjects",
+        "oss:AbortMultipartUpload",
+        "oss:PutObjectTagging",
+        "oss:RestoreObject"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:LEGACY_BUCKET/LEGACY_PREFIX/*"
+      ],
+      "Sid": "DenyMutatingImportedLegacyObjects"
     }
   ],
   "Version": "1"

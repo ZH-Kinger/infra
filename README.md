@@ -6,10 +6,10 @@
 这个项目解决的是**发布边界**，不是用 CPFS 替代 lakeFS：
 
 ```text
-   CPFS 上处理完的新数据              已在 lakeFS 的数据
-   scan → archive → commit              （已有 Commit）
-   （零拷贝 import 建 Commit）
-                    ↓                        ↓
+  存量数据已在 OSS      CPFS 上处理完的新数据        已在 lakeFS 的数据
+  scan-oss → commit     scan → archive → commit        （已有 Commit）
+  （字节一个不动）       （唯一一次数据搬运）
+          ↓                       ↓                          ↓
               lakeFS Commit + Paimon Snapshot + Manifest
                              ↓
                  certify（零拷贝）/ materialize（拷贝）
@@ -22,6 +22,9 @@
                              ↓
               DSW / DLC 只读挂载 + 启动门禁
 ```
+
+存量数据**不需要迁移**：lakeFS import 是零拷贝的，只记录对象的物理地址。代价是那些
+前缀从此变成只读区——删掉对象会让 Commit 悬空，而且当时不会报错。
 
 对象存储是**冷归档与版本真相的物理载体**，CPFS 上的 release 是**为训练速度存在的
 热副本**——可以随时淘汰，需要时重新沉降回来。
@@ -65,6 +68,17 @@ make help    # 全部可用目标
 ## 命令一览
 
 ```bash
+# 存量数据已在 OSS：列举 + 算 SHA-256，然后零拷贝 import 建 Commit（不搬字节）
+dataset-sink scan-oss --bucket legacy-data \
+  --endpoint-url https://oss-cn-hangzhou.aliyuncs.com \
+  --prefix legacy/robotics --destination datasets/robotics \
+  --output /work/manifest.jsonl
+
+dataset-sink commit --repository robotics-data --branch main \
+  --object-store-uri s3://legacy-data \
+  --prefix legacy/robotics --destination datasets/robotics \
+  --manifest /work/manifest.jsonl --tag robotics-v2026.08.02.1
+
 # CPFS 上处理完的新数据接入版本体系：扫描 → 归档 → 建 Commit
 dataset-sink scan /mnt/cpfs/staging/batch-001 --output /work/manifest.jsonl
 
@@ -108,8 +122,12 @@ dataset-sink training-guard --dataset-root /mnt/dataset \
   --expected-manifest-sha256 "$DATASET_MANIFEST_SHA256"
 ```
 
-注意 `release_dir`（执行机上的挂载视角）与 `--filesystem-path`（CPFS 文件系统内部
-视角）是两个不同的坐标，混用是接入期最常见的错误。
+两处坐标系容易混：
+
+- `release_dir`（执行机上的挂载视角）与 `--filesystem-path`（CPFS 文件系统内部视角）；
+- manifest 的 `target_path`（release 内路径）与 `source_key`（**Commit 内**路径）——
+  所以 `scan-oss` 和 `commit` 的 `--destination` 必须填同一个值，填错会让
+  `materialize` 全量 404。`commit` 会在建 Commit 之前拦下这种情况。
 
 连接真实 lakeFS 需要 `pip install -e '.[all]'` 并注入
 `LAKEFS_API_ENDPOINT` / `LAKEFS_S3_ENDPOINT` / `LAKEFS_ACCESS_KEY_ID` /

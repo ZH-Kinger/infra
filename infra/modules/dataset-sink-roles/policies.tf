@@ -24,13 +24,57 @@ locals {
   release_object_arn = "acs:oss:*:${var.account_id}:${var.dataset_bucket}/${var.dataset_release_prefix}/*"
   output_object_arn  = "acs:oss:*:${var.account_id}:${var.dataset_bucket}/${var.dataset_output_prefix}/*"
 
+  # 存量数据前缀：被 lakeFS 零拷贝 import 引用之后即为只读区。
+  # 桶 ARN 单独列一份，ListObjects 作用在桶上而不是对象上。
+  imported_object_arns = [
+    for p in var.imported_data_prefixes :
+    "acs:oss:*:${var.account_id}:${p.bucket}/${p.prefix}/*"
+  ]
+  imported_bucket_arns = distinct([
+    for p in var.imported_data_prefixes :
+    "acs:oss:*:${var.account_id}:${p.bucket}"
+  ])
+
+  # 有前缀才生成语句：Resource 为空列表的 Statement 在 RAM 里是非法的。
+  read_imported_statements = length(var.imported_data_prefixes) == 0 ? [] : [
+    {
+      Sid      = "ReadImportedLegacyObjects"
+      Effect   = "Allow"
+      Action   = ["oss:GetObject", "oss:GetObjectMeta", "oss:HeadObject"]
+      Resource = local.imported_object_arns
+    },
+    {
+      Sid      = "ListImportedLegacyBuckets"
+      Effect   = "Allow"
+      Action   = ["oss:ListObjects", "oss:GetBucketInfo"]
+      Resource = local.imported_bucket_arns
+    },
+  ]
+
+  # 显式 Deny 优先于任何 Allow，所以这条同时也压住了上面那条读权限之外的一切写操作。
+  deny_imported_mutation_statements = length(var.imported_data_prefixes) == 0 ? [] : [
+    {
+      Sid    = "DenyMutatingImportedLegacyObjects"
+      Effect = "Deny"
+      Action = [
+        "oss:PutObject",
+        "oss:DeleteObject",
+        "oss:DeleteObjects",
+        "oss:AbortMultipartUpload",
+        "oss:PutObjectTagging",
+        "oss:RestoreObject",
+      ]
+      Resource = local.imported_object_arns
+    },
+  ]
+
   # ---------------------------------------------------------------------------
   # 1. 沉降角色：读 lakeFS 后端固定 Commit，写 CPFS。
   #    明确不给 PAI 注册和训练提交权限——能写数据的不能宣布数据可用。
   # ---------------------------------------------------------------------------
   materializer_policy = jsonencode({
     Version = "1"
-    Statement = [
+    Statement = concat([
       {
         Sid    = "ReadLakeFSBackendObjects"
         Effect = "Allow"
@@ -84,7 +128,9 @@ locals {
         ]
         Resource = ["*"]
       },
-    ]
+      ],
+      local.read_imported_statements,
+    local.deny_imported_mutation_statements)
   })
 
   # ---------------------------------------------------------------------------
@@ -93,7 +139,7 @@ locals {
   # ---------------------------------------------------------------------------
   register_policy = jsonencode({
     Version = "1"
-    Statement = [
+    Statement = concat([
       {
         # Resource 只能是 "*"，见文件顶部说明。
         Sid    = "RegisterDatasetVersion"
@@ -135,7 +181,8 @@ locals {
         Action   = ["paidlc:CreateJob"]
         Resource = ["*"]
       },
-    ]
+      ],
+    local.deny_imported_mutation_statements)
   })
 
   # ---------------------------------------------------------------------------
@@ -144,7 +191,7 @@ locals {
   # ---------------------------------------------------------------------------
   dlc_submit_policy = jsonencode({
     Version = "1"
-    Statement = [
+    Statement = concat([
       {
         Sid    = "SubmitAndObserveTrainingJobs"
         Effect = "Allow"
@@ -188,7 +235,8 @@ locals {
           local.lakefs_object_arn,
         ]
       },
-    ]
+      ],
+    local.deny_imported_mutation_statements)
   })
 
   # ---------------------------------------------------------------------------
@@ -197,7 +245,7 @@ locals {
   # ---------------------------------------------------------------------------
   training_runtime_policy = jsonencode({
     Version = "1"
-    Statement = [
+    Statement = concat([
       {
         Sid    = "ReadPublishedReleaseArchive"
         Effect = "Allow"
@@ -250,7 +298,8 @@ locals {
         ]
         Resource = ["*"]
       },
-    ]
+      ],
+    local.deny_imported_mutation_statements)
   })
 
   # ---------------------------------------------------------------------------
@@ -258,7 +307,7 @@ locals {
   # ---------------------------------------------------------------------------
   developer_policy = jsonencode({
     Version = "1"
-    Statement = [
+    Statement = concat([
       {
         Sid    = "BrowsePaiWorkspaceAndDatasets"
         Effect = "Allow"
@@ -314,7 +363,8 @@ locals {
         ]
         Resource = ["*"]
       },
-    ]
+      ],
+    local.deny_imported_mutation_statements)
   })
 
   # ---------------------------------------------------------------------------

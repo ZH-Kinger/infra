@@ -144,21 +144,267 @@ def scan_staging(
 
 
 def _size_and_digest(path: Path) -> Tuple[int, str]:
+    with path.open("rb") as stream:
+        return _digest_stream(stream)
+
+
+def _digest_stream(stream: BinaryIO) -> Tuple[int, str]:
     digest = hashlib.sha256()
     size = 0
-    with path.open("rb") as stream:
-        while True:
-            chunk = stream.read(_READ_CHUNK)
-            if not chunk:
-                break
-            size += len(chunk)
-            digest.update(chunk)
+    while True:
+        chunk = stream.read(_READ_CHUNK)
+        if not chunk:
+            break
+        size += len(chunk)
+        digest.update(chunk)
     return size, digest.hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# ①' scan-object-store：把**已经在对象存储里**的存量数据变成 manifest
+#
+# 存量数据不需要 archive——字节已经躺在持久位置上了。而 lakeFS import 是零拷贝的，
+# 所以「存量 OSS 数据 → Commit」这条路径**全程不搬一个字节**，建 Commit 是秒级。
+#
+# 代价在完整性上：对象存储只会告诉你 size 和 ETag（ETag 是 MD5，且分片上传时
+# 连 MD5 都不是），拿不到 SHA-256。要得到和 cpfs-ingest 同等强度的保证，必须
+# 完整读一遍数据来算——这就是 with_digest 的含义。默认开启，因为一个没有
+# SHA-256 的 release 会让 verify --deep 和 training-guard --deep 永久退化成
+# 只比大小，而这个损失是不可逆的（manifest 随发布固化，事后补不上）。
+# ---------------------------------------------------------------------------
+
+
+class ObjectReader(Protocol):
+    """只读对象存储的抽象。有本地实现，因此单元测试不需要网络和云凭证。"""
+
+    def list_objects(self, prefix: str) -> Iterable[Tuple[str, int]]: ...
+
+    def open(self, key: str) -> BinaryIO: ...
+
+
+class LocalObjectReader:
+    """本地目录充当对象存储，用于开发与测试。"""
+
+    def __init__(self, root: Path) -> None:
+        self.root = Path(root)
+
+    def list_objects(self, prefix: str) -> Iterable[Tuple[str, int]]:
+        base = self.root / prefix if prefix else self.root
+        if not base.is_dir():
+            return
+        for path in sorted(base.rglob("*")):
+            if path.is_file() and not path.is_symlink():
+                yield path.relative_to(self.root).as_posix(), path.stat().st_size
+
+    def open(self, key: str) -> BinaryIO:
+        return (self.root / key).open("rb")
+
+
+class OssObjectReader:
+    """通过 S3 兼容接口读取阿里云 OSS，和 OssObjectWriter 共用同一套依赖。"""
+
+    def __init__(
+        self,
+        bucket: str,
+        endpoint_url: str,
+        access_key_id: Optional[str] = None,
+        secret_access_key: Optional[str] = None,
+        security_token: Optional[str] = None,
+        region: str = "oss",
+        verify_tls: bool = True,
+    ) -> None:
+        self.bucket = bucket
+        self.client = _s3_client(
+            endpoint_url=endpoint_url,
+            access_key_id=access_key_id,
+            secret_access_key=secret_access_key,
+            security_token=security_token,
+            region=region,
+            verify_tls=verify_tls,
+        )
+
+    def list_objects(self, prefix: str) -> Iterable[Tuple[str, int]]:
+        paginator = self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            for obj in page.get("Contents", []) or []:
+                yield obj["Key"], int(obj.get("Size", 0))
+
+    def open(self, key: str) -> BinaryIO:
+        return self.client.get_object(Bucket=self.bucket, Key=key)["Body"]
+
+
+@dataclass(frozen=True)
+class ObjectScanResult:
+    entries: Tuple[ManifestEntry, ...]
+    file_count: int
+    total_bytes: int
+    digested: bool
+
+
+def scan_object_store(
+    reader: ObjectReader,
+    prefix: str,
+    destination: str,
+    *,
+    with_digest: bool = True,
+    workers: int = 8,
+) -> ObjectScanResult:
+    """列举对象存储前缀下的存量数据，生成 manifest。
+
+    产出的 manifest 和 lakeFS import 的输入来自**同一次列举**，所以
+    「manifest 描述的内容」和「Commit 实际包含的内容」按构造就是一致的——
+    这一点比 cpfs-ingest 那条路更强，那边两者是分别确定的。
+
+    `destination` 必须和后面 `commit --destination` 用的是同一个值。原因是
+    这两个字段指的是不同坐标系，混淆会让 materialize 全量 404：
+
+        target_path  release 内的相对路径          shards/a.bin
+        source_key   **Commit 内**的路径           datasets/robotics/shards/a.bin
+
+    import 会把 `prefix` 下的对象放到 Commit 的 `destination` 下面，而
+    materialize 从 lakeFS S3 Gateway 读取时用的键是 `<commit>/<source_key>`。
+    所以 source_key 必须带上 destination 前缀。cpfs-ingest 那条路径不会踩到
+    这个坑，因为它用 certify（只看 target_path，不回读 lakeFS）。
+
+    `with_digest=False` 时只记录 size，不读取任何数据。快，但发布出来的
+    release 永久失去 SHA-256 校验能力，只适合先摸清前缀里有什么。
+    """
+    normalized = _normalize_relative(prefix)
+    if not normalized:
+        raise DatasetSinkError("prefix 不能为空：必须指向对象存储里一个明确的前缀")
+    destination_prefix = validate_destination(destination)
+
+    listing: List[Tuple[str, str, int]] = []  # (key, relative, size)
+    seen: Dict[str, str] = {}
+    for key, size in reader.list_objects(normalized + "/"):
+        if key.endswith("/"):
+            # 控制台创建的「目录」是零字节的伪对象，不是数据。
+            continue
+        relative = key[len(normalized) + 1 :] if key.startswith(normalized + "/") else None
+        if not relative:
+            continue
+        _validate_object_relative_path(key, relative)
+        if relative in seen:
+            raise DatasetSinkError(
+                f"两个对象键规范化后指向同一个路径: {seen[relative]!r} 与 {key!r}"
+            )
+        seen[relative] = key
+        listing.append((key, relative, size))
+
+    if not listing:
+        raise DatasetSinkError(
+            f"前缀下没有对象: {normalized}。请确认桶名、前缀和当前身份的读权限。"
+        )
+
+    if with_digest:
+        digests: Dict[str, Tuple[int, str]] = {}
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+            futures = {
+                executor.submit(_digest_object, reader, key): relative
+                for key, relative, _ in listing
+            }
+            for future in as_completed(futures):
+                digests[futures[future]] = future.result()
+
+        for _, relative, size in listing:
+            actual = digests[relative][0]
+            if actual != size:
+                raise IntegrityError(
+                    f"{relative}: 列举时报告 {size} 字节，读取时得到 {actual} 字节。"
+                    "对象在扫描期间被改动过——存量前缀在建 Commit 前必须先冻结写入。"
+                )
+
+        entries = tuple(
+            ManifestEntry(
+                source_key=f"{destination_prefix}/{relative}",
+                target_path=relative,
+                size_bytes=digests[relative][0],
+                sha256=digests[relative][1],
+            )
+            for _, relative, _ in sorted(listing, key=lambda item: item[1])
+        )
+    else:
+        entries = tuple(
+            ManifestEntry(
+                source_key=f"{destination_prefix}/{relative}",
+                target_path=relative,
+                size_bytes=size,
+            )
+            for _, relative, size in sorted(listing, key=lambda item: item[1])
+        )
+
+    return ObjectScanResult(
+        entries=entries,
+        file_count=len(entries),
+        total_bytes=sum(e.size_bytes or 0 for e in entries),
+        digested=with_digest,
+    )
+
+
+def _digest_object(reader: ObjectReader, key: str) -> Tuple[int, str]:
+    stream = reader.open(key)
+    try:
+        return _digest_stream(stream)
+    finally:
+        close = getattr(stream, "close", None)
+        if close is not None:
+            close()
+
+
+def _validate_object_relative_path(key: str, relative: str) -> None:
+    """对象键的命名空间比文件系统宽松得多，进 manifest 前必须收紧。
+
+    OSS 允许 `a//b`、`a/./b`、`a/../b` 这类键共存且互不相同，而它们落到
+    文件系统上会塌缩成同一个路径。不拦住的话，materialize 时后写的文件会
+    覆盖先写的，release 里少了文件但 file_count 仍然对得上。
+    """
+    path = PurePosixPath(relative)
+    if path.is_absolute() or ".." in path.parts or "." in path.parts:
+        raise DatasetSinkError(
+            f"对象键含有无法安全落到文件系统的路径段: {key!r}。"
+            "请先在对象存储侧整理这些键，或换一个更精确的前缀。"
+        )
+    if relative != path.as_posix():
+        raise DatasetSinkError(f"对象键规范化前后不一致（可能含空段 `//`）: {key!r}。")
 
 
 # ---------------------------------------------------------------------------
 # ② archive：把 staging 归档到对象存储
 # ---------------------------------------------------------------------------
+
+
+def _s3_client(
+    *,
+    endpoint_url: str,
+    access_key_id: Optional[str],
+    secret_access_key: Optional[str],
+    security_token: Optional[str],
+    region: str,
+    verify_tls: bool,
+):
+    """建一个指向 OSS 的 S3 兼容客户端。
+
+    `security_token` 走 boto3 的 `aws_session_token` 参数。之前是建好客户端后
+    去改 `client._request_signer._credentials.token`——那是私有属性，boto3
+    一次升级就可能失效，而失效的表现是「凭证静默降级为无 token」，报错发生在
+    很远的地方。
+    """
+    try:
+        import boto3
+        from botocore.config import Config
+    except ImportError as exc:
+        raise OptionalDependencyError("访问 OSS 需要 `pip install -e '.[s3]'`") from exc
+
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=access_key_id,
+        aws_secret_access_key=secret_access_key,
+        aws_session_token=security_token,
+        region_name=region,
+        verify=verify_tls,
+        config=Config(s3={"addressing_style": "virtual"}),
+    )
 
 
 class ObjectWriter(Protocol):
@@ -205,24 +451,18 @@ class OssObjectWriter:
         endpoint_url: str,
         access_key_id: Optional[str] = None,
         secret_access_key: Optional[str] = None,
+        security_token: Optional[str] = None,
         region: str = "oss",
         verify_tls: bool = True,
     ) -> None:
-        try:
-            import boto3
-            from botocore.config import Config
-        except ImportError as exc:
-            raise OptionalDependencyError("归档到 OSS 需要 `pip install -e '.[s3]'`") from exc
-
         self.bucket = bucket
-        self.client = boto3.client(
-            "s3",
+        self.client = _s3_client(
             endpoint_url=endpoint_url,
-            aws_access_key_id=access_key_id,
-            aws_secret_access_key=secret_access_key,
-            region_name=region,
-            verify=verify_tls,
-            config=Config(s3={"addressing_style": "virtual"}),
+            access_key_id=access_key_id,
+            secret_access_key=secret_access_key,
+            security_token=security_token,
+            region=region,
+            verify_tls=verify_tls,
         )
 
     def exists(self, key: str, size_bytes: int) -> bool:
@@ -528,6 +768,31 @@ def validate_destination(destination: str) -> str:
     if collapsed in ("", "."):
         raise DatasetSinkError(f"destination 规范化后为空: {destination!r}")
     return collapsed
+
+
+def assert_manifest_matches_destination(manifest: Manifest, destination: str) -> None:
+    """确认 manifest 的 source_key 确实指向 Commit 内 `destination` 下的路径。
+
+    这是 scan-oss 与 commit 之间唯一的隐式契约：两条命令各自接收 destination，
+    填错一个不会立刻报错，而是等到 materialize 从 lakeFS 逐个 get_object 时
+    全量 404——那时数据已经 import 完、Commit 和 Tag 都建好了，回滚很难看。
+    这里花一次 O(n) 的字符串比较把它挡在建 Commit 之前。
+
+    只对 scan-oss 产出的 manifest 有意义。cpfs-ingest 的 manifest 里
+    source_key 是 staging 内的相对路径（archive 用它读本地文件），
+    与 Commit 内路径无关，所以那条路径不做这个校验。
+    """
+    normalized = validate_destination(destination)
+    prefix = normalized + "/"
+    mismatched = [e.source_key for e in manifest.entries if not e.source_key.startswith(prefix)]
+    if mismatched:
+        shown = ", ".join(sorted(mismatched)[:5])
+        raise DatasetSinkError(
+            f"manifest 的 source_key 不在 destination {normalized!r} 下面: {shown}"
+            f"（共 {len(mismatched)} 条）。\n"
+            "scan-oss 与 commit 的 --destination 必须填同一个值，否则 import 之后 "
+            "materialize 会在 lakeFS 里找不到任何对象。"
+        )
 
 
 def summarize_entries(entries: Sequence[ManifestEntry]) -> Dict[str, object]:

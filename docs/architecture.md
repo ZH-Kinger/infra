@@ -130,6 +130,64 @@ lakeFS Commit  →  certify 在 CPFS 内 rename 发布
 所以整条链路里字节只被真正搬运一次（CPFS → 对象存储）：`archive` 是唯一的数据搬运，
 `commit` 只读元数据，`certify` 只做 rename。
 
+### 存量数据已经在对象存储上怎么办
+
+这是最常见的起点，也是**最省事**的一条路：什么都不用搬。
+
+```
+现有 OSS 前缀（不动）
+   │  scan-oss   列举 + 算 SHA-256 → manifest.jsonl
+   │             只读，不写不删；对象一个字节都不动
+   ▼
+   │  commit     lakeFS 零拷贝 import → Commit（+ Tag）
+   ▼             只记录对象的物理地址
+lakeFS Commit
+   │  materialize  按 Commit 拷到 CPFS 供训练读
+   ▼
+CPFS release
+```
+
+对比三条入口：
+
+| 起点 | 命令 | 搬多少字节 |
+|---|---|---|
+| 存量数据在 OSS | `scan-oss` → `commit` → `materialize` | 只有最后一步 OSS→CPFS；建 Commit **零搬运** |
+| 新数据在 CPFS | `scan` → `archive` → `commit` → `certify` | 一次 CPFS→OSS；发布是 rename |
+| 数据已在 lakeFS | `materialize` | 一次 OSS→CPFS |
+
+三条路里，**`archive` 只出现在中间那条**。存量 OSS 数据不需要归档，因为归档的目的
+就是把字节放到持久位置上，而它们已经在那儿了。
+
+#### 两个必须知道的后果
+
+**一、import 之后原前缀就是只读区。** 零拷贝的含义是 Commit 只记录对象的物理地址，
+字节仍然只有原处那一份。删掉或覆盖其中的对象，等于让已发布的 Commit 悬空——版本
+记录还在，数据没了，而且**当时不会有任何东西报错**，要等到下一次 materialize 或
+`verify --deep` 才暴露。所以这些前缀要登记进 `imported_data_prefixes`，Terraform
+会对五个身份统一 Deny 写入与删除。RAM 只能约束本项目管理的身份，真正的兜底是桶级
+Policy + 版本控制 + 合规保留策略。
+
+**二、SHA-256 只能靠读一遍算出来。** 对象存储只提供 size 和 ETag（ETag 是 MD5，
+分片上传时连 MD5 都不是），拿不到 SHA-256。`scan-oss` 默认完整读一遍来算，代价是
+一次全量读。可以用 `--no-digest` 跳过，但那样发布出来的 release 会**永久**失去内容
+校验能力（`verify --deep` 和 `training-guard --deep` 退化成只比大小），因为 manifest
+随发布固化，事后补不上。所以 `--no-digest` 只适合先摸清前缀里有什么。
+
+#### 两个坐标系
+
+`scan-oss` 和 `commit` 的 `--destination` 必须填同一个值。manifest 里两个字段指的是
+不同坐标系：
+
+| 字段 | 含义 | 例 |
+|---|---|---|
+| `target_path` | release 目录内的相对路径 | `shards/a.bin` |
+| `source_key` | **Commit 内**的路径 | `datasets/robotics/shards/a.bin` |
+
+import 把 `prefix` 下的对象放到 Commit 的 `destination` 下面，而 `materialize` 从
+lakeFS S3 Gateway 取对象用的键是 `<commit>/<source_key>`。填错的后果是 materialize
+全量 404，而那时 Commit 和 Tag 都已经建好了。`commit` 会在建 Commit 之前比对
+manifest 与 destination，把这个错误挡在前面。
+
 ### 两种沉降模式
 
 数据已经有 Commit 之后，取决于它在哪里：
@@ -191,27 +249,35 @@ CPFS 上的目录布局就是协议本身：
 
 ```
 src/dataset_sink/
-├── cli.py             251 行  6 个子命令的参数解析与编排
-├── materializer.py    369 行  核心：并行沉降、锁、原子发布、certify、verify
-├── aliyun_cli.py      164 行  PAI 注册（默认 dry-run、按 Commit 幂等查重）
-├── manifest.py        119 行  JSONL Manifest 解析与校验
-├── sources.py          68 行  源适配器：LakeFSS3SourceReader / LocalSourceReader
+├── ingest.py          806 行  接入版本体系：scan / scan-oss / archive / commit
+├── cli.py             513 行  10 个子命令的参数解析与编排
+├── materializer.py    372 行  核心：并行沉降、锁、原子发布、certify、verify
+├── aliyun_cli.py      163 行  PAI 注册（默认 dry-run、按 Commit 幂等查重）
+├── manifest.py        122 行  JSONL Manifest 解析与校验
+├── sources.py          67 行  源适配器：LakeFSS3SourceReader / LocalSourceReader
 ├── pai.py              66 行  构造 CreateDatasetVersion 请求体
-├── training_guard.py   40 行  训练启动门禁（fail-closed）
-├── lakefs_refs.py      32 行  Tag/Branch/Ref → 固定 Commit ID
-└── errors.py           19 行  DatasetSinkError / ReleaseConflictError
+├── training_guard.py   34 行  训练启动门禁（fail-closed）
+├── lakefs_refs.py      31 行  Tag/Branch/Ref → 固定 Commit ID
+└── errors.py           18 行  DatasetSinkError / ReleaseConflictError
 ```
 
-六个子命令对应发布链路的六个动作：
+十个子命令对应发布链路的十个动作：
 
 | 命令 | 职责 | 执行身份 |
 |---|---|---|
+| `scan` | 扫描 CPFS staging → manifest | 无需云权限 |
+| `scan-oss` | 列举对象存储存量前缀 → manifest | 只读对象存储 |
+| `archive` | staging → 对象存储（幂等可续传） | `DatasetMaterializerRole` |
+| `commit` | 零拷贝 import → lakeFS Commit | 仅 lakeFS 凭证 |
 | `materialize` | 从 lakeFS 拷贝并发布 | `DatasetMaterializerRole` |
 | `certify` | 从 CPFS Staging 零复制发布 | `DatasetMaterializerRole` |
 | `verify` | 校验 release（`--deep` 重算全部哈希） | 任意只读身份 |
 | `pai-request` | 生成 CreateDatasetVersion 请求 JSON | 无需云权限 |
 | `register-pai` | 调 PAI OpenAPI 注册版本 | `DatasetRegisterRole` |
 | `training-guard` | 训练容器内校验挂载版本 | `TrainingRuntimeRole` |
+
+注意 `commit` 那一行：它是唯一一个**不需要任何阿里云身份**的写操作。建 Commit 只需要
+lakeFS 凭证，不需要碰数据——不需要碰数据的步骤就不该有碰数据的能力。
 
 两个刻意的设计：
 
@@ -388,6 +454,8 @@ Terraform 管低频稳定资源（Workspace、网络、存储、角色、成员�
 | 目录名用 Commit ID | 不可变、可复现、可交叉验证 | 人不易读，需靠 `release.json` 和 Tag 辅助 |
 | `_READY` 最后写入 | 部分失败的沉降不会被误消费 | 消费方必须检查，不能只看目录存在 |
 | `certify` 零复制路径 | TB 级数据集发布从小时降到秒 | 要求 Staging 预先按 `target_path` 布局 |
+| 存量 OSS 数据零拷贝 import | 不搬字节即可纳入版本体系 | 原前缀变成只读区，误删会让 Commit 悬空 |
+| `scan-oss` 默认算 SHA-256 | 对象存储给不了 SHA-256，只能读一遍 | 一次全量读；`--no-digest` 省掉但永久失去深度校验 |
 | `register-pai` 默认 dry-run | 改动 PAI 必须显式且可预览 | 多一步操作 |
 | 按 Commit 幂等查重 | 重放安全，重复执行不产生重复版本 | 每次 execute 多一次 List 调用 |
 | `pai-request` 与 `register-pai` 分离 | 请求内容与执行权限解耦，可分别审批 | 多一个中间产物 |

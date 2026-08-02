@@ -11,12 +11,16 @@ from typing import Optional, Sequence
 from .aliyun_cli import register_pai_dataset_version
 from .errors import DatasetSinkError
 from .ingest import (
+    LocalObjectReader,
     LocalObjectWriter,
+    OssObjectReader,
     OssObjectWriter,
     archive_staging,
+    assert_manifest_matches_destination,
     build_commit_metadata,
     import_and_commit,
     object_store_uri_for,
+    scan_object_store,
     scan_staging,
     summarize_entries,
     validate_destination,
@@ -68,6 +72,35 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("staging_dir", type=Path)
     scan.add_argument("--output", type=Path, required=True)
     scan.add_argument("--workers", type=int, default=8)
+
+    scan_oss = commands.add_parser(
+        "scan-oss",
+        help="扫描对象存储里**已有**的存量数据，生成 manifest（不搬运任何字节）",
+    )
+    scan_oss.add_argument("--prefix", required=True, help="对象存储里的现有前缀")
+    scan_oss.add_argument(
+        "--destination",
+        required=True,
+        help="Commit 内的目标路径，必须与随后 commit --destination 填的值一致",
+    )
+    scan_oss.add_argument("--output", type=Path, required=True)
+    scan_oss.add_argument("--source", choices=("oss", "local"), default="oss")
+    scan_oss.add_argument("--bucket", help="OSS 桶名（--source oss 时必填）")
+    scan_oss.add_argument("--endpoint-url", help="OSS S3 兼容端点（--source oss 时必填）")
+    scan_oss.add_argument("--local-root", type=Path, help="--source local 时的根目录")
+    scan_oss.add_argument("--access-key-id", help="留空则回落到环境变量")
+    scan_oss.add_argument("--secret-access-key")
+    scan_oss.add_argument("--security-token", help="使用 STS 临时凭证时提供")
+    scan_oss.add_argument(
+        "--no-digest",
+        action="store_true",
+        help=(
+            "只列举 size，不读取对象内容。快，但发布出来的 release 永久失去 "
+            "SHA-256 校验能力（manifest 随发布固化，事后补不上）。仅用于摸底。"
+        ),
+    )
+    scan_oss.add_argument("--workers", type=int, default=8)
+    scan_oss.add_argument("--no-verify-tls", action="store_true")
 
     archive = commands.add_parser(
         "archive",
@@ -189,6 +222,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             result = _materialize(args)
         elif args.command == "scan":
             result = _scan(args)
+        elif args.command == "scan-oss":
+            result = _scan_oss(args)
         elif args.command == "archive":
             result = _archive(args)
         elif args.command == "commit":
@@ -261,6 +296,67 @@ def _first_env(*names: str) -> Optional[str]:
     return None
 
 
+def _oss_credentials(args: argparse.Namespace) -> dict:
+    """凭证回落顺序：显式参数 → OSS_* → ALIBABA_CLOUD_*。
+
+    最后一组是关键：流水线里 configure-aliyun-credentials-action 通过 OIDC
+    假设 RAM 角色后注入的正是 ALIBABA_CLOUD_* 三件套，只认 OSS_* 会导致
+    CI 里拿不到凭证。
+    """
+    return {
+        "access_key_id": args.access_key_id
+        or _first_env("OSS_ACCESS_KEY_ID", "ALIBABA_CLOUD_ACCESS_KEY_ID"),
+        "secret_access_key": args.secret_access_key
+        or _first_env("OSS_ACCESS_KEY_SECRET", "ALIBABA_CLOUD_ACCESS_KEY_SECRET"),
+        "security_token": args.security_token
+        or _first_env("OSS_SECURITY_TOKEN", "ALIBABA_CLOUD_SECURITY_TOKEN"),
+    }
+
+
+def _scan_oss(args: argparse.Namespace) -> dict:
+    if args.source == "local":
+        if args.local_root is None:
+            raise ValueError("--source local 需要 --local-root")
+        reader = LocalObjectReader(args.local_root)
+    else:
+        if not args.bucket or not args.endpoint_url:
+            raise ValueError("--source oss 需要 --bucket 与 --endpoint-url")
+        reader = OssObjectReader(
+            bucket=args.bucket,
+            endpoint_url=args.endpoint_url,
+            verify_tls=not args.no_verify_tls,
+            **_oss_credentials(args),
+        )
+
+    result = scan_object_store(
+        reader,
+        args.prefix,
+        args.destination,
+        with_digest=not args.no_digest,
+        workers=args.workers,
+    )
+    dump_manifest(result.entries, args.output)
+    manifest = Manifest.load(args.output)
+
+    payload = summarize_entries(result.entries)
+    payload.update(
+        {
+            "manifest": str(args.output),
+            "manifest_sha256": manifest.sha256,
+            "prefix": args.prefix,
+            "destination": validate_destination(args.destination),
+            "integrity": "SHA256" if result.digested else "SIZE_ONLY",
+        }
+    )
+    if not result.digested:
+        payload["warning"] = (
+            "本次未计算 SHA-256。用这份 manifest 发布出来的 release 无法通过 "
+            "verify --deep 与 training-guard --deep 做内容校验，且 manifest 随发布"
+            "固化、事后无法补算。正式发布前请去掉 --no-digest 重跑。"
+        )
+    return payload
+
+
 def _archive(args: argparse.Namespace) -> dict:
     manifest = Manifest.load(args.manifest)
 
@@ -271,25 +367,12 @@ def _archive(args: argparse.Namespace) -> dict:
     else:
         if not args.bucket or not args.endpoint_url:
             raise ValueError("--target oss 需要 --bucket 与 --endpoint-url")
-        # 回落顺序：显式参数 → OSS_* → ALIBABA_CLOUD_*。
-        # 最后一组是关键：流水线里 configure-aliyun-credentials-action 通过
-        # OIDC 假设 RAM 角色后注入的正是 ALIBABA_CLOUD_* 三件套，只认 OSS_*
-        # 会导致 CI 里拿不到凭证。
         writer = OssObjectWriter(
             bucket=args.bucket,
             endpoint_url=args.endpoint_url,
-            access_key_id=args.access_key_id
-            or _first_env("OSS_ACCESS_KEY_ID", "ALIBABA_CLOUD_ACCESS_KEY_ID"),
-            secret_access_key=args.secret_access_key
-            or _first_env("OSS_ACCESS_KEY_SECRET", "ALIBABA_CLOUD_ACCESS_KEY_SECRET"),
             verify_tls=not args.no_verify_tls,
+            **_oss_credentials(args),
         )
-        token = args.security_token or _first_env(
-            "OSS_SECURITY_TOKEN", "ALIBABA_CLOUD_SECURITY_TOKEN"
-        )
-        if token:
-            # boto3 客户端已经建好，这里补上会话令牌以支持 STS 临时凭证。
-            writer.client._request_signer._credentials.token = token  # noqa: SLF001
 
     result = archive_staging(
         args.staging_dir,
@@ -311,6 +394,12 @@ def _commit(args: argparse.Namespace) -> dict:
     manifest = Manifest.load(args.manifest)
     destination = validate_destination(args.destination)
     uri = object_store_uri_for(args.object_store_uri, args.prefix)
+
+    # scan-oss 产出的 manifest 里 source_key 是 Commit 内路径，必须和这里的
+    # destination 对得上；对不上就在建 Commit 之前停下，而不是等 materialize
+    # 全量 404。cpfs-ingest 的 manifest 不属于这一类，跳过。
+    if all(entry.source_key != entry.target_path for entry in manifest.entries):
+        assert_manifest_matches_destination(manifest, destination)
 
     metadata = build_commit_metadata(
         manifest=manifest,

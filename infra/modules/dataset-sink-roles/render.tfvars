@@ -16,3 +16,9 @@ lakefs_backend_prefix = ""
 dataset_bucket        = "DATASET_BUCKET"
 developer_group_name  = "pai-prod-developers"
 deny_destructive      = true
+
+# 放一条占位前缀，好让 deploy/ram/*.json 里能看到「存量前缀被 import 之后
+# 变成只读区」这组语句的实际形状——评审看的是渲染结果，不是变量默认值。
+imported_data_prefixes = [
+  { bucket = "LEGACY_BUCKET", prefix = "LEGACY_PREFIX" },
+]

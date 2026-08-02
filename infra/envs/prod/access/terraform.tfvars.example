@@ -50,3 +50,9 @@ pai_members = {
   #   roles   = ["PAI.WorkspaceGuest"]
   # }
 }
+
+# 已被 lakeFS import 引用的存量前缀。登记后这些对象对本项目的五个身份只读，
+# 删除或覆盖它们会让已发布的 Commit 悬空。见 docs/permissions.md 第 6.1 节。
+# imported_data_prefixes = [
+#   { bucket = "legacy-data", prefix = "legacy/robotics" },
+# ]

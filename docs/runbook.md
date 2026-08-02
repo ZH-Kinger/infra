@@ -162,6 +162,49 @@ Actions → Dataset release → Run workflow，填参数。流水线会在 dry-r
 | CPFS staging 已就绪，Commit 已存在 | `certify` | `prepared_dir`、`manifest_path` |
 | 数据在 lakeFS，要拷到 CPFS | `materialize` | `manifest_path` |
 
+### 2.4.1 存量数据已经在 OSS 上
+
+这是最省事的一条：**不需要迁移，不需要归档**。目前走命令行，还没做成流水线 mode。
+
+```bash
+# ① 列举 + 算 SHA-256（会完整读一遍数据，TB 级请预留时间）
+dataset-sink scan-oss \
+  --bucket legacy-data --endpoint-url https://oss-cn-hangzhou.aliyuncs.com \
+  --prefix legacy/robotics --destination datasets/robotics \
+  --output /work/manifest.jsonl
+
+# ② 零拷贝 import 建 Commit（秒级，不搬字节）
+dataset-sink commit --repository robotics-data --branch main \
+  --object-store-uri s3://legacy-data \
+  --prefix legacy/robotics --destination datasets/robotics \
+  --manifest /work/manifest.jsonl --tag robotics-v2026.08.02.1
+
+# ③ 之后按 materialize 模式跑流水线，把这个 Commit 拷到 CPFS
+```
+
+三件必须注意的事：
+
+1. **`--destination` 两处必须一致。** manifest 的 `source_key` 是 Commit 内路径，
+   填错会让后面的 `materialize` 全量 404。`commit` 会在建 Commit 之前拦下。
+2. **扫描期间前缀必须冻结写入。** `scan-oss` 会核对列举时的 size 与读取时的实际
+   字节数，对不上直接失败——但那已经是事后发现。正确做法是先停掉写入方。
+3. **import 之后原前缀就是只读区。** 删除或覆盖其中的对象会让 Commit 悬空，
+   且当时不会报错。把这些前缀登记进 `infra/envs/*/access/terraform.tfvars` 的
+   `imported_data_prefixes`，Terraform 会对五个身份统一 Deny 写删。
+
+   ```hcl
+   imported_data_prefixes = [
+     { bucket = "legacy-data", prefix = "legacy/robotics" },
+   ]
+   ```
+
+   注意这只约束本项目管理的身份。持有 `AliyunOSSFullAccess` 的既有 RAM 用户仍然
+   能删——兜底要靠桶级 Policy + 版本控制 + 合规保留策略。
+
+`--no-digest` 可以跳过哈希计算，但那样发布出来的 release **永久**失去内容校验能力
+（`verify --deep` 和 `training-guard --deep` 退化成只比大小），因为 manifest 随发布
+固化、事后补不上。只用它来先摸清前缀里有什么。
+
 `cpfs-ingest` 模式额外需要这几个仓库变量：
 
 | 变量 | 说明 |

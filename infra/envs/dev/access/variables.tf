@@ -86,3 +86,22 @@ variable "developer_user_names" {
   type        = list(string)
   default     = []
 }
+
+variable "imported_data_prefixes" {
+  description = <<-EOT
+    已被 lakeFS 零拷贝 import 引用的存量数据前缀。
+
+    存量数据不需要迁移：scan-oss 列举出 manifest，commit 零拷贝 import 建
+    Commit，全程不搬字节。但 Commit 只记录对象的物理地址，字节仍然只有原处
+    那一份——删除或覆盖其中的对象会让已发布的 Commit 悬空，且当时不报错。
+
+    在这里登记的前缀会：给沉降角色只读权限，并对全部五个身份 Deny 写删。
+    这只约束本项目管理的身份，兜底仍需桶级 Policy + 版本控制 + WORM，
+    见 docs/permissions.md 第 6.1 节。
+  EOT
+  type = list(object({
+    bucket = string
+    prefix = string
+  }))
+  default = []
+}
