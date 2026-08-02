@@ -2,7 +2,7 @@
 
 region = "cn-hangzhou"
 
-dataset_bucket = "REPLACE-ME-dataset-archive" # 全局唯一
+dataset_bucket = "dataset-sink-REPLACE-ME-archive" # 全局唯一，必须以 dataset-sink- 开头
 
 # 已存在的 CPFS 文件系统 ID。本层只查询不创建。
 #

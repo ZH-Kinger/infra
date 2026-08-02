@@ -73,6 +73,34 @@ variable "oidc_thumbprints" {
   }
 }
 
+variable "managed_name_prefixes" {
+  description = <<-EOT
+    本项目管理的资源名前缀。CI 角色的写权限**只覆盖名字以这些前缀开头的资源**，
+    这是单账号内与其他项目隔离的核心机制。
+
+    为什么需要它：没有这个约束时，PlatformApplyRole 能改账号里任意 OSS 桶的
+    ACL，AccessApplyRole 能删账号里任意自定义 RAM 策略——包括其他项目的。
+    「CI 只碰自己的资源」不能只靠 Terraform 代码写得对，必须在权限层强制。
+
+    代价是命名纪律：本项目创建的桶、角色、策略、用户组都必须以这些前缀开头，
+    否则 apply 会因权限不足失败（这正是想要的失败方式——早失败，且原因明确）。
+
+    默认值覆盖两类命名：dataset-sink-*（角色与策略）和 pai-*（研发用户组）。
+  EOT
+  type        = list(string)
+  default     = ["dataset-sink-", "pai-"]
+
+  validation {
+    condition     = length(var.managed_name_prefixes) > 0
+    error_message = "至少要有一个前缀，否则 CI 角色将没有任何写权限。"
+  }
+
+  validation {
+    condition     = alltrue([for p in var.managed_name_prefixes : length(p) >= 4])
+    error_message = "前缀至少 4 个字符。太短的前缀（如 p-）起不到隔离作用。"
+  }
+}
+
 variable "state_retention_days" {
   description = "state 桶历史版本保留天数。state 是排查和回滚的最后依据，不要设得太短"
   type        = number

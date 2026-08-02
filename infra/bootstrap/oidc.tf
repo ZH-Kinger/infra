@@ -32,6 +32,31 @@ locals {
   ci_role_arns   = [for n in local.ci_role_names : "acs:ram:*:${local.account_id}:role/${n}"]
   ci_policy_arns = [for n in local.ci_role_names : "acs:ram:*:${local.account_id}:policy/${n}Policy"]
 
+  # ---------------------------------------------------------------------------
+  # 单账号隔离：按资源名前缀限定 CI 角色的写权限范围。
+  #
+  # 这些 ARN 决定了「CI 能碰哪些资源」。账号里其他项目的桶、策略、角色只要
+  # 不以这些前缀开头，CI 角色在权限层就够不着——不依赖 Terraform 代码写得对。
+  # ---------------------------------------------------------------------------
+  managed_bucket_arns = flatten([
+    for p in var.managed_name_prefixes : [
+      "acs:oss:*:${local.account_id}:${p}*",
+      "acs:oss:*:${local.account_id}:${p}*/*",
+    ]
+  ])
+
+  managed_policy_arns = [
+    for p in var.managed_name_prefixes : "acs:ram:*:${local.account_id}:policy/${p}*"
+  ]
+
+  managed_role_arns = [
+    for p in var.managed_name_prefixes : "acs:ram:*:${local.account_id}:role/${p}*"
+  ]
+
+  managed_group_arns = [
+    for p in var.managed_name_prefixes : "acs:ram:*:${local.account_id}:group/${p}*"
+  ]
+
   # state 读 + 锁。plan 也会加锁，所以 plan 角色同样需要锁表的行读写权限。
   state_read_statements = [
     {
@@ -161,6 +186,9 @@ locals {
         local.state_write_statement,
         local.read_only_statement,
         {
+          # 只能管理名字以 managed_name_prefixes 开头的桶。
+          # 没有这个限定的话，这个角色能把账号里任意桶（包括其他项目的）
+          # 改成公共读——删不掉但能改坏，破坏半径一样大。
           Sid    = "ManagePlatformStorage"
           Effect = "Allow"
           Action = [
@@ -172,7 +200,7 @@ locals {
             "oss:PutBucketTagging",
             "oss:GetBucketTagging",
           ]
-          Resource = ["*"]
+          Resource = local.managed_bucket_arns
         },
         {
           Sid    = "DenyAllIdentityAndPermissionWrites"
@@ -229,7 +257,10 @@ locals {
         local.state_write_statement,
         local.read_only_statement,
         {
-          Sid    = "ManageDataPlanePermissions"
+          # 只能管理名字以 managed_name_prefixes 开头的策略。
+          # 没有这个限定的话，这个角色能删掉账号里任意自定义策略——包括
+          # 其他项目赖以运行的那些，一次误操作就能让别的系统整体失权。
+          Sid    = "ManageProjectPolicies"
           Effect = "Allow"
           Action = [
             "ram:CreatePolicy",
@@ -237,20 +268,48 @@ locals {
             "ram:DeletePolicy",
             "ram:DeletePolicyVersion",
             "ram:SetDefaultPolicyVersion",
+          ]
+          Resource = local.managed_policy_arns
+        },
+        {
+          Sid    = "ManageProjectRoles"
+          Effect = "Allow"
+          Action = [
             "ram:CreateRole",
             "ram:UpdateRole",
             "ram:DeleteRole",
             "ram:AttachPolicyToRole",
             "ram:DetachPolicyFromRole",
+          ]
+          Resource = local.managed_role_arns
+        },
+        {
+          Sid    = "ManageProjectGroups"
+          Effect = "Allow"
+          Action = [
             "ram:CreateGroup",
             "ram:UpdateGroup",
             "ram:DeleteGroup",
             "ram:AttachPolicyToGroup",
             "ram:DetachPolicyFromGroup",
+          ]
+          Resource = local.managed_group_arns
+        },
+        {
+          # 组成员进出：资源既涉及组也涉及用户。用户 ARN 无法按前缀收窄
+          # ——要把**已有**用户加进本项目的组，就必须能指向任意用户。
+          # 约束由上一条（只能管本项目前缀的组）承担：即使这里能指向任意
+          # 用户，也只能把他加进本项目的组，因为别的组这个角色碰不到。
+          Sid    = "ManageProjectGroupMembership"
+          Effect = "Allow"
+          Action = [
             "ram:AddUserToGroup",
             "ram:RemoveUserFromGroup",
           ]
-          Resource = ["*"]
+          Resource = concat(
+            local.managed_group_arns,
+            ["acs:ram:*:${local.account_id}:user/*"],
+          )
         },
         {
           Sid    = "ManagePaiWorkspaceMembership"

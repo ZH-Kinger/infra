@@ -19,7 +19,7 @@ lakefs_backend_bucket = "REPLACE-ME-lakefs-backend"
 lakefs_backend_prefix = "" # 留空表示整桶
 
 # 取自 infra/envs/prod/platform 的 dataset_bucket output
-dataset_bucket = "REPLACE-ME-dataset-archive"
+dataset_bucket = "dataset-sink-REPLACE-ME-archive"
 
 developer_group_name = "pai-dev-developers"
 

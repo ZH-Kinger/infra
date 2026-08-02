@@ -229,7 +229,87 @@ aliyun ram ListPoliciesForUser --UserName <用户名>
 Deny 语句**，对他而言这套权限设计等于不存在。这类账号要么降权，要么就得承认
 整套模型在他身上不生效。
 
-## 6. 长期凭证
+## 6. 资源隔离：CI/CD 怎么保证只碰自己的资源
+
+账号里往往同时跑着别的项目。本项目的 CI 拿到的是能改基础设施和权限的角色，
+必须回答一个问题：**它凭什么碰不到别人的资源？**
+
+答案不能是「因为 Terraform 代码只写了自己的资源」。代码会写错，PR 会被绕过，
+`terraform import` 能把任意资源拉进 state。隔离必须在**权限层**强制。
+
+### 六层隔离，从弱到强
+
+| 层 | 机制 | 挡住什么 | 强度 |
+|---|---|---|---|
+| 1 | Terraform state 分层 | 一层的误操作波及不到另一层的资源 | 弱：只防意外，不防越权 |
+| 2 | 资源名前缀 + ARN 限定 | CI 角色够不到不以本项目前缀开头的资源 | **中：本仓库的主力机制** |
+| 3 | 角色职责分离 | 基础设施角色改不了权限，权限角色改不了基础设施 | 中 |
+| 4 | 显式 Deny 护栏 | 删除类操作即使被 Allow 也执行不了 | 中 |
+| 5 | 资源组（Resource Group） | 官方的账号内隔离单元，可按资源组授权 | 强（本仓库**尚未实现**） |
+| 6 | 独立阿里云账号 | 跨账号默认不可达 | 最强 |
+
+### 第 2 层：本仓库实际怎么做的
+
+`infra/bootstrap` 的 `managed_name_prefixes`（默认 `["dataset-sink-", "pai-"]`）
+把 CI 角色的写权限限定到匹配前缀的 ARN：
+
+```hcl
+managed_bucket_arns = ["acs:oss:*:<账号>:dataset-sink-*", "acs:oss:*:<账号>:dataset-sink-*/*", ...]
+managed_policy_arns = ["acs:ram:*:<账号>:policy/dataset-sink-*", ...]
+managed_role_arns   = ["acs:ram:*:<账号>:role/dataset-sink-*", ...]
+managed_group_arns  = ["acs:ram:*:<账号>:group/pai-*", ...]
+```
+
+于是：
+
+- `TerraformPlatformApplyRole` 只能改 `dataset-sink-*` 开头的桶。别的项目的桶，
+  连 `PutBucketAcl` 都调不动。
+- `TerraformAccessApplyRole` 只能增删 `dataset-sink-*` 的策略和角色、`pai-*` 的组。
+  别的项目的自定义策略，它删不掉。
+
+**代价是命名纪律**：本项目创建的资源必须以这些前缀开头，否则 apply 会因权限
+不足失败。这是刻意的——早失败，且失败原因明确。`dataset_bucket` 变量因此有
+`startswith` 校验，在 plan 阶段就拦住不合规的名字，而不是等到 apply 报一个
+难懂的权限错误。
+
+### 一个无法按前缀收窄的地方
+
+`ram:AddUserToGroup` / `ram:RemoveUserFromGroup` 的资源涉及用户，而要把**已有**
+用户加进本项目的组，就必须能指向任意用户，没法按前缀限制。
+
+约束由组 ARN 承担：即使能指向任意用户，也只能把他加进 `pai-*` 开头的组，
+因为别的组这个角色碰不到。残余风险是可以把某人从本项目的组里移除——
+影响面限于本项目。
+
+### PAI 侧没有资源级隔离
+
+前面第 2 节说过：`paidataset:*`、`paidlc:*`、`paiworkspace:*` 在官方定义里都是
+`Resource: "*"`。所以**如果账号里有别的团队也在用 PAI，本项目的角色在 RAM 层
+挡不住它去动别人的 Dataset 和 Job**。
+
+这种情况下只能靠：
+
+- PAI Workspace 成员角色（别的团队用别的 Workspace，本项目的角色不是其成员）；
+- 或者干脆分账号。
+
+如果 PAI 上有多团队共存且数据敏感，**分账号是唯一可靠的答案**，不要指望 RAM。
+
+### 什么时候该升级到第 5、6 层
+
+| 情况 | 建议 |
+|---|---|
+| 账号里只有本项目 | 现有的前缀隔离足够 |
+| 账号里有别的项目，但资源类型不重叠 | 现有机制足够，保持命名纪律 |
+| 账号里有别的团队也在用 PAI | 上资源组，或分账号 |
+| 生产数据受合规约束 | 分账号，用资源目录统一管理 |
+| 需要按项目出账 | 资源组或分账号 |
+
+资源组的接入方式：给所有资源加 `resource_group_id`，RAM 策略用
+`acs:rm:*:<账号>:resourcegroup/<id>` 或 `Condition: acs:ResourceGroupId`。
+本仓库预留了 `tags` 但**没有实现资源组**——需要的话再加，改动集中在
+`infra/bootstrap` 的 ARN 构造和各资源的 `resource_group_id` 参数。
+
+## 7. 长期凭证
 
 整套设计不使用任何长期 AccessKey：
 
@@ -245,7 +325,7 @@ Deny 语句**，对他而言这套权限设计等于不存在。这类账号要�
 
 ---
 
-## 7. 变更流程
+## 8. 变更流程
 
 | 变更类型 | 路径 | 审批 |
 |---|---|---|
@@ -259,7 +339,7 @@ Terraform 收回，而且没有任何记录说明是谁、为什么加的。
 
 ---
 
-## 8. 审计
+## 9. 审计
 
 | 看什么 | 在哪看 |
 |---|---|

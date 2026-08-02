@@ -4,8 +4,19 @@ variable "region" {
 }
 
 variable "dataset_bucket" {
-  description = "数据集归档/输出桶名，全局唯一"
+  description = <<-EOT
+    数据集归档/输出桶名，全局唯一。
+
+    必须以 dataset-sink- 开头：CI 角色的 OSS 写权限按这个前缀限定
+    （见 infra/bootstrap 的 managed_name_prefixes）。名字不符会在 apply
+    时因权限不足失败，那种报错很难懂，所以在这里先拦一道。
+  EOT
   type        = string
+
+  validation {
+    condition     = startswith(var.dataset_bucket, "dataset-sink-")
+    error_message = "dataset_bucket 必须以 dataset-sink- 开头，否则 TerraformPlatformApplyRole 无权管理它。这个前缀是单账号内与其他项目隔离的边界，不要为了图方便绕过。"
+  }
 }
 
 variable "cpfs_filesystem_id" {
