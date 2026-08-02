@@ -1,0 +1,36 @@
+{
+  "DisplayName": "robotics-commit-e2e-001",
+  "JobType": "PyTorchJob",
+  "WorkspaceId": "${PAI_WORKSPACE_ID}",
+  "ResourceId": "${PAI_RESOURCE_ID}",
+  "Accessibility": "PRIVATE",
+  "UserCommand": "/workspace/examples/pai/training-entrypoint.sh",
+  "JobSpecs": [
+    {
+      "Type": "Worker",
+      "Image": "${TRAINING_IMAGE}",
+      "PodCount": 1,
+      "EcsSpec": "${DLC_ECS_SPEC}",
+      "RestartPolicy": "Never"
+    }
+  ],
+  "DataSources": [
+    {
+      "DataSourceId": "${PAI_DATASET_ID}",
+      "DataSourceVersion": "${PAI_DATASET_VERSION}",
+      "MountPath": "/mnt/dataset",
+      "MountAccess": "RO"
+    }
+  ],
+  "CustomEnvs": [
+    {"Key": "DATASET_ROOT", "Value": "/mnt/dataset", "Visible": "PUBLIC"},
+    {"Key": "DATASET_COMMIT", "Value": "commit-e2e-001", "Visible": "PUBLIC"},
+    {"Key": "DATASET_MANIFEST_SHA256", "Value": "${MANIFEST_SHA256}", "Visible": "PUBLIC"},
+    {"Key": "PAIMON_SNAPSHOT_ID", "Value": "1842", "Visible": "PUBLIC"}
+  ],
+  "UserVpc": {
+    "VpcId": "${VPC_ID}",
+    "SwitchId": "${VSWITCH_ID}",
+    "SecurityGroupId": "${SECURITY_GROUP_ID}"
+  }
+}

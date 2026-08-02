@@ -1,0 +1,12 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "paidlc:CreateJob"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+dist/
+build/
+*.egg-info/
+.env
+
+# Terraform: never commit state, plans, or resolved variable values.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+.terraform.tfstate.lock.info
+crash.log
+crash.*.log
+terraform.tfvars
+*.auto.tfvars
+backend.hcl
+# .terraform.lock.hcl is intentionally NOT ignored: provider versions must be pinned in git.
+
+# Discovery output (may contain account ids).
+.discovery/
+
+# Local agent settings.
+.claude/settings.local.json

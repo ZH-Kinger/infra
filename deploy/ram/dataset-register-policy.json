@@ -1,0 +1,13 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "paidataset:CreateDatasetVersion",
+        "paidataset:ListDatasetVersions"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
