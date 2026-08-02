@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "permissions": {
+    "allow": [
+      "Bash(make test)",
+      "Bash(make compile)",
+      "Bash(make lint)",
+      "Bash(make fmt)",
+      "Bash(make e2e)",
+      "Bash(make tf-validate)",
+      "Bash(make hooks)",
+      "Bash(python3 -m unittest *)",
+      "Bash(python3 -m compileall *)",
+      "Bash(python3 -m ruff *)",
+      "Bash(terraform version)",
+      "Bash(terraform fmt *)",
+      "Bash(terraform validate *)",
+      "Bash(terraform providers *)",
+      "Bash(terraform init -backend=false *)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git ls-files *)",
+      "Bash(git branch *)",
+      "Bash(bash -n *)",
+      "Bash(shellcheck *)",
+      "Bash(aliyun sts GetCallerIdentity *)",
+      "Bash(./scripts/discover-aliyun-ids.sh *)"
+    ],
+    "deny": [
+      "Bash(terraform apply *)",
+      "Bash(terraform destroy *)",
+      "Bash(terraform import *)",
+      "Bash(terraform state *)",
+      "Bash(terraform taint *)",
+      "Bash(terraform untaint *)",
+      "Bash(terraform force-unlock *)",
+      "Bash(terraform login *)",
+      "Bash(aliyun oss rm *)",
+      "Bash(aliyun oss sync *)",
+      "Bash(rm -rf *)",
+      "Bash(git push *)",
+      "Bash(git reset --hard *)",
+      "Read(./.env)",
+      "Read(./**/*.tfstate)",
+      "Read(./**/*.tfstate.*)",
+      "Read(./**/terraform.tfvars)",
+      "Read(./**/backend.hcl)"
+    ],
+    "ask": [
+      "Bash(aliyun *)",
+      "Bash(docker *)",
+      "Bash(brew *)"
+    ]
+  }
+}

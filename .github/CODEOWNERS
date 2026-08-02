@@ -1,0 +1,17 @@
+# 权限与基础设施变更必须经过指定评审人。
+# 把 @your-org/... 替换成真实团队后启用分支保护，否则这个文件不生效。
+
+*                       @your-org/data-platform
+
+# 权限面：改这些等于改谁能碰生产数据，需要安全评审。
+/infra/envs/*/access/    @your-org/data-platform @your-org/security
+/infra/modules/dataset-sink-roles/   @your-org/data-platform @your-org/security
+/infra/modules/pai-workspace-access/ @your-org/data-platform @your-org/security
+/infra/modules/ci-oidc-role/         @your-org/data-platform @your-org/security
+/deploy/ram/             @your-org/data-platform @your-org/security
+
+# State 后端与 OIDC 信任锚：改错会让整条流水线失去信任边界。
+/infra/bootstrap/        @your-org/platform-admin @your-org/security
+
+# 流水线本身就是权限执行者。
+/.github/workflows/      @your-org/data-platform @your-org/security

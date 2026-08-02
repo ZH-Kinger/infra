@@ -1,0 +1,32 @@
+# Keep the build context to what the image actually needs: pyproject, README, src.
+.git/
+.github/
+.claude/
+docs/
+infra/
+tests/
+scripts/
+examples/
+
+__pycache__/
+*.py[cod]
+.venv/
+.ruff_cache/
+.pytest_cache/
+.coverage
+dist/
+build/
+*.egg-info/
+
+# Never let Terraform state or resolved variables reach a container image.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+terraform.tfvars
+*.auto.tfvars
+backend.hcl
+
+.env
+.discovery/

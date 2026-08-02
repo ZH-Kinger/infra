@@ -13,6 +13,7 @@ dependencies = []
 lakefs = ["lakefs>=0.7"]
 s3 = ["boto3>=1.34"]
 all = ["lakefs>=0.7", "boto3>=1.34"]
+dev = ["ruff>=0.9", "pre-commit>=4.0"]
 
 [project.scripts]
 dataset-sink = "dataset_sink.cli:main"
@@ -22,4 +23,31 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+line-length = 100
+# Match the floor declared in requires-python so lint never suggests newer syntax
+# than the oldest interpreter this ships on.
+target-version = "py39"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # import ordering
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "SIM", # simplify
+    "PTH", # prefer pathlib
+    "S",   # bandit: this repo handles credentials and subprocess calls
+]
+ignore = [
+    "S101", # assert is fine in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+# subprocess with a caller-supplied CLI path is the whole point of aliyun_cli.
+"src/dataset_sink/aliyun_cli.py" = ["S603"]
+"tests/**" = ["S105", "S106", "S108"]
 

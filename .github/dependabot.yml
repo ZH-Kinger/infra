@@ -1,0 +1,39 @@
+version: 2
+updates:
+  # Action 版本漂移是供应链风险，也是 OIDC 凭证的持有者。
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore"
+
+  # Terraform provider 版本由 .terraform.lock.hcl 固定；alicloud provider
+  # 更新可能带来资源 schema 变化，需要人工看 plan。
+  - package-ecosystem: terraform
+    directories:
+      - /infra/bootstrap
+      - /infra/modules/*
+      - /infra/envs/*/*
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore"

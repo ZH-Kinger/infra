@@ -4,7 +4,7 @@
   "WorkspaceId": "${PAI_WORKSPACE_ID}",
   "ResourceId": "${PAI_RESOURCE_ID}",
   "Accessibility": "PRIVATE",
-  "UserCommand": "/workspace/examples/pai/training-entrypoint.sh",
+  "UserCommand": "/workspace/deploy/pai/training-entrypoint.sh",
   "JobSpecs": [
     {
       "Type": "Worker",
