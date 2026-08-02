@@ -205,7 +205,62 @@ if DATASET_ROOT="$release_a" \
 fi
 printf '门禁正确拒绝了不匹配的 Commit\n'
 
-printf '\n===== D3. 生成 PAI Dataset Version 请求 =====\n'
+printf '\n===== D3. 回收：dry-run 必须什么都不删 =====\n'
+# --assume-recoverable：这个演练没有真实 lakeFS 可查 Commit。
+# 真实环境**不要**这么用，那等于跳过唯一防不可逆数据丢失的检查。
+sink reclaim "$cpfs_root" --min-age-days 0 --keep-last 0 --assume-recoverable \
+  > "$work_dir/reclaim-dry.json"
+python3 - "$work_dir/reclaim-dry.json" <<'PY'
+import json, sys
+
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert d["status"] == "DRY_RUN", d
+assert d["scanned"] == 3, d          # A/B/C 三条路各发布了一个 release
+assert len(d["reclaim"]) == 3, d
+print(f"计划回收 {len(d['reclaim'])} 个，{d['reclaimable_gib']} GiB（未执行）")
+PY
+# 目录必须还在
+for r in "$release_a" "$release_b" "$release_c"; do
+  [ -d "$r" ] || { printf 'FAIL: dry-run 删掉了 %s\n' "$r" >&2; exit 1; }
+done
+printf 'dry-run 未动任何目录\n'
+
+printf '\n===== D4. 回收：.keep 与保护期必须挡住删除 =====\n'
+: > "$release_a/.keep"
+sink reclaim "$cpfs_root" --min-age-days 3650 --keep-last 0 --assume-recoverable \
+  > "$work_dir/reclaim-guard.json"
+python3 - "$work_dir/reclaim-guard.json" <<'PY'
+import json, sys
+
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert not d["reclaim"], d
+reasons = " ".join(x["reason"] for x in d["retain"])
+assert "人工置顶" in reasons, reasons
+assert "保护期" in reasons, reasons
+print("置顶与保护期都正确拦下了")
+PY
+
+printf '\n===== D5. 回收：--execute 只删该删的，置顶的留下 =====\n'
+sink reclaim "$cpfs_root" --min-age-days 0 --keep-last 0 --assume-recoverable \
+  --sweep-trash --execute > "$work_dir/reclaim-run.json"
+python3 - "$work_dir/reclaim-run.json" <<'PY'
+import json, sys
+
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert d["status"] == "EXECUTED", d
+print(f"已回收 {len(d['reclaim'])} 个，释放 {d['freed_bytes']} 字节")
+PY
+[ -d "$release_a" ] || { printf 'FAIL: 回收删掉了带 .keep 的 release\n' >&2; exit 1; }
+for r in "$release_b" "$release_c"; do
+  [ -d "$r" ] && { printf 'FAIL: %s 应该已被回收\n' "$r" >&2; exit 1; }
+done
+# .trash 里不该留下残骸
+if [ -d "$cpfs_root/.trash" ] && [ -n "$(find "$cpfs_root/.trash" -mindepth 2 -maxdepth 2 2>/dev/null)" ]; then
+  printf 'FAIL: .trash 里有残骸未清理\n' >&2; exit 1
+fi
+printf '置顶的保住了，其余已回收，.trash 已清空\n'
+
+printf '\n===== D6. 生成 PAI Dataset Version 请求 =====\n'
 sink pai-request "$release_a" \
   --dataset-id d-example \
   --region cn-hangzhou \

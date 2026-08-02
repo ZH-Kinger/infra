@@ -56,8 +56,8 @@
 不装任何第三方包即可跑通全部本地验证：
 
 ```bash
-make test    # 12 个单元测试，离线、无需云凭证
-make e2e     # 全链路演练：沉降 → 深度校验 → 训练门禁 → 生成 PAI 请求
+make test    # 57 个单元测试，离线、无需云凭证
+make e2e     # 全链路演练：三条入口 → 深度校验 → 训练门禁 → 回收 → PAI 请求
 make help    # 全部可用目标
 ```
 
@@ -103,6 +103,10 @@ dataset-sink certify --prepared-dir /mnt/cpfs/staging/batch-001 \
   --repository robotics-data --commit 6f2b7c91c2 \
   --source-reference robotics-v2026.08.02.1 --manifest /work/manifest.jsonl
 
+# 回收不再需要的 CPFS release（默认 dry-run；删除前核对 Commit 是否仍在 lakeFS）
+dataset-sink reclaim /mnt/cpfs/datasets \
+  --lakefs-api-endpoint https://lakefs.internal --min-age-days 14 --keep-last 2
+
 # 校验（--deep 重算全部 SHA-256）
 dataset-sink verify /mnt/cpfs/datasets/robotics/6f2b7c91c2 --deep
 
@@ -141,13 +145,18 @@ dataset-sink training-guard --dataset-root /mnt/dataset \
 /mnt/cpfs/datasets/
 ├── .locks/                       # 进程锁
 ├── .materializing/               # 未完成的沉降只存在于此
+├── .trash/                       # 回收时先原子改名到这里，再慢慢删
 └── robotics/
     └── 6f2b7c91c2/               # 目录名就是 lakeFS Commit，不可变
         ├── shards/
         ├── manifest.jsonl
         ├── release.json          # commit / manifest_sha256 / paimon_snapshot_id
-        └── _READY                # 最后写入；没有它的目录一律视为不可用
+        ├── _READY                # 最后写入；没有它的目录一律视为不可用
+        └── .keep                 # 可选：人工置顶，reclaim 永不触碰
 ```
+
+CPFS 上的 release 是**唯一被设计成可删的一层**。`reclaim` 删除前必须确认「删了能
+重建」——核对 Commit 是否仍在 lakeFS，确认不了就一律保留。宁可漏删，不可错删。
 
 同一 Commit 重复沉降是幂等 no-op；同一 Commit 携带不同 Manifest 会报
 `ReleaseConflictError` 而不是覆盖。PAI 只能挂载 `<dataset>/<commit>/`。

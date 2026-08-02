@@ -218,11 +218,66 @@ dataset-sink commit --repository robotics-data --branch main \
 `release.json` 之类的残留，`scan` 会在第一步就失败并给出清理命令——这是有意的，
 否则要到归档完一整轮之后才在 `certify` 撞上报错。
 
-### 2.5 定期检查
+### 2.5 回收 CPFS 容量
+
+CPFS release 只增不减，写满之后 `materialize` 会直接失败。**这是必须定期做的事**，
+不是可选优化。
+
+```bash
+# ① 先看计划（默认就是 dry-run，什么都不删）
+dataset-sink reclaim /mnt/cpfs/datasets \
+  --lakefs-api-endpoint "$LAKEFS_API_ENDPOINT"
+
+# ② 逐条看 reclaim[] 里的 release 和 retain[] 里的理由，确认无误
+# ③ 真删
+dataset-sink reclaim /mnt/cpfs/datasets \
+  --lakefs-api-endpoint "$LAKEFS_API_ENDPOINT" --sweep-trash --execute
+```
+
+只想腾出指定容量（从最旧的开始删，够了就停）：
+
+```bash
+dataset-sink reclaim /mnt/cpfs/datasets --reclaim-bytes $((2 * 1024**4)) ...
+```
+
+**默认要连 lakeFS**，因为回收的安全前提是「删了能重建」，而这靠核对 Commit 是否
+还在。连不上或查不到就一律保留。`--assume-recoverable` 能跳过这个检查，但它是整个
+流程里**唯一能造成不可逆数据丢失**的开关，只有在你另有依据确认归档还在时才用。
+
+保护某个 release 不被回收：
+
+```bash
+touch /mnt/cpfs/datasets/robotics/<commit>/.keep
+```
+
+几个默认值和它们的理由：
+
+| 参数 | 默认 | 为什么 |
+|---|---|---|
+| `--min-age-days` | 14 | **没接占用探测时，这是唯一挡在回收和运行中训练之间的东西**，别调小 |
+| `--keep-last` | 2 | 保证任何数据集都不会被清空 |
+| `--include-incomplete` | 关 | 缺 `_READY` 的可能是正在排查的发布残骸，不自动删 |
+
+如果 `--execute` 中途被杀，`.trash/` 里会留下残骸——它们已经不在数据集命名空间里，
+不影响正确性，下次带 `--sweep-trash` 跑一遍即可。
+
+### 2.5.1 回收后要不要同步 PAI
+
+回收只删 CPFS 上的目录，**不动 PAI Dataset Version**。所以会出现「版本记录还在、
+挂载会失败」的状态。两种处理方式：
+
+- **留着**：版本记录本身是有价值的审计痕迹，且重新 `materialize` 回来之后就恢复可用。
+- **删掉**：需要先确认没有作业引用它。注意 `deny_destructive` 策略 Deny 了
+  `paidataset:DeleteDatasetVersion`，普通角色删不掉——这是有意的。
+
+现在推荐留着。真正的判据是「Commit 还在不在」，而不是「CPFS 上有没有」。
+
+### 2.6 定期检查
 
 | 频率 | 检查项 | 命令 |
 |---|---|---|
 | 每次权限变更 | plan 里有没有意料之外的 Action | PR 里看 |
+| 每周 | CPFS 剩余容量与可回收量 | `dataset-sink reclaim <root> ...`（dry-run） |
 | 每月 | 有没有人在控制台手工加了权限 | `terraform plan` 应无 drift |
 | 每月 | 谁是 Workspace 管理员 | `terraform output pai_admin_members` |
 | 每季度 | 有没有长期 AccessKey 存活 | `aliyun ram ListAccessKeys --UserName <each>` |

@@ -216,12 +216,14 @@ CPFS 上的目录布局就是协议本身：
 /mnt/cpfs/datasets/
 ├── .locks/                       # 进程锁，防止并发沉降同一 commit
 ├── .materializing/               # 临时目录，未完成的沉降只存在于此
+├── .trash/                       # 回收时先原子改名到这里，再慢慢删
 └── robotics/                     # <dataset>
     └── 6f2b7c91c2/               # <lakeFS commit> —— 不可变
         ├── shards/               # 数据文件，按 manifest 的 target_path 布局
         ├── manifest.jsonl        # 内容清单（随发布固化）
         ├── release.json          # 发布元数据
-        └── _READY                # 完成标记，最后写入
+        ├── _READY                # 完成标记，最后写入
+        └── .keep                 # 可选：人工置顶，回收永不触碰
 ```
 
 四条不可协商的规则：
@@ -243,6 +245,50 @@ CPFS 上的目录布局就是协议本身：
 
 这份元数据向下传递到 PAI Dataset Version 的 `SourceId` 和 `Labels`（`lakefs_commit`、`manifest_sha256`），再传递到 DLC Job 的 `CustomEnvs`，最后被 `training-guard` 在训练容器内重新校验一遍。**同一个指纹在四个系统里被独立记录并交叉验证**，任何一环被篡改或错配都会在训练启动前暴露。
 
+### 回收：唯一被设计成可删的一层
+
+CPFS release 只增不减，容量有限且按容量计费。写满之后 `materialize` 直接失败，
+那时既发不了新版本，也不敢乱删。所以回收不是可选的运维动作，而是这一层能成立的
+前提——第 3 节「按需沉降到训练所在的 VPC、用完回收」讲的就是这件事。
+
+回收之所以**安全**，只靠一条前提：
+
+> 删掉的 release 必须能重建。
+
+而这条前提由发布协议本身保证：release 目录名是 Commit ID，Commit 指向对象存储里的
+字节。所以只要 Commit 还在，随时可以重新 materialize 回来。`reclaim` 默认会去
+lakeFS 核对 Commit 是否存在，**核对不了就一律不删**——宁可漏删，不可错删。
+
+六道闸门，按「便宜的先跑」排序（一个注定要保留的 release 不该消耗一次远程调用）：
+
+| 闸门 | 拦住什么 |
+|---|---|
+| `.keep` 标记 | 人工置顶的 release，永不触碰 |
+| `_READY` 缺失 | 发布中断的残骸，默认不动（需 `--include-incomplete`） |
+| 保留最近 N 个 | 保证不会把一个数据集清空 |
+| 保护期 | 发布未满 N 天的不回收 |
+| 占用探测 | 正在被训练任务挂载的 |
+| **可重建性** | 确认不了能重建的，一律保留 |
+
+**没接占用探测时，保护期是唯一挡在回收和运行中训练之间的东西**，所以默认 14 天，
+不要随手调小。占用探测做成了可注入的接口，接上真实的 DLC 作业查询之后才谈得上
+缩短保护期。
+
+删除本身是「先原子改名进 `.trash`，再慢慢 rmtree」：
+
+```
+<dataset>/<commit>/  --rename-->  .trash/<dataset>/<commit>  --rmtree-->  ∅
+        原子，一瞬间从命名空间消失            可能很慢，但已经不可见
+```
+
+`rename` 是原子的元数据操作，所以**不存在「删了一半的 release」被消费方看到的窗口**
+——这跟 `_READY` 最后写入是同一个道理的反向应用。rmtree 中途被杀只会在 `.trash` 里
+留下残骸，下次 `--sweep-trash` 接着扫。
+
+删除前会拿**和 materialize / certify 同一把锁**，并在锁内重新核对前置条件：计划是在
+锁外生成的，期间另一个进程完全可能正在往同一个 Commit 发布。rmtree 则放在锁外，
+因为它慢，而那时目录已经不在命名空间里了，继续占锁只会挡住重新发布。
+
 ---
 
 ## 5. 代码结构与职责
@@ -250,7 +296,8 @@ CPFS 上的目录布局就是协议本身：
 ```
 src/dataset_sink/
 ├── ingest.py          806 行  接入版本体系：scan / scan-oss / archive / commit
-├── cli.py             513 行  10 个子命令的参数解析与编排
+├── reclaim.py         422 行  回收 CPFS release：盘点 / 计划 / 原子删除
+├── cli.py             660 行  11 个子命令的参数解析与编排
 ├── materializer.py    372 行  核心：并行沉降、锁、原子发布、certify、verify
 ├── aliyun_cli.py      163 行  PAI 注册（默认 dry-run、按 Commit 幂等查重）
 ├── manifest.py        122 行  JSONL Manifest 解析与校验
@@ -261,7 +308,7 @@ src/dataset_sink/
 └── errors.py           18 行  DatasetSinkError / ReleaseConflictError
 ```
 
-十个子命令对应发布链路的十个动作：
+十一个子命令对应发布链路的十一个动作：
 
 | 命令 | 职责 | 执行身份 |
 |---|---|---|
@@ -272,6 +319,7 @@ src/dataset_sink/
 | `materialize` | 从 lakeFS 拷贝并发布 | `DatasetMaterializerRole` |
 | `certify` | 从 CPFS Staging 零复制发布 | `DatasetMaterializerRole` |
 | `verify` | 校验 release（`--deep` 重算全部哈希） | 任意只读身份 |
+| `reclaim` | 回收不再需要的 CPFS release（默认 dry-run） | `DatasetMaterializerRole` + lakeFS 只读 |
 | `pai-request` | 生成 CreateDatasetVersion 请求 JSON | 无需云权限 |
 | `register-pai` | 调 PAI OpenAPI 注册版本 | `DatasetRegisterRole` |
 | `training-guard` | 训练容器内校验挂载版本 | `TrainingRuntimeRole` |
@@ -457,32 +505,10 @@ lakeFS 的零拷贝 import 记录的是对象的**物理地址**。把 `oss://bu
 复制到 `oss://bucket-sg/...` 之后，Commit 仍然指向杭州那份——副本对 lakeFS 来说
 根本不存在。
 
-所以在新加坡 materialize 同一个 Commit，实际发生的是**跨地区读杭州的桶**。这在
-功能上没问题（一次性成本，之后训练读的是本地 CPFS），但要知道流量费和耗时都记在
-这一次沉降上。
-
-想避免跨区读就只有两条路，各有代价：
-
-| 做法 | 代价 |
-|---|---|
-| 对复制过去的副本再 import 一次 | 产生**另一个 Commit ID**，破坏「一个版本一个 Commit」的前提，两边的 `training-guard` 指纹不再相同 |
-| lakeFS 的 storage namespace 本身用跨区复制的桶 | 需要 lakeFS 侧配置支持，且两边最终一致性窗口内可能读到缺失对象 |
-
-在没有确定方案之前，**默认接受一次跨区读**——它是一次性的，而错误地为同一份数据
-造出两个 Commit 是不可逆的。
-
-对 Terraform 分层的直接影响，也是当前代码的**已知缺口**：
-
-- **`access` 层不该按地区拆。** RAM 是账号级的，拆了会产生同名策略冲突。
-- **`platform` 层必须按地区各一份 state。** 现在 `infra/envs/<env>/platform` 只有
-  一个 `var.region` 和一份 state，跑第二个地区会覆盖第一个地区的 state。
-  正确做法是同一份配置配不同的 tfvars + 不同的 backend key，在 `terraform.yml`
-  的矩阵里按 `<env>-<region>` 展开，而不是复制目录。
-
-还有一个容易忽略的点：RAM 策略里的 OSS ARN 写的是 `acs:oss:*:<account>:<bucket>`，
-中间那个 `*` 是**地区字段**。所以现有策略已经覆盖所有地区——够用，但也意味着
-地区之间没有 RAM 层的隔离。要按地区收敛就得把地区写进 ARN，代价是每个地区
-一组变量。
+所以在另一个地区 materialize 同一个 Commit，读的仍然是原始位置。这是一次性成本
+（之后训练读的是本地 CPFS），记在这一次沉降上。**不要为了就近读而对副本再 import
+一次**：那会给同一份数据造出第二个 Commit ID，破坏「一个版本一个 Commit」的前提，
+两边 `training-guard` 的指纹从此对不上，且不可逆。
 
 ### 为什么 Terraform 不管模型发布
 
@@ -561,6 +587,7 @@ Terraform 管低频稳定资源（Workspace、网络、存储、角色、成员�
 | plan/apply 拆 job 复用同一 tfplan | 审批内容 == 执行内容 | 需要 artifact 传递 |
 | platform / access 双 State | 权限变更独立审批、独立节奏 | 两次 apply，跨层引用需 output |
 | Terraform 不管模型发布 | State 语义不适合高频追加型资源 | 需另一条流水线 |
+| `reclaim` 以「能否重建」为删除前提 | 删除只损失热缓存，不损失版本 | 需要 lakeFS 可达；确认不了就不删 |
 | 训练门禁在容器内校验 | 强制点靠代码而非流程约定 | 每个训练镜像都要装这个 CLI |
 
 ---

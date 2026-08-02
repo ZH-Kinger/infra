@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -29,6 +30,14 @@ from .lakefs_refs import resolve_reference
 from .manifest import Manifest, dump_manifest
 from .materializer import Materializer, certify_prepared_release, verify_release
 from .pai import CpfsRegistration, build_create_dataset_version_request
+from .reclaim import (
+    AssumeRecoverable,
+    LakeFSCommitProbe,
+    execute_plan,
+    plan_reclaim,
+    scan_releases,
+    sweep_trash,
+)
 from .sources import LakeFSS3SourceReader, LocalSourceReader
 from .training_guard import validate_training_dataset
 
@@ -154,6 +163,54 @@ def build_parser() -> argparse.ArgumentParser:
     certify.add_argument("--lakefs-tag")
     certify.add_argument("--paimon-snapshot-id")
 
+    reclaim = commands.add_parser(
+        "reclaim",
+        help="回收 CPFS 上不再需要的 release（默认 dry-run，--execute 才真删）",
+    )
+    reclaim.add_argument("target_root", type=Path, help="CPFS 上的数据集根目录")
+    reclaim.add_argument(
+        "--min-age-days",
+        type=int,
+        default=14,
+        help=(
+            "保护期：发布未满这么多天的一律不回收。未配置占用探测时，"
+            "这是唯一挡在回收和运行中训练之间的东西，不要调小（默认 14）"
+        ),
+    )
+    reclaim.add_argument(
+        "--keep-last",
+        type=int,
+        default=2,
+        help="每个数据集至少保留最近几个版本，保证不会被清空（默认 2）",
+    )
+    reclaim.add_argument(
+        "--reclaim-bytes",
+        type=int,
+        help="只回收到腾出这么多字节为止，从最旧的开始。不给则回收全部符合条件的",
+    )
+    reclaim.add_argument(
+        "--include-incomplete",
+        action="store_true",
+        help="连缺少 _READY 的目录一起回收（发布中断的残骸）。默认不碰",
+    )
+    reclaim.add_argument(
+        "--assume-recoverable",
+        action="store_true",
+        help=(
+            "跳过「删了能否重建」检查。这是整个流程里唯一能造成不可逆数据丢失的"
+            "开关，只有在你另有依据确认归档还在时才用"
+        ),
+    )
+    reclaim.add_argument("--lakefs-api-endpoint")
+    reclaim.add_argument("--lakefs-access-key-id")
+    reclaim.add_argument("--lakefs-secret-access-key")
+    reclaim.add_argument("--sweep-trash", action="store_true", help="顺带清掉 .trash 里的残骸")
+    reclaim.add_argument(
+        "--execute",
+        action="store_true",
+        help="真正删除。不给这个参数只输出计划，不动任何文件",
+    )
+
     verify = commands.add_parser("verify", help="verify release metadata and ready marker")
     verify.add_argument("release_dir", type=Path)
     verify.add_argument(
@@ -251,6 +308,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     paimon_snapshot_id=args.paimon_snapshot_id,
                 )
             )
+        elif args.command == "reclaim":
+            result = _reclaim(args)
         elif args.command == "verify":
             result = asdict(verify_release(args.release_dir, deep=args.deep))
         elif args.command == "pai-request":
@@ -492,6 +551,85 @@ def _materialize(args: argparse.Namespace) -> dict:
         paimon_snapshot_id=args.paimon_snapshot_id,
     )
     return asdict(result)
+
+
+def _reclaim(args: argparse.Namespace) -> dict:
+    releases = scan_releases(args.target_root)
+
+    if args.assume_recoverable:
+        probe = AssumeRecoverable()
+    else:
+        endpoint = args.lakefs_api_endpoint or os.getenv("LAKEFS_API_ENDPOINT")
+        key = args.lakefs_access_key_id or os.getenv("LAKEFS_ACCESS_KEY_ID")
+        secret = args.lakefs_secret_access_key or os.getenv("LAKEFS_SECRET_ACCESS_KEY")
+        if not (endpoint and key and secret):
+            raise ValueError(
+                "回收前必须确认「删了能重建」，这需要 lakeFS 凭证来核对 Commit 是否还在。"
+                "提供 --lakefs-api-endpoint 与凭证（或对应环境变量），"
+                "或在确有依据时显式加 --assume-recoverable。"
+            )
+        probe = LakeFSCommitProbe(_lakefs_commit_exists(endpoint, key, secret))
+
+    plan = plan_reclaim(
+        releases,
+        now=datetime.now(timezone.utc),
+        min_age_days=args.min_age_days,
+        keep_last=args.keep_last,
+        reclaim_bytes=args.reclaim_bytes,
+        include_incomplete=args.include_incomplete,
+        recoverability_probe=probe,
+    )
+    result = execute_plan(plan, args.target_root, execute=args.execute)
+
+    payload: dict = {
+        "status": "EXECUTED" if args.execute else "DRY_RUN",
+        "scanned": len(releases),
+        "reclaim": [
+            {
+                "release": d.release.label,
+                "size_bytes": d.release.size_bytes,
+                "created_at": d.release.created_at.isoformat() if d.release.created_at else None,
+                "reason": d.reason,
+            }
+            for d in plan.reclaim
+        ],
+        "retain": [{"release": d.release.label, "reason": d.reason} for d in plan.retain],
+        "reclaimable_bytes": plan.reclaimable_bytes,
+        "reclaimable_gib": round(plan.reclaimable_bytes / (1024**3), 3),
+        "freed_bytes": result.freed_bytes,
+        "skipped": [{"release": r, "reason": why} for r, why in result.skipped],
+    }
+    if args.sweep_trash:
+        count, swept = sweep_trash(args.target_root, execute=args.execute)
+        payload["trash_leftovers"] = count
+        payload["trash_swept"] = bool(swept)
+    if not args.execute and plan.reclaim:
+        payload["note"] = "这是 dry-run，什么都没删。确认无误后加 --execute。"
+    return payload
+
+
+def _lakefs_commit_exists(endpoint: str, key: str, secret: str):
+    """返回一个 (repository, commit_id) -> bool 的可调用对象。
+
+    延迟到真正需要时才 import lakefs：核心逻辑保持零运行时依赖。
+    """
+
+    def check(repository: str, commit_id: str) -> bool:
+        try:
+            import lakefs
+            from lakefs.client import Client
+        except ImportError as exc:
+            raise DatasetSinkError("核对 Commit 需要 `pip install -e '.[lakefs]'`") from exc
+
+        client = Client(host=endpoint, username=key, password=secret)
+        repo = lakefs.Repository(repository, client=client)
+        try:
+            repo.ref(commit_id).get_commit()
+        except Exception:  # noqa: BLE001 - 查不到就是不存在
+            return False
+        return True
+
+    return check
 
 
 def _pai_request(args: argparse.Namespace) -> dict:
