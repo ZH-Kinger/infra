@@ -128,8 +128,8 @@ def _validate_request(request: dict) -> None:
         raise ValueError(f"PAI request body is missing fields: {missing}")
     if body["Property"] != "DIRECTORY":
         raise ValueError("only DIRECTORY dataset releases are supported")
-    if body["DataSourceType"] not in {"CPFS", "BMCPFS"}:
-        raise ValueError("only CPFS and BMCPFS dataset releases are supported")
+    if body["DataSourceType"] not in {"CPFS", "BMCPFS", "NAS"}:
+        raise ValueError("only CPFS, BMCPFS and NAS dataset releases are supported")
 
 
 def _subprocess_runner(command: Sequence[str]) -> CommandResult:

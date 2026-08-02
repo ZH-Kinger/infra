@@ -172,7 +172,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="path inside CPFS; defaults to the materializer's release path",
     )
     pai.add_argument("--uri", required=True)
-    pai.add_argument("--data-source-type", choices=("CPFS", "BMCPFS"), default="CPFS")
+    pai.add_argument(
+        "--data-source-type",
+        choices=("CPFS", "BMCPFS", "NAS"),
+        default="CPFS",
+        help=(
+            "必须与父 Dataset 的 DataSourceType 一致，否则 PAI 报 "
+            "DataSourceType not match。NAS 用于测试/预发环境；"
+            "生产训练走 CPFS 以获得并行文件系统吞吐。"
+        ),
+    )
     pai.add_argument("--protocol-service-id")
     pai.add_argument("--export-id")
     pai.add_argument("--mount-target")

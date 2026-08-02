@@ -10,6 +10,15 @@ from .materializer import verify_release
 
 @dataclass(frozen=True)
 class CpfsRegistration:
+    """一次 CreateDatasetVersion 所需的文件系统坐标。
+
+    `data_source_type` 必须与**父 Dataset** 的类型一致，否则 PAI 报
+    `DataSourceType not match`。且 PAI 按类型分别校验 Uri：
+        NAS    nas://<fsid>.<region>/<subpath>/        只校验格式，不校验存在
+        CPFS   nas://<cpfs-fsid>.<region>/<subpath>/   **会校验文件系统真实存在**
+    2026-08-02 在真实账号上逐条验证过。
+    """
+
     dataset_id: str
     region: str
     filesystem_id: str

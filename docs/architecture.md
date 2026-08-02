@@ -424,21 +424,49 @@ Terraform 管低频稳定资源（Workspace、网络、存储、角色、成员�
 
 ## 8. 环境实况与差距
 
-2026-08-02 对账号 `1339279783371949`（`wuji-ens-test@rd-cbawja.aliyunid.com`）的只读探测结果：
+2026-08-02 对账号 `1339279783371949`（`wuji-ens-test@rd-cbawja.aliyunid.com`）的探测结果：
 
 | 项目 | 实际 | 目标 | 差距 |
 |---|---|---|---|
 | 当前登录身份 | 主账号 root | 专用 RAM 用户 / OIDC 角色 | **必须整改**，root 不应用于日常和 Terraform |
-| PAI Workspace | `617398` / `pai_7djc6it7is9uk07t4f` @ cn-hangzhou | dev / prod 双 Workspace | 现有的 import，另建 prod |
+| PAI Workspace | `617398` / `pai_7djc6it7is9uk07t4f` @ cn-hangzhou，ENABLED | dev / prod 双 Workspace | 现有的 import，另建 prod |
 | Workspace 成员 | 1 条：root 自己，挂 Owner+Admin+AlgoDeveloper | 按角色分配的多成员 | import 后逐步收敛 |
+| PAI Dataset API | **可用**（建/删/列版本已实测通过） | — | 无 |
 | PAI Dataset | 0 个 | 每个数据集一个 | 需新建（`register-pai` 的前提） |
 | 项目 RAM 角色 | 0 个 | 5 个业务 + 3 个 CI | 全部新建 |
 | RAM OIDC Provider | 0 个 | 1 个（GitHub Actions） | 新建 |
-| CPFS / NAS | **服务未开通**（`User.Disabled`） | 至少一个 CPFS 文件系统 | **最大阻塞点** |
-| OSS | PAI 默认桶 + `wuji-product` | state 桶 + 数据集桶 | 新建 |
+| NAS / CPFS 服务 | **已开通**（不再 `User.Disabled`） | — | 无 |
+| CPFS 文件系统 | **0 个** | 至少一个 | **最大阻塞点** |
+| OSS | 3 个桶，共 7 个对象（均为测试文件） | state 桶 + 数据集桶 | 真实数据在另一个账号 |
 | lakeFS | 未部署 | 内网 API + S3 Gateway | 待部署 |
 
-**当前最大阻塞：CPFS 服务未开通。** 沉降目标不存在，`materialize` / `certify` 在真实环境无法运行。因此 Terraform 里 CPFS 相关资源用 `var.enable_cpfs`（默认 `false`）gate 住——保证在服务开通前 `plan` 仍然可用，开通后单点切换。
+**当前最大阻塞：没有 CPFS 文件系统。** 服务本身已开通，但一个文件系统都没建，所以沉降目标不存在。Terraform 里 CPFS 相关资源用 `var.enable_cpfs`（默认 `false`）gate 住——保证在文件系统就绪前 `plan` 仍然可用，就绪后单点切换。
+
+### PAI Dataset 的实测结论
+
+2026-08-02 用真实账号跑通了 `certify → verify --deep → pai-request → register-pai` 全链路（临时建了一个通用型 NAS，测完即删）：
+
+| 验证项 | 结果 |
+|---|---|
+| `register-pai`（默认 dry-run） | `DRY_RUN`，不改动 PAI |
+| `register-pai --execute` | `CREATED`，返回 `v4` |
+| 重跑 `--execute`（幂等） | `EXISTS`，不重复创建，退出码 `0` |
+| 同 Commit + 不同 `manifest_sha256` | 拒绝执行，退出码 `2` |
+
+三条只有在真实 API 上才能确认的规则：
+
+1. **建 Dataset 时 PAI 会自动创建 `v1`。** 所以流水线第一次注册拿到的是 `v2`，不是 `v1`。我们按 `SourceId`（lakeFS Commit）查重，而自动 `v1` 的 `SourceId` 是 `null`，不冲突。
+2. **版本的 `DataSourceType` 必须与父 Dataset 一致**，否则报 `DataSourceType not match`。
+3. **PAI 按 `DataSourceType` 分别校验 `Uri`，严格程度不同**：
+
+   | 类型 | Uri | 校验强度 |
+   |---|---|---|
+   | `NAS` | `nas://<fsid>.<region>/<subpath>/` | 只校验格式——虚构的 fsid 也能建成功 |
+   | `CPFS` | `nas://<cpfs-fsid>.<region>/<subpath>/` | **会校验文件系统真实存在**，形状正确的假 id 一律报 `Uri format error` |
+
+   所以 CPFS 型 Dataset 在没有真实 CPFS 文件系统之前**无法创建**，这一段只能等文件系统就绪后联调。
+
+   另外 `ListDatasetVersions` **必须传 `PageNumber`**，否则报 `MissingPageNumber`。
 
 **第二个阻塞：GitHub 托管 runner 到不了 VPC 内的 CPFS。** `materialize` 需要挂载 CPFS，只能跑在自托管 runner 或 ACK Job 上。发布流水线中该步骤先加守卫占位，避免误触发。
 

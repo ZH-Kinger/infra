@@ -12,11 +12,11 @@
 
 | 阻塞项 | 现状 | 解除方式 |
 |---|---|---|
-| CPFS 服务 | 本机可登录的账号未开通 NAS（`User.Disabled`） | 在**目标账号**开通 NAS/CPFS，或确认用的是灵骏 BMCPFS |
+| CPFS 文件系统 | 测试账号里 NAS/CPFS 服务已开通，但**一个文件系统都没有** | 建一个 CPFS 文件系统。没有它，CPFS 型 PAI Dataset 建不出来（PAI 会校验其真实存在） |
 | CPFS 类型 | 未确认是标准 CPFS 还是灵骏 BMCPFS | 标准 CPFS 走 `nas` API；BMCPFS 走 `eflo`，Terraform 数据源不同 |
 | 目标账号 | 本机 profile 登录的不是目标账号 | 在目标账号跑 `make discover` |
 | 执行身份 | 探测到的是主账号 root | 先建 Terraform 专用 RAM 用户，见下一节 |
-| PAI Dataset | 目标 Workspace 里可能还没有 Dataset | 先建一个，`register-pai` 需要 DatasetId |
+| PAI Dataset | 目标 Workspace 里 0 个 | 先建一个，`register-pai` 需要 DatasetId。注意 PAI 会自动带一个 `v1`，所以首次注册拿到的是 `v2` |
 | CI runner | GitHub 托管 runner 到不了 VPC 内 CPFS | 准备自托管 runner 或改用 ACK Job |
 
 ---
