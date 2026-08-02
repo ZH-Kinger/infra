@@ -1,0 +1,30 @@
+# 复制为 terraform.tfvars 后填写。terraform.tfvars 已被 .gitignore 忽略。
+#
+# 这一层由**管理员**用专门的 RAM 用户执行，不要用主账号 root。
+
+region       = "cn-hangzhou"
+state_bucket = "REPLACE-ME-terraform-state" # 全局唯一，建议带公司前缀
+
+lock_instance_name = "tf-state-lock"
+lock_table_name    = "terraform_state_lock"
+
+github_repo        = "your-org/infra-ci-cd"
+github_environment = "production"
+
+oidc_provider_name = "GitHubActions"
+oidc_audience      = "github-actions"
+
+# GitHub OIDC 的 HTTPS CA 证书 SHA-1 指纹。
+# 取值方式见 docs/runbook.md「获取 GitHub OIDC 指纹」；GitHub 轮换证书时
+# 建议同时保留新旧两个值，避免流水线中断。
+oidc_thumbprints = [
+  "REPLACE-ME-sha1-fingerprint",
+]
+
+state_retention_days = 365
+
+tags = {
+  Project   = "dataset-sink"
+  ManagedBy = "Terraform"
+  Layer     = "bootstrap"
+}

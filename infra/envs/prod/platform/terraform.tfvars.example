@@ -1,0 +1,17 @@
+# 复制为 terraform.tfvars 后填写；terraform.tfvars 已被 .gitignore 忽略。
+
+region = "cn-hangzhou"
+
+dataset_bucket = "REPLACE-ME-dataset-archive" # 全局唯一
+
+# 已存在的 CPFS 文件系统 ID。本层只查询不创建。
+#
+# 留空则跳过查询——CPFS 服务未开通时保持留空，plan 仍可正常跑。
+# 若环境是灵骏 BMCPFS（走 eflo API 而非 nas），此变量不适用，
+# 需改用灵骏侧数据源，接入前先确认是哪一种。
+cpfs_filesystem_id = ""
+
+tags = {
+  Project   = "dataset-sink"
+  ManagedBy = "Terraform"
+}

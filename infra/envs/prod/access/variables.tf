@@ -1,0 +1,79 @@
+variable "region" {
+  description = "阿里云地域，必须与 PAI Workspace 实际所在地域一致"
+  type        = string
+}
+
+variable "project" {
+  description = "项目标识，用于角色和策略命名"
+  type        = string
+  default     = "dataset-sink"
+}
+
+variable "account_id" {
+  description = "阿里云账号 ID，取自 bootstrap 的 account_id output"
+  type        = string
+}
+
+variable "oidc_provider_arn" {
+  description = "OIDC 身份提供商 ARN，取自 bootstrap 的 oidc_provider_arn output"
+  type        = string
+}
+
+variable "oidc_audience" {
+  description = "OIDC aud，需与 workflow 里的 audience 一致"
+  type        = string
+  default     = "github-actions"
+}
+
+variable "github_repo" {
+  description = "GitHub 仓库，格式 <org>/<repo>"
+  type        = string
+}
+
+variable "github_environment" {
+  description = "承载生产审批的 GitHub Environment 名称"
+  type        = string
+  default     = "production"
+}
+
+variable "lakefs_backend_bucket" {
+  description = "lakeFS 的 OSS 后端桶名。只有沉降角色可读，其余角色显式 Deny"
+  type        = string
+}
+
+variable "lakefs_backend_prefix" {
+  description = "允许沉降角色读取的对象前缀，留空表示整桶"
+  type        = string
+  default     = ""
+}
+
+variable "dataset_bucket" {
+  description = "数据集归档桶名，取自 platform 层的 dataset_bucket output"
+  type        = string
+}
+
+variable "developer_group_name" {
+  description = "研发 RAM 用户组名，留空则不创建该组"
+  type        = string
+  default     = ""
+}
+
+variable "pai_workspace_id" {
+  description = "PAI Workspace ID（纯数字）。本层只管成员关系，不管 Workspace 本身"
+  type        = string
+}
+
+variable "pai_members" {
+  description = <<-EOT
+    PAI Workspace 成员到角色的映射。这份 map 就是「谁能进生产工作空间」
+    的唯一答案，评审时重点看这里的增删。
+
+    user_id 是 RAM 用户 ID（纯数字），用 `aliyun ram ListUsers` 查，
+    或直接跑 `make discover`。
+  EOT
+  type = map(object({
+    user_id = string
+    roles   = set(string)
+  }))
+  default = {}
+}

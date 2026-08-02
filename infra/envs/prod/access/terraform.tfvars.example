@@ -1,0 +1,44 @@
+# 复制为 terraform.tfvars 后填写；terraform.tfvars 已被 .gitignore 忽略。
+#
+# 下面示例里的 ID 来自 2026-08-02 对**本机可登录账号** 1339279783371949
+# （wuji-ens-test）的只读探测，仅作格式示例——真实的 CPFS 与数据集在另一个
+# 公司账号里。请在目标账号执行 `make discover` 获取真实 ID 后替换。
+
+region     = "cn-hangzhou"
+account_id = "REPLACE-ME-account-id" # 探测账号示例：1339279783371949
+
+# 取自 infra/bootstrap 的 output
+oidc_provider_arn = "acs:ram::REPLACE-ME-account-id:oidc-provider/GitHubActions"
+oidc_audience     = "github-actions"
+
+github_repo        = "your-org/infra-ci-cd"
+github_environment = "production"
+
+# lakeFS 的 OSS 后端桶：只有沉降角色可读
+lakefs_backend_bucket = "REPLACE-ME-lakefs-backend"
+lakefs_backend_prefix = "" # 留空表示整桶
+
+# 取自 infra/envs/prod/platform 的 dataset_bucket output
+dataset_bucket = "REPLACE-ME-dataset-archive"
+
+developer_group_name = "pai-prod-developers"
+
+# PAI Workspace ID（纯数字）。探测账号示例：617398
+pai_workspace_id = "REPLACE-ME-workspace-id"
+
+# 谁能进生产工作空间。key 随便写（通常是登录名），user_id 必须是纯数字 RAM 用户 ID。
+#
+# 生产刻意收紧：算法开发通常只需要 dev 环境成员资格，不需要进生产。
+# 角色取值只允许 PAI.AlgoDeveloper / PAI.AlgoOperator / PAI.LabelManager /
+# PAI.MaxComputeDeveloper / PAI.WorkspaceAdmin / PAI.WorkspaceGuest /
+# PAI.WorkspaceOwner（模块内有 validation 校验）。
+pai_members = {
+  # ops = {
+  #   user_id = "291234567890654321"
+  #   roles   = ["PAI.AlgoOperator"]
+  # }
+  # auditor = {
+  #   user_id = "291234567890111111"
+  #   roles   = ["PAI.WorkspaceGuest"]
+  # }
+}
