@@ -6,18 +6,25 @@
 这个项目解决的是**发布边界**，不是用 CPFS 替代 lakeFS：
 
 ```text
-lakeFS Commit + Paimon Snapshot + JSONL Manifest
-                    ↓
-        CPFS .materializing 临时目录
-                    ↓
-         大小 / SHA-256 完整性校验
-                    ↓
-    <cpfs-root>/<dataset>/<commit>/_READY
-                    ↓
-          PAI Dataset Version 注册
-                    ↓
-        DSW / DLC 只读挂载 + 启动门禁
+   CPFS 上处理完的新数据              已在 lakeFS 的数据
+   scan → archive → commit              （已有 Commit）
+   （零拷贝 import 建 Commit）
+                    ↓                        ↓
+              lakeFS Commit + Paimon Snapshot + Manifest
+                             ↓
+                 certify（零拷贝）/ materialize（拷贝）
+                             ↓
+                    大小 / SHA-256 完整性校验
+                             ↓
+             <cpfs-root>/<dataset>/<commit>/_READY
+                             ↓
+                   PAI Dataset Version 注册
+                             ↓
+              DSW / DLC 只读挂载 + 启动门禁
 ```
+
+对象存储是**冷归档与版本真相的物理载体**，CPFS 上的 release 是**为训练速度存在的
+热副本**——可以随时淘汰，需要时重新沉降回来。
 
 要立的规矩只有一条：
 
@@ -58,6 +65,19 @@ make help    # 全部可用目标
 ## 命令一览
 
 ```bash
+# CPFS 上处理完的新数据接入版本体系：扫描 → 归档 → 建 Commit
+dataset-sink scan /mnt/cpfs/staging/batch-001 --output /work/manifest.jsonl
+
+dataset-sink archive /mnt/cpfs/staging/batch-001 \
+  --manifest /work/manifest.jsonl --prefix staging/batch-001 \
+  --target oss --bucket dataset-sink-archive \
+  --endpoint-url https://oss-cn-hangzhou.aliyuncs.com
+
+dataset-sink commit --repository robotics-data --branch main \
+  --object-store-uri s3://dataset-sink-archive \
+  --prefix staging/batch-001 --destination datasets/robotics \
+  --manifest /work/manifest.jsonl --tag robotics-v2026.08.02.1
+
 # 从 lakeFS 沉降并发布
 dataset-sink materialize --dataset robotics --repository robotics-data \
   --ref robotics-v2026.08.02.1 --manifest /work/manifest.jsonl \

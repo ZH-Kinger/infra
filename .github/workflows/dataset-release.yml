@@ -4,6 +4,16 @@ name: Dataset release
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: |
+          发布方式。
+          cpfs-ingest：CPFS 上处理完的新数据，还没有 Commit（scan→archive→commit→certify）
+          certify：CPFS staging 已就绪且 Commit 已存在，零拷贝发布
+          materialize：从 lakeFS 拷贝到 CPFS
+        required: true
+        default: cpfs-ingest
+        type: choice
+        options: [cpfs-ingest, certify, materialize]
       dataset:
         description: 数据集名（如 robotics）
         required: true
@@ -11,23 +21,26 @@ on:
         description: lakeFS Repository
         required: true
       ref:
-        description: lakeFS Tag 或 Commit（严禁填 Branch 名或 latest）
+        description: |
+          materialize/certify：已存在的 lakeFS Tag 或 Commit（严禁 Branch 名或 latest）
+          cpfs-ingest：本次要**创建**的 Tag 名（同名已存在会失败，不会覆盖）
         required: true
+      prepared_dir:
+        description: CPFS staging 目录（cpfs-ingest 与 certify 必填）
+        required: false
+      archive_prefix:
+        description: 对象存储归档前缀（cpfs-ingest 必填），如 staging/batch-20260802-001
+        required: false
       manifest_path:
-        description: Manifest 路径（相对仓库或绝对路径）
-        required: true
+        description: Manifest 路径（materialize 与 certify 必填；cpfs-ingest 由 scan 生成）
+        required: false
       paimon_snapshot_id:
         description: Paimon Snapshot ID
         required: false
-      mode:
-        description: 沉降方式
-        required: true
-        default: materialize
-        type: choice
-        options: [materialize, certify]
-      prepared_dir:
-        description: certify 模式下已就绪的 CPFS Staging 目录
+      lakefs_branch:
+        description: import 的目标分支
         required: false
+        default: main
 
 permissions:
   contents: read
@@ -40,11 +53,12 @@ concurrency:
 
 env:
   ALIBABA_CLOUD_OIDC_AUDIENCE: github-actions
+  MANIFEST_ARTIFACT: manifest-${{ github.run_id }}
 
 jobs:
   # ---------------------------------------------------------------------------
   # 前置检查：把「配置没做好」和「数据有问题」区分开。
-  # 没有这一步的话，缺一个变量会表现为流水线中段莫名其妙的失败。
+  # 没有这一步，缺一个变量会表现为流水线中段莫名其妙的失败。
   # ---------------------------------------------------------------------------
   preflight:
     name: 前置检查
@@ -64,62 +78,102 @@ jobs:
               exit 1
               ;;
           esac
-          echo "ref='$ref' 通过检查"
+
+      - name: 校验各模式必填参数
+        run: |
+          set -euo pipefail
+          mode='${{ inputs.mode }}'
+          case "$mode" in
+            cpfs-ingest)
+              [ -n '${{ inputs.prepared_dir }}' ]   || { echo "::error::cpfs-ingest 需要 prepared_dir"; exit 1; }
+              [ -n '${{ inputs.archive_prefix }}' ] || { echo "::error::cpfs-ingest 需要 archive_prefix"; exit 1; }
+              ;;
+            certify)
+              [ -n '${{ inputs.prepared_dir }}' ]  || { echo "::error::certify 需要 prepared_dir"; exit 1; }
+              [ -n '${{ inputs.manifest_path }}' ] || { echo "::error::certify 需要 manifest_path"; exit 1; }
+              ;;
+            materialize)
+              [ -n '${{ inputs.manifest_path }}' ] || { echo "::error::materialize 需要 manifest_path"; exit 1; }
+              ;;
+          esac
 
       - name: 校验必需的仓库变量
         id: check
+        env:
+          MODE: ${{ inputs.mode }}
+          ALIBABA_CLOUD_OIDC_PROVIDER_ARN: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
+          ALIBABA_CLOUD_REGION: ${{ vars.ALIBABA_CLOUD_REGION }}
+          MATERIALIZER_ROLE_ARN: ${{ vars.MATERIALIZER_ROLE_ARN }}
+          REGISTER_ROLE_ARN: ${{ vars.REGISTER_ROLE_ARN }}
+          PAI_DATASET_ID: ${{ vars.PAI_DATASET_ID }}
+          CPFS_FILESYSTEM_ID: ${{ vars.CPFS_FILESYSTEM_ID }}
+          CPFS_TARGET_ROOT: ${{ vars.CPFS_TARGET_ROOT }}
+          ARCHIVE_BUCKET: ${{ vars.ARCHIVE_BUCKET }}
+          ARCHIVE_ENDPOINT_URL: ${{ vars.ARCHIVE_ENDPOINT_URL }}
+          ARCHIVE_OBJECT_STORE_URI: ${{ vars.ARCHIVE_OBJECT_STORE_URI }}
+          LAKEFS_API_ENDPOINT: ${{ vars.LAKEFS_API_ENDPOINT }}
         run: |
           set -euo pipefail
           missing=""
           for v in ALIBABA_CLOUD_OIDC_PROVIDER_ARN ALIBABA_CLOUD_REGION \
-                   MATERIALIZER_ROLE_ARN REGISTER_ROLE_ARN DLC_SUBMIT_ROLE_ARN \
+                   MATERIALIZER_ROLE_ARN REGISTER_ROLE_ARN \
                    PAI_DATASET_ID CPFS_FILESYSTEM_ID CPFS_TARGET_ROOT; do
             eval "value=\${$v:-}"
             [ -n "$value" ] || missing="$missing $v"
           done
+          # cpfs-ingest 还要归档到对象存储、再 import 进 lakeFS
+          if [ "$MODE" = "cpfs-ingest" ]; then
+            for v in ARCHIVE_BUCKET ARCHIVE_ENDPOINT_URL ARCHIVE_OBJECT_STORE_URI LAKEFS_API_ENDPOINT; do
+              eval "value=\${$v:-}"
+              [ -n "$value" ] || missing="$missing $v"
+            done
+          fi
           if [ -n "$missing" ]; then
             echo "::error::缺少仓库变量:$missing。见 docs/runbook.md「配置发布流水线」。"
             exit 1
           fi
 
-          # CPFS 在 VPC 内，GitHub 托管 runner 到不了，必须用自托管 runner 或 ACK Job。
+          # CPFS 在 VPC 内，GitHub 托管 runner 到不了，必须自托管 runner 或 ACK Job。
           runner='${{ vars.CPFS_RUNNER_LABEL }}'
           if [ -z "$runner" ]; then
-            echo "::error::未配置 CPFS_RUNNER_LABEL。沉降步骤需要挂载 CPFS，GitHub 托管 runner 无法访问 VPC 内的 CPFS。请配置自托管 runner 标签，或改用 ACK Job 执行沉降。"
+            echo "::error::未配置 CPFS_RUNNER_LABEL。沉降与归档都要挂载 CPFS，GitHub 托管 runner 访问不了 VPC 内的 CPFS。"
             exit 1
           fi
           echo "cpfs_runner=$runner" >> "$GITHUB_OUTPUT"
-        env:
-          ALIBABA_CLOUD_OIDC_PROVIDER_ARN: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
-          ALIBABA_CLOUD_REGION: ${{ vars.ALIBABA_CLOUD_REGION }}
-          MATERIALIZER_ROLE_ARN: ${{ vars.MATERIALIZER_ROLE_ARN }}
-          REGISTER_ROLE_ARN: ${{ vars.REGISTER_ROLE_ARN }}
-          DLC_SUBMIT_ROLE_ARN: ${{ vars.DLC_SUBMIT_ROLE_ARN }}
-          PAI_DATASET_ID: ${{ vars.PAI_DATASET_ID }}
-          CPFS_FILESYSTEM_ID: ${{ vars.CPFS_FILESYSTEM_ID }}
-          CPFS_TARGET_ROOT: ${{ vars.CPFS_TARGET_ROOT }}
 
   # ---------------------------------------------------------------------------
-  # 沉降：DatasetMaterializerRole。
-  # 这一步能写 CPFS，但被显式 Deny 了注册 PAI 版本和提交训练。
+  # cpfs-ingest ①②：扫描 + 归档。
+  # 需要挂载 CPFS，用 DatasetMaterializerRole（它有 staging 前缀的 OSS 写权限，
+  # 但被显式 Deny 了注册 PAI 版本和提交训练）。
   # ---------------------------------------------------------------------------
-  materialize:
-    name: 沉降并校验
+  ingest-archive:
+    name: 扫描并归档到对象存储
+    if: inputs.mode == 'cpfs-ingest'
     needs: preflight
     runs-on: ${{ needs.preflight.outputs.cpfs_runner }}
     outputs:
-      release_dir: ${{ steps.publish.outputs.release_dir }}
-      commit: ${{ steps.publish.outputs.commit }}
-      manifest_sha256: ${{ steps.publish.outputs.manifest_sha256 }}
-
+      manifest_sha256: ${{ steps.scan.outputs.manifest_sha256 }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - run: python -m pip install -e '.[all]'
+
+      # scan 不需要任何云权限，放在假设角色之前，
+      # 这样「staging 不干净」这类错误不会白白占用一次凭证。
+      - name: 扫描 staging 并生成 manifest
+        id: scan
+        run: |
+          set -euo pipefail
+          dataset-sink scan '${{ inputs.prepared_dir }}' \
+            --output "$RUNNER_TEMP/manifest.jsonl" | tee "$RUNNER_TEMP/scan.json"
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          d = json.load(open(os.environ["RUNNER_TEMP"] + "/scan.json"))
+          print(f"manifest_sha256={d['manifest_sha256']}")
+          print(f"file_count={d['file_count']}")
+          PY
 
       - name: 假设 DatasetMaterializerRole
         uses: aliyun/configure-aliyun-credentials-action@v1
@@ -127,9 +181,123 @@ jobs:
           role-to-assume: ${{ vars.MATERIALIZER_ROLE_ARN }}
           oidc-provider-arn: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
           audience: ${{ env.ALIBABA_CLOUD_OIDC_AUDIENCE }}
-          role-session-name: materialize-${{ github.run_id }}
+          role-session-name: archive-${{ github.run_id }}
 
-      - name: 沉降
+      # 幂等且可续传：已存在且大小一致的对象会跳过，中断重跑只补缺口。
+      - name: 归档到对象存储
+        run: |
+          dataset-sink archive '${{ inputs.prepared_dir }}' \
+            --manifest "$RUNNER_TEMP/manifest.jsonl" \
+            --prefix '${{ inputs.archive_prefix }}' \
+            --target oss \
+            --bucket '${{ vars.ARCHIVE_BUCKET }}' \
+            --endpoint-url '${{ vars.ARCHIVE_ENDPOINT_URL }}'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.MANIFEST_ARTIFACT }}
+          path: ${{ runner.temp }}/manifest.jsonl
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # cpfs-ingest ③：lakeFS 零拷贝 import 产生 Commit。
+  #
+  # 这个 job **不假设任何阿里云角色**——它只需要 lakeFS 凭证。
+  # 单独成 job 而不是并进上一个，就是为了让它拿不到 OSS 写权限：
+  # 建 Commit 这个动作不需要碰数据，也就不该有碰数据的能力。
+  # 它也不需要 CPFS，所以跑在托管 runner 上。
+  # ---------------------------------------------------------------------------
+  ingest-commit:
+    name: lakeFS 零拷贝 import
+    if: inputs.mode == 'cpfs-ingest'
+    needs: [preflight, ingest-archive]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # 刻意不要 id-token：这一步不需要阿里云身份
+    outputs:
+      commit_id: ${{ steps.commit.outputs.commit_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e '.[lakefs]'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.MANIFEST_ARTIFACT }}
+          path: ${{ runner.temp }}
+
+      - name: import 并产生 Commit
+        id: commit
+        env:
+          LAKEFS_API_ENDPOINT: ${{ vars.LAKEFS_API_ENDPOINT }}
+          LAKEFS_ACCESS_KEY_ID: ${{ secrets.LAKEFS_ACCESS_KEY_ID }}
+          LAKEFS_SECRET_ACCESS_KEY: ${{ secrets.LAKEFS_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          dataset-sink commit \
+            --repository '${{ inputs.repository }}' \
+            --branch '${{ inputs.lakefs_branch }}' \
+            --object-store-uri '${{ vars.ARCHIVE_OBJECT_STORE_URI }}' \
+            --prefix '${{ inputs.archive_prefix }}' \
+            --destination 'datasets/${{ inputs.dataset }}' \
+            --manifest "$RUNNER_TEMP/manifest.jsonl" \
+            --tag '${{ inputs.ref }}' \
+            ${{ inputs.paimon_snapshot_id && format('--paimon-snapshot-id {0}', inputs.paimon_snapshot_id) || '' }} \
+            | tee "$RUNNER_TEMP/commit.json"
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          d = json.load(open(os.environ["RUNNER_TEMP"] + "/commit.json"))
+          print(f"commit_id={d['commit_id']}")
+          PY
+
+  # ---------------------------------------------------------------------------
+  # 发布：把数据变成 CPFS 上不可变的 release。
+  #
+  # 三种模式在这里汇合：cpfs-ingest 用上一步产生的 Commit 走 certify，
+  # certify 用调用者给的 Commit，materialize 从 lakeFS 拷贝。
+  # ---------------------------------------------------------------------------
+  publish:
+    name: 发布 CPFS release
+    needs: [preflight, ingest-commit]
+    # ingest-commit 在非 cpfs-ingest 模式下是 skipped，默认会连带跳过本 job，
+    # 所以要显式接受 skipped。
+    if: >-
+      ${{ !cancelled()
+      && needs.preflight.result == 'success'
+      && (needs.ingest-commit.result == 'success' || needs.ingest-commit.result == 'skipped') }}
+    runs-on: ${{ needs.preflight.outputs.cpfs_runner }}
+    outputs:
+      release_dir: ${{ steps.publish.outputs.release_dir }}
+      commit: ${{ steps.publish.outputs.commit }}
+      manifest_sha256: ${{ steps.publish.outputs.manifest_sha256 }}
+    env:
+      # cpfs-ingest 的 Commit 来自 import，其余模式来自调用者输入。
+      RESOLVED_COMMIT: ${{ inputs.mode == 'cpfs-ingest' && needs.ingest-commit.outputs.commit_id || inputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e '.[all]'
+
+      - name: 取回 scan 生成的 manifest
+        if: inputs.mode == 'cpfs-ingest'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.MANIFEST_ARTIFACT }}
+          path: ${{ runner.temp }}
+
+      - name: 假设 DatasetMaterializerRole
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ vars.MATERIALIZER_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
+          audience: ${{ env.ALIBABA_CLOUD_OIDC_AUDIENCE }}
+          role-session-name: publish-${{ github.run_id }}
+
+      - name: 发布
         id: publish
         env:
           LAKEFS_API_ENDPOINT: ${{ vars.LAKEFS_API_ENDPOINT }}
@@ -139,20 +307,11 @@ jobs:
         run: |
           set -euo pipefail
           target_root='${{ vars.CPFS_TARGET_ROOT }}'
+          snapshot='${{ inputs.paimon_snapshot_id }}'
+          snapshot_arg=""
+          [ -n "$snapshot" ] && snapshot_arg="--paimon-snapshot-id $snapshot"
 
-          if [ '${{ inputs.mode }}' = 'certify' ]; then
-            [ -n '${{ inputs.prepared_dir }}' ] || { echo "::error::certify 模式必须提供 prepared_dir"; exit 1; }
-            dataset-sink certify \
-              --prepared-dir '${{ inputs.prepared_dir }}' \
-              --target-root "$target_root" \
-              --dataset '${{ inputs.dataset }}' \
-              --repository '${{ inputs.repository }}' \
-              --source-reference '${{ inputs.ref }}' \
-              --commit '${{ inputs.ref }}' \
-              --manifest '${{ inputs.manifest_path }}' \
-              ${{ inputs.paimon_snapshot_id && format('--paimon-snapshot-id {0}', inputs.paimon_snapshot_id) || '' }} \
-              | tee /tmp/release.json
-          else
+          if [ '${{ inputs.mode }}' = 'materialize' ]; then
             dataset-sink materialize \
               --dataset '${{ inputs.dataset }}' \
               --repository '${{ inputs.repository }}' \
@@ -162,15 +321,29 @@ jobs:
               --source lakefs-s3 \
               --target-root "$target_root" \
               --workers 32 \
-              ${{ inputs.paimon_snapshot_id && format('--paimon-snapshot-id {0}', inputs.paimon_snapshot_id) || '' }} \
-              | tee /tmp/release.json
+              $snapshot_arg | tee "$RUNNER_TEMP/release.json"
+          else
+            if [ '${{ inputs.mode }}' = 'cpfs-ingest' ]; then
+              manifest="$RUNNER_TEMP/manifest.jsonl"
+            else
+              manifest='${{ inputs.manifest_path }}'
+            fi
+            dataset-sink certify \
+              --prepared-dir '${{ inputs.prepared_dir }}' \
+              --target-root "$target_root" \
+              --dataset '${{ inputs.dataset }}' \
+              --repository '${{ inputs.repository }}' \
+              --source-reference '${{ inputs.ref }}' \
+              --commit "$RESOLVED_COMMIT" \
+              --lakefs-tag '${{ inputs.ref }}' \
+              --manifest "$manifest" \
+              $snapshot_arg | tee "$RUNNER_TEMP/release.json"
           fi
 
           python - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          d = json.load(open('/tmp/release.json'))
-          # materialize/certify 的输出结构一致，取 release 字段。
-          r = d.get('release', d)
+          import json, os
+          d = json.load(open(os.environ["RUNNER_TEMP"] + "/release.json"))
+          r = d.get("release", d)
           print(f"release_dir={r['release_path']}")
           print(f"commit={r['commit_id']}")
           print(f"manifest_sha256={r['manifest_sha256']}")
@@ -183,14 +356,10 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # 生成注册请求：不需要任何云权限，产物是可人工审阅的 JSON。
-  # 「生成什么请求」和「谁有权发这个请求」被刻意拆成两件事。
   # ---------------------------------------------------------------------------
   build-request:
     name: 生成注册请求
-    # preflight 必须列在 needs 里，否则 needs.preflight.outputs 取不到值，
-    # runs-on 会变成空字符串。
-    needs: [preflight, materialize]
-    # 需要读 release 目录里的 release.json，所以同样跑在能挂载 CPFS 的 runner 上。
+    needs: [preflight, publish]
     runs-on: ${{ needs.preflight.outputs.cpfs_runner }}
     steps:
       - uses: actions/checkout@v4
@@ -202,7 +371,7 @@ jobs:
       - name: 生成 CreateDatasetVersion 请求
         run: |
           set -euo pipefail
-          release_dir='${{ needs.materialize.outputs.release_dir }}'
+          release_dir='${{ needs.publish.outputs.release_dir }}'
           fs_path="${release_dir#${{ vars.CPFS_MOUNT_PREFIX }}}"
           dataset-sink pai-request "$release_dir" \
             --dataset-id '${{ vars.PAI_DATASET_ID }}' \
@@ -210,13 +379,13 @@ jobs:
             --filesystem-id '${{ vars.CPFS_FILESYSTEM_ID }}' \
             --filesystem-path "$fs_path" \
             --uri "nas://${{ vars.CPFS_FILESYSTEM_ID }}.${{ vars.ALIBABA_CLOUD_REGION }}${fs_path}/" \
-            --output /tmp/pai-request.json
-          cat /tmp/pai-request.json
+            --output "$RUNNER_TEMP/pai-request.json"
+          cat "$RUNNER_TEMP/pai-request.json"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: pai-request-${{ needs.materialize.outputs.commit }}
-          path: /tmp/pai-request.json
+          name: pai-request-${{ needs.publish.outputs.commit }}
+          path: ${{ runner.temp }}/pai-request.json
           retention-days: 30
 
   # ---------------------------------------------------------------------------
@@ -224,7 +393,7 @@ jobs:
   # ---------------------------------------------------------------------------
   register-dry-run:
     name: 注册 dry-run
-    needs: [materialize, build-request]
+    needs: [publish, build-request]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -235,8 +404,8 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: pai-request-${{ needs.materialize.outputs.commit }}
-          path: /tmp
+          name: pai-request-${{ needs.publish.outputs.commit }}
+          path: ${{ runner.temp }}
 
       - name: 假设 DatasetRegisterRole
         uses: aliyun/configure-aliyun-credentials-action@v1
@@ -249,7 +418,7 @@ jobs:
       # 不带 --execute：只走 aliyun --dryrun，不改动 PAI。
       - name: dry-run
         run: |
-          dataset-sink register-pai /tmp/pai-request.json \
+          dataset-sink register-pai "$RUNNER_TEMP/pai-request.json" \
             --region '${{ vars.ALIBABA_CLOUD_REGION }}'
 
   # ---------------------------------------------------------------------------
@@ -257,7 +426,7 @@ jobs:
   # ---------------------------------------------------------------------------
   register:
     name: 注册 Dataset Version
-    needs: [materialize, build-request, register-dry-run]
+    needs: [publish, build-request, register-dry-run]
     runs-on: ubuntu-latest
     environment: dataset-release
     steps:
@@ -269,8 +438,8 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: pai-request-${{ needs.materialize.outputs.commit }}
-          path: /tmp
+          name: pai-request-${{ needs.publish.outputs.commit }}
+          path: ${{ runner.temp }}
 
       - name: 假设 DatasetRegisterRole
         uses: aliyun/configure-aliyun-credentials-action@v1
@@ -284,14 +453,14 @@ jobs:
       # 若同 Commit 的既有版本 manifest_sha256 不一致，会直接报错拒绝执行。
       - name: 注册
         run: |
-          dataset-sink register-pai /tmp/pai-request.json \
+          dataset-sink register-pai "$RUNNER_TEMP/pai-request.json" \
             --region '${{ vars.ALIBABA_CLOUD_REGION }}' \
-            --execute | tee /tmp/register-result.json
+            --execute | tee "$RUNNER_TEMP/register-result.json"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: register-result-${{ needs.materialize.outputs.commit }}
-          path: /tmp/register-result.json
+          name: register-result-${{ needs.publish.outputs.commit }}
+          path: ${{ runner.temp }}/register-result.json
           retention-days: 90
 
   # ---------------------------------------------------------------------------
@@ -300,7 +469,7 @@ jobs:
   # ---------------------------------------------------------------------------
   smoke-test:
     name: 冒烟训练作业
-    needs: [materialize, register]
+    needs: [publish, register]
     if: ${{ vars.SMOKE_TEST_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     steps:
@@ -319,17 +488,17 @@ jobs:
           PAI_WORKSPACE_ID: ${{ vars.PAI_WORKSPACE_ID }}
           PAI_RESOURCE_ID: ${{ vars.PAI_RESOURCE_ID }}
           PAI_DATASET_ID: ${{ vars.PAI_DATASET_ID }}
-          PAI_DATASET_VERSION: ${{ needs.materialize.outputs.commit }}
+          PAI_DATASET_VERSION: ${{ needs.publish.outputs.commit }}
           TRAINING_IMAGE: ${{ vars.TRAINING_IMAGE }}
           DLC_ECS_SPEC: ${{ vars.DLC_ECS_SPEC }}
-          MANIFEST_SHA256: ${{ needs.materialize.outputs.manifest_sha256 }}
+          MANIFEST_SHA256: ${{ needs.publish.outputs.manifest_sha256 }}
           VPC_ID: ${{ vars.VPC_ID }}
           VSWITCH_ID: ${{ vars.VSWITCH_ID }}
           SECURITY_GROUP_ID: ${{ vars.SECURITY_GROUP_ID }}
         run: |
           set -euo pipefail
-          envsubst < deploy/pai/dlc-create-job.template.json > /tmp/dlc-job.json
-          cat /tmp/dlc-job.json
+          envsubst < deploy/pai/dlc-create-job.template.json > "$RUNNER_TEMP/dlc-job.json"
+          cat "$RUNNER_TEMP/dlc-job.json"
           aliyun pai-dlc CreateJob \
             --region "${{ vars.ALIBABA_CLOUD_REGION }}" \
-            --body "$(cat /tmp/dlc-job.json)"
+            --body "$(cat "$RUNNER_TEMP/dlc-job.json")"

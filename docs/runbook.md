@@ -154,6 +154,27 @@ git add -A && git commit
 Actions → Dataset release → Run workflow，填参数。流水线会在 dry-run 后停下等审批，
 此时在日志里能看到将要发出的**确切请求体**。确认无误再批。
 
+选哪个 `mode`：
+
+| 情况 | mode | 额外要填 |
+|---|---|---|
+| CPFS 上刚处理完一批新数据，还没有 Commit | `cpfs-ingest` | `prepared_dir`、`archive_prefix`；`ref` 填**要创建的** Tag 名 |
+| CPFS staging 已就绪，Commit 已存在 | `certify` | `prepared_dir`、`manifest_path` |
+| 数据在 lakeFS，要拷到 CPFS | `materialize` | `manifest_path` |
+
+`cpfs-ingest` 模式额外需要这几个仓库变量：
+
+| 变量 | 说明 |
+|---|---|
+| `ARCHIVE_BUCKET` | 归档桶名，必须以 `dataset-sink-` 开头 |
+| `ARCHIVE_ENDPOINT_URL` | OSS 的 S3 兼容端点 |
+| `ARCHIVE_OBJECT_STORE_URI` | 桶级 URI，如 `s3://dataset-sink-archive`，供 lakeFS import 使用 |
+| `LAKEFS_API_ENDPOINT` | lakeFS API 地址 |
+
+**staging 目录必须是干净的**：只包含数据集内容。有 `.DS_Store`、`_READY`、
+`release.json` 之类的残留，`scan` 会在第一步就失败并给出清理命令——这是有意的，
+否则要到归档完一整轮之后才在 `certify` 撞上报错。
+
 ### 2.5 定期检查
 
 | 频率 | 检查项 | 命令 |

@@ -253,6 +253,14 @@ def _scan(args: argparse.Namespace) -> dict:
     return payload
 
 
+def _first_env(*names: str) -> Optional[str]:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return None
+
+
 def _archive(args: argparse.Namespace) -> dict:
     manifest = Manifest.load(args.manifest)
 
@@ -263,14 +271,22 @@ def _archive(args: argparse.Namespace) -> dict:
     else:
         if not args.bucket or not args.endpoint_url:
             raise ValueError("--target oss 需要 --bucket 与 --endpoint-url")
+        # 回落顺序：显式参数 → OSS_* → ALIBABA_CLOUD_*。
+        # 最后一组是关键：流水线里 configure-aliyun-credentials-action 通过
+        # OIDC 假设 RAM 角色后注入的正是 ALIBABA_CLOUD_* 三件套，只认 OSS_*
+        # 会导致 CI 里拿不到凭证。
         writer = OssObjectWriter(
             bucket=args.bucket,
             endpoint_url=args.endpoint_url,
-            access_key_id=args.access_key_id or os.getenv("OSS_ACCESS_KEY_ID"),
-            secret_access_key=(args.secret_access_key or os.getenv("OSS_ACCESS_KEY_SECRET")),
+            access_key_id=args.access_key_id
+            or _first_env("OSS_ACCESS_KEY_ID", "ALIBABA_CLOUD_ACCESS_KEY_ID"),
+            secret_access_key=args.secret_access_key
+            or _first_env("OSS_ACCESS_KEY_SECRET", "ALIBABA_CLOUD_ACCESS_KEY_SECRET"),
             verify_tls=not args.no_verify_tls,
         )
-        token = args.security_token or os.getenv("OSS_SECURITY_TOKEN")
+        token = args.security_token or _first_env(
+            "OSS_SECURITY_TOKEN", "ALIBABA_CLOUD_SECURITY_TOKEN"
+        )
         if token:
             # boto3 客户端已经建好，这里补上会话令牌以支持 STS 临时凭证。
             writer.client._request_signer._credentials.token = token  # noqa: SLF001

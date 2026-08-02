@@ -100,22 +100,78 @@ state 锁，还可能让 state 和实际资源不一致。宁可排队。
 
 ## 3. dataset-release.yml —— 每步换身份
 
-手动触发（数据集发布是有意为之的动作，不该由代码推送触发）。
+手动触发（数据集发布是有意为之的动作，不该由代码推送触发）。三种模式：
+
+| mode | 适用场景 | 前置条件 |
+|---|---|---|
+| `cpfs-ingest` | CPFS 上处理完的**新数据**，还没有 Commit | staging 目录已按 release 布局组织好 |
+| `certify` | CPFS staging 已就绪，且 Commit **已存在** | 有 Commit 和 manifest |
+| `materialize` | 从 lakeFS 拷贝到 CPFS | 有 Commit/Tag 和 manifest |
 
 ```
-preflight       ← 校验配置齐全、拦截 latest/main 这类可变 ref
+preflight        ← 校验配置齐全、按模式校验必填参数、拦截 latest/main 这类可变 ref
+  │
+  ├─ [仅 cpfs-ingest]
+  │  ingest-archive   ← DatasetMaterializerRole，CPFS runner
+  │  │                  scan（无云权限）→ archive 到对象存储（幂等可续传）
+  │  ↓
+  │  ingest-commit    ← **无任何阿里云身份**，只有 lakeFS 凭证，托管 runner
+  │                     lakeFS 零拷贝 import → Commit（+ Tag）
   ↓
-materialize     ← DatasetMaterializerRole，自托管 runner（要挂 CPFS）
+publish          ← DatasetMaterializerRole，CPFS runner
+                   三种模式在这里汇合：certify 或 materialize
   ↓ verify --deep
-build-request   ← 无云权限，产出可人工审阅的 JSON
+build-request    ← 无云权限，产出可人工审阅的 JSON
   ↓
 register-dry-run ← DatasetRegisterRole，只 dryrun
   ↓
   人工审批（dataset-release Environment）
   ↓
-register        ← DatasetRegisterRole，--execute
+register         ← DatasetRegisterRole，--execute
   ↓
-smoke-test      ← DlcSubmitRole，提交冒烟训练
+smoke-test       ← DlcSubmitRole，提交冒烟训练
+```
+
+### 为什么 `ingest-commit` 单独成一个 job
+
+它是整条流水线里唯一**不假设任何阿里云角色**的写操作步骤：
+
+```yaml
+ingest-commit:
+  runs-on: ubuntu-latest
+  permissions:
+    contents: read      # 刻意不要 id-token
+```
+
+建 Commit 这个动作只需要 lakeFS 凭证，不需要碰数据。如果把它并进
+`ingest-archive`，它就顺带获得了 OSS 写权限——而它并不需要。
+**不需要碰数据的步骤，就不该有碰数据的能力。**
+
+顺带一个好处：它不需要 CPFS，所以能跑在 GitHub 托管 runner 上，
+不占用稀缺的自托管 runner。
+
+### scan 为什么放在假设角色之前
+
+`scan` 纯本地计算，不需要云权限。放在假设角色之前，"staging 不干净"
+这类错误就不会白白消耗一次 STS 凭证，也让最常见的失败最早发生。
+
+### 三种模式怎么汇合
+
+`publish` 用 `needs: [preflight, ingest-commit]`。非 `cpfs-ingest` 模式下
+`ingest-commit` 是 skipped，而 GitHub 默认会连带跳过下游 job，所以要显式接受：
+
+```yaml
+if: >-
+  ${{ !cancelled()
+  && needs.preflight.result == 'success'
+  && (needs.ingest-commit.result == 'success' || needs.ingest-commit.result == 'skipped') }}
+```
+
+Commit 的来源也按模式解析：
+
+```yaml
+RESOLVED_COMMIT: ${{ inputs.mode == 'cpfs-ingest'
+  && needs.ingest-commit.outputs.commit_id || inputs.ref }}
 ```
 
 ### preflight 存在的理由

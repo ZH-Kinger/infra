@@ -106,9 +106,33 @@ sequenceDiagram
     D->>D: 校验通过才启动训练；否则 fail-closed
 ```
 
+### CPFS 上处理完的新数据怎么进来
+
+用户在 CPFS 上预处理产出的数据没有 Commit，而整套协议要求必须有。补齐这一段的是
+三个命令：
+
+```
+CPFS staging（已按 target_path 布局）
+   │  scan     并行算 size + SHA-256 → manifest.jsonl
+   │           严格：有 .DS_Store/_READY 之类立刻失败（否则会在 certify 才撞上）
+   ▼
+   │  archive  归档到对象存储，幂等可续传，单遍 IO 完成校验
+   ▼
+   │  commit   lakeFS 零拷贝 import → Commit（+ Tag）
+   ▼          只读对象元数据，不搬数据
+lakeFS Commit  →  certify 在 CPFS 内 rename 发布
+```
+
+**为什么不能跳过归档直接在 CPFS 上发布**：CPFS 是热存储不是归档层（容量有限、
+按容量计费、通常无跨区冗余），而 Commit 必须指向持久的字节位置。Commit 指向 CPFS
+的话，release 目录一旦被淘汰就成了悬空引用——版本记录还在，数据没了。
+
+所以整条链路里字节只被真正搬运一次（CPFS → 对象存储）：`archive` 是唯一的数据搬运，
+`commit` 只读元数据，`certify` 只做 rename。
+
 ### 两种沉降模式
 
-代码支持两条路径，取决于数据当前在哪里：
+数据已经有 Commit 之后，取决于它在哪里：
 
 **`materialize`** —— 数据在 lakeFS/OSS，需要拷贝：
 
