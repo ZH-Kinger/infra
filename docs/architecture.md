@@ -414,6 +414,50 @@ PR → OIDC 假设 TerraformPlanRole（只读）
 
 每一步换一个 RAM 角色，对应身份矩阵。这不是形式主义：流水线本身成为权限边界的执行者，单个步骤被攻破也无法横向移动到下一步。
 
+### 多地区
+
+2026-08-02 实测发现账号里 **PAI Workspace 分布在两个地区**（`617398` @ cn-hangzhou、
+`316328` @ ap-southeast-1），OSS 桶横跨三个地区。所以多地区不是假设，是现状。
+
+关键在于**哪些东西是区域性的**：
+
+| 组件 | 作用域 | 后果 |
+|---|---|---|
+| RAM 角色 / 策略 | **账号全局** | 一份就够，不要按地区复制 |
+| lakeFS Commit | **地区无关**（纯元数据 + 对象地址） | 同一个 Commit 在所有地区通用 |
+| OSS 桶 | 区域性 | 跨地区读要付公网流量费且慢 |
+| CPFS 文件系统 | 区域性，且绑定 VPC | **不能跨地区挂载** |
+| PAI Workspace / Dataset | 区域性 | 每个地区各注册一次 |
+
+由此得出的模型：
+
+```
+              lakeFS Commit（唯一版本真相，地区无关）
+                          │
+        ┌─────────────────┴─────────────────┐
+   cn-hangzhou                        ap-southeast-1
+   CPFS release/<commit>/             CPFS release/<commit>/
+   PAI Dataset Version                PAI Dataset Version
+```
+
+**同一个 Commit 在每个地区各沉降一份热副本。** 这不是妥协，而是设计自带的性质：
+release 目录名就是 Commit ID，内容由 `manifest_sha256` 固定，所以两个地区的副本
+**天然可交叉验证是否完全一致**——两边的 `training-guard` 校验的是同一个指纹。
+CPFS 副本本来就是可丢弃的，多一份只是多一份热缓存。
+
+对 Terraform 分层的直接影响，也是当前代码的**已知缺口**：
+
+- **`access` 层不该按地区拆。** RAM 是账号级的，拆了会产生同名策略冲突。
+- **`platform` 层必须按地区各一份 state。** 现在 `infra/envs/<env>/platform` 只有
+  一个 `var.region` 和一份 state，跑第二个地区会覆盖第一个地区的 state。
+  正确做法是同一份配置配不同的 tfvars + 不同的 backend key，在 `terraform.yml`
+  的矩阵里按 `<env>-<region>` 展开，而不是复制目录。
+
+还有一个容易忽略的点：RAM 策略里的 OSS ARN 写的是 `acs:oss:*:<account>:<bucket>`，
+中间那个 `*` 是**地区字段**。所以现有策略已经覆盖所有地区——够用，但也意味着
+地区之间没有 RAM 层的隔离。要按地区收敛就得把地区写进 ARN，代价是每个地区
+一组变量。
+
 ### 为什么 Terraform 不管模型发布
 
 Terraform 管低频稳定资源（Workspace、网络、存储、角色、成员）；训练任务、模型版本、镜像 tag 属于高频变化，不进 Terraform State。
@@ -429,7 +473,7 @@ Terraform 管低频稳定资源（Workspace、网络、存储、角色、成员�
 | 项目 | 实际 | 目标 | 差距 |
 |---|---|---|---|
 | 当前登录身份 | 主账号 root | 专用 RAM 用户 / OIDC 角色 | **必须整改**，root 不应用于日常和 Terraform |
-| PAI Workspace | `617398` / `pai_7djc6it7is9uk07t4f` @ cn-hangzhou，ENABLED | dev / prod 双 Workspace | 现有的 import，另建 prod |
+| PAI Workspace | **两个地区各 1 个**：`617398` @ cn-hangzhou、`316328` @ ap-southeast-1，均 ENABLED | dev / prod 双 Workspace | 现有的 import；`platform` 层需按地区拆 state |
 | Workspace 成员 | 1 条：root 自己，挂 Owner+Admin+AlgoDeveloper | 按角色分配的多成员 | import 后逐步收敛 |
 | PAI Dataset API | **可用**（建/删/列版本已实测通过） | — | 无 |
 | PAI Dataset | 0 个 | 每个数据集一个 | 需新建（`register-pai` 的前提） |
@@ -437,7 +481,8 @@ Terraform 管低频稳定资源（Workspace、网络、存储、角色、成员�
 | RAM OIDC Provider | 0 个 | 1 个（GitHub Actions） | 新建 |
 | NAS / CPFS 服务 | **已开通**（不再 `User.Disabled`） | — | 无 |
 | CPFS 文件系统 | **0 个** | 至少一个 | **最大阻塞点** |
-| OSS | 3 个桶，共 7 个对象（均为测试文件） | state 桶 + 数据集桶 | 真实数据在另一个账号 |
+| OSS | 3 个桶（cn-hangzhou / cn-shenzhen / ap-southeast-1），共 7 个对象，均为测试文件 | state 桶 + 数据集桶 | 真实数据在另一个账号 |
+| VPC | cn-hangzhou 1 个；ap-southeast-1 **0 个** | 每个要跑 CPFS 的地区各一个 | CPFS 必须绑 VPC，新加坡侧要先建 |
 | lakeFS | 未部署 | 内网 API + S3 Gateway | 待部署 |
 
 **当前最大阻塞：没有 CPFS 文件系统。** 服务本身已开通，但一个文件系统都没建，所以沉降目标不存在。Terraform 里 CPFS 相关资源用 `var.enable_cpfs`（默认 `false`）gate 住——保证在文件系统就绪前 `plan` 仍然可用，就绪后单点切换。
