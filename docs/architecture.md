@@ -624,12 +624,24 @@ Terraform 管低频稳定资源（Workspace、网络、存储、角色、成员�
 2. **版本的 `DataSourceType` 必须与父 Dataset 一致**，否则报 `DataSourceType not match`。
 3. **PAI 按 `DataSourceType` 分别校验 `Uri`，严格程度不同**：
 
-   | 类型 | Uri | 校验强度 |
+   | DataSourceType | 必须的 scheme | 例 |
    |---|---|---|
-   | `NAS` | `nas://<fsid>.<region>/<subpath>/` | 只校验格式——虚构的 fsid 也能建成功 |
-   | `CPFS` | `nas://<cpfs-fsid>.<region>/<subpath>/` | **会校验文件系统真实存在**，形状正确的假 id 一律报 `Uri format error` |
+   | `OSS` | `oss://` | `oss://bucket.oss-cn-hangzhou.aliyuncs.com/prefix/` |
+   | `NAS` | `nas://` | `nas://0011abcdef.cn-hangzhou/datasets/` |
+   | **`CPFS`** | **`cpfs://`** | `cpfs://cpfs-<16位>.cn-hangzhou/<ptc-id>/datasets/` |
+   | **`BMCPFS`** | **`bmcpfs://`** | `bmcpfs://cpfs-<16位>.cn-hangzhou/<ptc-id>/` |
 
-   所以 CPFS 型 Dataset 在没有真实 CPFS 文件系统之前**无法创建**，这一段只能等文件系统就绪后联调。
+   **官方文档说 CPFS 用 `nas://` 是错的。** ROS 的 `ALIYUN::PAI::DatasetVersion`
+   文档给的是 `nas://<cpfs-fsid>.region/subpath/`，实测 PAI 一律报
+   `Uri format error`；只有 `cpfs://` 能通过。2026-08-03 在真实 CPFS 上逐条验证。
+   别照文档改回去，除非重新验过。
+
+   另外两条：`Property=DIRECTORY` 时 Uri **必须以 `/` 结尾**（否则报
+   `not DIRECTORY`）；CPFS 2.0（fsid 为 `cpfs-<16位>`）路径里可以带协议服务 ID，
+   region 和协议服务 ID 都是可选的。
+
+   这三条都在 `register-pai` 里做本地校验，**不会等到调 API 才炸**——真炸的时候
+   CPFS release 已经发布、Commit 和 Tag 都建好了，回滚很难看。
 
    另外 `ListDatasetVersions` **必须传 `PageNumber`**，否则报 `MissingPageNumber`。
 

@@ -116,6 +116,20 @@ def _find_existing_version(
     return None
 
 
+# Uri 的 scheme 必须与 DataSourceType 严格对应。
+#
+# 2026-08-03 在真实账号上逐条实测得出，**与官方文档不符**：ROS 的
+# ALIYUN::PAI::DatasetVersion 文档说 CPFS 用 `nas://<cpfs-fsid>.region/...`，
+# 实际 PAI 只接受 `cpfs://`，用 nas:// 一律报 `Uri format error`。
+# 别按文档改回去，除非在真实账号上重新验过。
+_URI_SCHEMES = {
+    "OSS": "oss://",
+    "NAS": "nas://",
+    "CPFS": "cpfs://",
+    "BMCPFS": "bmcpfs://",
+}
+
+
 def _validate_request(request: dict) -> None:
     if not isinstance(request, dict) or not request.get("dataset_id"):
         raise ValueError("request must contain dataset_id")
@@ -128,8 +142,24 @@ def _validate_request(request: dict) -> None:
         raise ValueError(f"PAI request body is missing fields: {missing}")
     if body["Property"] != "DIRECTORY":
         raise ValueError("only DIRECTORY dataset releases are supported")
-    if body["DataSourceType"] not in {"CPFS", "BMCPFS", "NAS"}:
+
+    source_type = body["DataSourceType"]
+    if source_type not in {"CPFS", "BMCPFS", "NAS"}:
         raise ValueError("only CPFS, BMCPFS and NAS dataset releases are supported")
+
+    uri = body["Uri"]
+    if not isinstance(uri, str):
+        raise ValueError("Uri must be a string")
+    expected = _URI_SCHEMES[source_type]
+    if not uri.startswith(expected):
+        raise ValueError(
+            f"DataSourceType={source_type} 要求 Uri 以 {expected} 开头，实际是 {uri!r}。"
+            "scheme 与类型必须严格对应，PAI 否则报 Uri format error。"
+            "注意官方文档说 CPFS 用 nas:// 是错的，实测只接受 cpfs://。"
+        )
+    # Property=DIRECTORY 时结尾必须是斜杠，否则 PAI 报 "not DIRECTORY"。
+    if not uri.endswith("/"):
+        raise ValueError(f"Property=DIRECTORY 要求 Uri 以 / 结尾，实际是 {uri!r}")
 
 
 def _subprocess_runner(command: Sequence[str]) -> CommandResult:

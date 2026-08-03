@@ -369,16 +369,37 @@ jobs:
       - run: python -m pip install -e .
 
       - name: 生成 CreateDatasetVersion 请求
+        env:
+          DATA_SOURCE_TYPE: ${{ vars.PAI_DATA_SOURCE_TYPE || 'CPFS' }}
+          PROTOCOL_SERVICE_ID: ${{ vars.CPFS_PROTOCOL_SERVICE_ID }}
         run: |
           set -euo pipefail
           release_dir='${{ needs.publish.outputs.release_dir }}'
           fs_path="${release_dir#${{ vars.CPFS_MOUNT_PREFIX }}}"
+
+          # Uri 的 scheme 必须与 DataSourceType 严格对应，否则 PAI 报
+          # Uri format error。2026-08-03 真实账号实测：CPFS 只接受 cpfs://，
+          # 官方文档写的 nas:// 是错的。
+          case "$DATA_SOURCE_TYPE" in
+            CPFS)   scheme=cpfs ;;
+            BMCPFS) scheme=bmcpfs ;;
+            NAS)    scheme=nas ;;
+            *) echo "::error::不支持的 PAI_DATA_SOURCE_TYPE=$DATA_SOURCE_TYPE"; exit 1 ;;
+          esac
+
+          # CPFS 2.0（fsid 为 cpfs-<16 位>）的路径里要带协议服务 ID；
+          # 1.0 和通用 NAS 不需要，留空即可。
+          svc=""
+          [ -n "$PROTOCOL_SERVICE_ID" ] && svc="/$PROTOCOL_SERVICE_ID"
+
           dataset-sink pai-request "$release_dir" \
             --dataset-id '${{ vars.PAI_DATASET_ID }}' \
             --region '${{ vars.ALIBABA_CLOUD_REGION }}' \
             --filesystem-id '${{ vars.CPFS_FILESYSTEM_ID }}' \
             --filesystem-path "$fs_path" \
-            --uri "nas://${{ vars.CPFS_FILESYSTEM_ID }}.${{ vars.ALIBABA_CLOUD_REGION }}${fs_path}/" \
+            --data-source-type "$DATA_SOURCE_TYPE" \
+            ${PROTOCOL_SERVICE_ID:+--protocol-service-id "$PROTOCOL_SERVICE_ID"} \
+            --uri "${scheme}://${{ vars.CPFS_FILESYSTEM_ID }}.${{ vars.ALIBABA_CLOUD_REGION }}${svc}${fs_path}/" \
             --output "$RUNNER_TEMP/pai-request.json"
           cat "$RUNNER_TEMP/pai-request.json"
 

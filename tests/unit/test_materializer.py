@@ -125,7 +125,7 @@ class MaterializerTests(unittest.TestCase):
                     dataset_id="d-example",
                     region="cn-hangzhou",
                     filesystem_id="cpfs-example",
-                    uri="nas://cpfs-example.cn-hangzhou/datasets/robotics/abc123/",
+                    uri="cpfs://cpfs-example.cn-hangzhou/datasets/robotics/abc123/",
                     filesystem_path="/datasets/robotics/abc123",
                 ),
             )

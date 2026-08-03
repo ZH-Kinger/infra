@@ -267,7 +267,7 @@ sink pai-request "$release_a" \
   --region cn-hangzhou \
   --filesystem-id cpfs-example \
   --filesystem-path "/datasets/robotics/$commit_a" \
-  --uri "nas://cpfs-example.cn-hangzhou/datasets/robotics/$commit_a/" \
+  --uri "cpfs://cpfs-example.cn-hangzhou/ptc-example/datasets/robotics/$commit_a/" \
   --output "$work_dir/pai-request.json"
 
 printf '\nE2E 全部通过。生成的请求: %s\n' "$work_dir/pai-request.json"

@@ -73,6 +73,10 @@ make hooks         # pre-commit run --all-files
 - **`$VAR` 后面紧跟中文必须写成 `${VAR}`。** `/bin/sh` 会把全角字符的字节当成变量名的一部分，配合 `set -u` 报 `VAR?: unbound variable`。
 - **Python 3.12 之前，f-string 表达式里不能有反斜杠转义的引号。** 在 `python3 -c '...'` 里尤其容易踩到，先取值到变量再格式化。
 - **heredoc 会占用 stdin。** `printf '%s' "$x" | python3 - <<'PY'` 里 python 从 heredoc 读程序，管道数据被丢弃；要传数据就写临时文件。
+- **PAI Dataset 的 Uri scheme 必须与 DataSourceType 严格对应**：OSS→`oss://`、
+  NAS→`nas://`、CPFS→`cpfs://`、BMCPFS→`bmcpfs://`。**官方文档说 CPFS 用
+  `nas://` 是错的**（2026-08-03 真实账号实测）。`Property=DIRECTORY` 还要求
+  Uri 以 `/` 结尾。
 - **CPFS 挂载路径 ≠ CPFS 文件系统内部路径。** `pai-request` 的 `release_dir` 是挂载视角，`--filesystem-path` 是文件系统内部视角，两者不能混用。
 - **`terraform` 不在 homebrew-core**（BUSL 许可），需 `brew install hashicorp/tap/terraform`。
 - **本环境 `registry.terraform.io` 被网络策略拦截**，Provider schema 只能靠 `terraform validate` 核对，不要凭记忆写字段。查资源真名的最快方式是 `terraform providers schema -json` 后用 Python 过滤。

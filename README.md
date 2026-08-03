@@ -115,7 +115,7 @@ dataset-sink pai-request /mnt/cpfs/datasets/robotics/6f2b7c91c2 \
   --dataset-id d-example --region cn-hangzhou \
   --filesystem-id cpfs-example \
   --filesystem-path /datasets/robotics/6f2b7c91c2 \
-  --uri nas://cpfs-example.cn-hangzhou/datasets/robotics/6f2b7c91c2/
+  --uri cpfs://cpfs-example.cn-hangzhou/ptc-example/datasets/robotics/6f2b7c91c2/
 
 # 注册（默认 dry-run，--execute 才真正写入，且按 Commit 幂等查重）
 dataset-sink register-pai /work/pai-request.json --region cn-hangzhou --execute
@@ -125,6 +125,18 @@ dataset-sink training-guard --dataset-root /mnt/dataset \
   --expected-commit "$DATASET_COMMIT" \
   --expected-manifest-sha256 "$DATASET_MANIFEST_SHA256"
 ```
+
+`--uri` 的 scheme 必须与 `--data-source-type` 严格对应，PAI 否则报
+`Uri format error`：
+
+| DataSourceType | scheme |
+|---|---|
+| `NAS` | `nas://` |
+| `CPFS` | `cpfs://` |
+| `BMCPFS` | `bmcpfs://` |
+
+**官方文档说 CPFS 用 `nas://` 是错的**（2026-08-03 真实账号实测）。另外
+`Property=DIRECTORY` 要求 URI 以 `/` 结尾。这两条都在本地校验，不会等到调 API 才炸。
 
 两处坐标系容易混：
 
