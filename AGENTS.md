@@ -92,9 +92,20 @@ make preflight     # 只读体检：换账号前先跑这个，看还差什么�
 - **CPFS 不能跨可用区挂载。** 挂载点的 vSwitch 必须与文件系统同可用区，否则
   `CreateProtocolMountTarget` 直接报 `VSwitchZoneMismatch.InvalidParam`
   （`VSwitch Zone should be same with filesystem`）。
-  客户端不在挂载点所在 vSwitch 时，挂载域名会解析成 `127.0.1.255` 这种回环地址，
-  表现为 `mount.nfs: Connection refused`——看着像端口没开，实际是**没有给这个
-  客户端建接入点**。
+- **「文件系统建得出来」不等于「挂得上」——挂载点是另一份库存。**
+  2026-08-03 实测：cn-hangzhou-i 有文件系统库存（`CreateFileSystem` 成功），
+  但 `CreateMountTarget` 报 `Resource.OutOfStock`（`The inventory of the
+  specified zone is insufficient`）。
+  症状很误导：协议服务显示 `Running` 但 `MountTargetCount` 恒为 0，
+  `CreateProtocolMountTarget` 返回的导出显示 `AVAILABLE`，可挂载域名被阿里云
+  VPC DNS 解析成 **`127.0.1.255`**（NOERROR、真实 A 记录、TTL 10），
+  客户端表现为 `mount.nfs: Connection refused` 或超时。
+  **看着像网络/端口/权限问题，实际是后端没配出来。** 排查时先试
+  `CreateMountTarget` 看是否 OutOfStock，比对着 NFS 参数试半天快得多。
+  同区、`FsetId` 导出、`VSwitchIds` 都试过，都不是原因。
+- **`CreateProtocolMountTarget` 的 `VSwitchIds`（复数）实际不可用**：带上它报
+  「`VSwitchId` 和 `VSwitchIds` 只能二选一」，去掉 `VSwitchId` 又报
+  「`VSwitchId` 必填」。只能用单数。
   **架构后果**：CPFS 只支持部分可用区（本账号 cn-hangzhou 只有 g/h/i），
   而挂载又必须同区，所以**所有要挂 CPFS 的东西——自托管 runner、DSW、DLC——
   都必须落在 CPFS 所在的那个可用区**。选可用区时要同时满足「CPFS 有库存」和
