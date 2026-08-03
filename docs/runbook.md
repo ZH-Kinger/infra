@@ -8,6 +8,38 @@
 
 ## 0. 当前状态与前置阻塞
 
+### 先跑体检
+
+换账号时**第一件事**是跑只读体检，而不是跑流水线：
+
+```bash
+ALIYUN_PROFILE=<profile> REGION=cn-hangzhou make preflight
+```
+
+它把下表以及散落在 [AGENTS.md 已知踩坑](../AGENTS.md) 里的前提变成自动检查，
+逐条告诉你差什么、为什么要它。有 FAIL 就退出码 1。检查项：
+
+| # | 检查 | 为什么 |
+|---|---|---|
+| 1 | 是不是 root | root 绕过一切 RAM 限制，这套设计对它不生效 |
+| 2 | CPFS 服务开通 / 文件系统存在 | 没有它 `materialize` 无处可写 |
+| 2 | `bmcpfs-` 前缀 → 智算版 | 智算版**不支持 Evict**，`reclaim --strategy cpfs-evict` 用不了 |
+| 3 | Fileset 存在 | 数据流动第一条前提：`FsetId` 必填 |
+| 4 | 注册表里的桶真实存在 | 早失败，且报错清楚 |
+| 4 | `archive` 桶有 `cpfs-dataflow` 标签 | 没有它 `CreateDataFlow` 直接拒绝，且官方文档不显眼 |
+| 4 | `archive` 桶开了版本控制 | Export（沉淀）要求；Import 不要求 |
+| 5 | PAI Workspace 存在 | `register-pai` 需要 WorkspaceId，且 Workspace 分 region |
+| 6 | 谁持有 `AliyunRAMFullAccess` | **他能删掉我们所有 Deny**，见 [权限 §5](permissions.md) |
+| 7 | GitHub OIDC Provider | 没有它 CI 拿不到临时凭证 |
+
+体检**只调用只读 API**，不创建、不修改任何资源，可以放心在生产账号跑。
+
+它测不到的是三件只能在提交时暴露的事：`Throughput` 只接受 600/1200/1500、
+相关资源未就绪时报的 `OperationDenied.InvalidState`（这个错会盖住真正的原因）、
+以及同一 DataFlow 的任务必须串行。
+
+### 前置阻塞表
+
 接入真实环境前，先确认下面几件事，否则会在中途卡住：
 
 | 阻塞项 | 现状 | 解除方式 |

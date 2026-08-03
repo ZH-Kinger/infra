@@ -188,11 +188,11 @@ src/dataset_sink/   Python 逻辑（零运行时依赖，lakeFS/boto3 在 option
 tests/unit/         离线单元测试
 tests/integration/  需真实环境，缺环境变量时 skip
 infra/bootstrap/    本地 state：state 后端 + OIDC 信任锚 + 三个 CI 角色
-infra/modules/      ci-oidc-role / dataset-sink-roles / pai-workspace-access
+infra/modules/      ci-oidc-role / dataset-sink-roles / pai-workspace-access / cpfs-workspaces
 infra/envs/         dev|prod × platform|access，四套独立 state
 deploy/ram/         RAM 策略副本（自动生成，勿手改）
 deploy/pai/         DLC 作业模板与训练入口
-scripts/            本地演练、策略渲染、只读探测
+scripts/            本地演练、策略渲染、只读探测与体检（preflight）
 docs/               架构 / 权限 / CI/CD / 运维 / 使用
 ```
 

@@ -12,6 +12,9 @@
 # certify 对「Commit 由外部产生」这个前提的处理。
 set -eu
 
+# `CDPATH=` 是给 cd 单独清空 CDPATH 的环境前缀，不是空赋值——
+# 没有它，用户 shell 里的 CDPATH 会让 cd 跳到别的目录去。
+# shellcheck disable=SC1007
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$project_dir"
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/dataset-sink-e2e.XXXXXX")
@@ -137,6 +140,10 @@ printf '\n===== C3. commit 必须拦住填错的 --destination =====\n'
 # 这里不能只断言「命令失败」：没有 lakeFS 凭证时 commit 本来就会失败，
 # 那样即使检查根本不存在，测试也会通过。必须比对失败原因。
 try_commit() {
+  # `2>&1 >/dev/null` 的顺序是**故意**的：先把 stderr 接到当前的 stdout
+  # （也就是 $(...) 的捕获），再把 stdout 丢掉。效果是「只捕获报错信息」，
+  # 正是这里要的——断言的是 commit 的拒绝理由。反过来写就什么都捕获不到。
+  # shellcheck disable=SC2069
   sink commit \
     --repository robotics-data \
     --object-store-uri "file://$work_dir/oss" \

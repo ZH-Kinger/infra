@@ -30,6 +30,7 @@ make fmt           # ruff format + terraform fmt
 make e2e           # 本地全链路演练（临时目录模拟 CPFS）
 make tf-validate   # 逐目录 terraform init -backend=false + validate
 make hooks         # pre-commit run --all-files
+make preflight     # 只读体检：换账号前先跑这个，看还差什么（需凭证）
 ```
 
 `make test` 和 `make e2e` 必须始终能在没有网络、没有云凭证的机器上通过。任何需要真实环境的测试放 `tests/integration/`，并在缺少环境变量时 skip。
@@ -69,7 +70,8 @@ make hooks         # pre-commit run --all-files
 - **`nas` 系 API 的 `Description` 不接受中文**，会报 `IllegalCharacters`。
 - **`aliyun` CLI 的 profile 默认 region 可能与资源所在 region 不一致**（本账号 profile 是 `cn-shanghai`，PAI Workspace 在 `cn-hangzhou`）。所有命令显式带 `--region`。
 - **`aiworkspace` 产品必须显式 `--endpoint aiworkspace.<region>.aliyuncs.com`**，否则报 unknown endpoint。
-- **zsh 不做未加引号变量的单词切分。** 不要把多个 CLI flag 塞进一个变量再展开，会被当成单个参数。
+- **zsh 不做未加引号变量的单词切分。** 不要把多个 CLI flag 塞进一个变量再展开，会被当成单个参数。**注意 `/bin/sh` 脚本里同样的写法是安全的**（sh 会切分），所以 `scripts/*.sh` 里的 `$P` 能用；在交互式 zsh 里手敲同一条命令却会失败。
+- **`cmd | while read` 的循环体在子 shell 里，里面的变量赋值出了循环就丢。** 计数器、标志位全部归零，而循环体本身的输出一切正常——症状是「逐条都打印了，汇总却是 0」。要在主 shell 里累加就写成 `while ... done < 文件`。
 - **`$VAR` 后面紧跟中文必须写成 `${VAR}`。** `/bin/sh` 会把全角字符的字节当成变量名的一部分，配合 `set -u` 报 `VAR?: unbound variable`。
 - **Python 3.12 之前，f-string 表达式里不能有反斜杠转义的引号。** 在 `python3 -c '...'` 里尤其容易踩到，先取值到变量再格式化。
 - **heredoc 会占用 stdin。** `printf '%s' "$x" | python3 - <<'PY'` 里 python 从 heredoc 读程序，管道数据被丢弃；要传数据就写临时文件。

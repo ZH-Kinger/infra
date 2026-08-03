@@ -16,6 +16,9 @@
 # 本身为准，评审时直接看 infra/bootstrap/oidc.tf。
 set -eu
 
+# `CDPATH=` 是给 cd 单独清空 CDPATH 的环境前缀，不是空赋值——
+# 没有它，用户 shell 里的 CDPATH 会让 cd 跳到别的目录去。
+# shellcheck disable=SC1007
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 module_dir="$project_dir/infra/modules/dataset-sink-roles"
 out_dir="$project_dir/deploy/ram"
