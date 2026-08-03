@@ -85,6 +85,19 @@ make preflight     # 只读体检：换账号前先跑这个，看还差什么�
   `OperationDenied.InvalidState`——这个错会盖住真正的原因，排查要逐个参数剥离；
   **Export 要求源桶开版本控制**（Import 不要求）；**同一 DataFlow 的任务串行**，
   前一个没到终态就提交下一个会被拒。
+- **lakeFS import 源的 scheme 要匹配 lakeFS 的 blockstore adapter 类型，不是云厂商名字。**
+  阿里云 OSS 是通过 lakeFS 的 `s3` adapter 访问的（`blockstore.type: s3` + OSS 的
+  S3 兼容端点），所以 `commit --object-store-uri` 必须写 **`s3://`**，写 `oss://`
+  会在服务端报 `invalid storage scheme oss: invalid address`（2026-08-03 真实
+  lakeFS 1.84.1 + OSS 后端实测）。这个错要等 import 任务跑起来才出现，堆栈指向
+  lakeFS SDK 内部，看不出真正原因。`commit` 现在会在本地先拦一次。
+- **lakeFS 启动时会校验已有 repo 的 adapter 类型。** 已经有 `local` namespace 的
+  repo 时，改成 `blockstore.type: s3` 会直接 fatal：`Mismatched adapter detected`。
+  想在同一台机上同时试两种后端，就另起一个实例（独立 `database.local.path` +
+  独立 `listen_address`），别去改现有实例的配置。
+- **lakeFS 的配置项都能用环境变量覆盖**（`LAKEFS_` + 路径大写下划线，如
+  `LAKEFS_BLOCKSTORE_S3_CREDENTIALS_SESSION_TOKEN`）。临时验证用它，
+  凭证就只存在于进程环境里，不必写进配置文件。
 - **CPFS 挂载路径 ≠ CPFS 文件系统内部路径。** `pai-request` 的 `release_dir` 是挂载视角，`--filesystem-path` 是文件系统内部视角，两者不能混用。
 - **`terraform` 不在 homebrew-core**（BUSL 许可），需 `brew install hashicorp/tap/terraform`。
 - **本环境 `registry.terraform.io` 被网络策略拦截**，Provider schema 只能靠 `terraform validate` 核对，不要凭记忆写字段。查资源真名的最快方式是 `terraform providers schema -json` 后用 Python 过滤。

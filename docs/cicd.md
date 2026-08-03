@@ -196,6 +196,26 @@ CPFS staging 不是持久位置。
 一次全量读，所以放在 VPC 内的 runner 上走内网端点。`--no-digest` 能跳过，
 但 manifest 随发布固化，事后补不上——那个 release 永久失去深度校验能力。
 
+### oss-ingest 的 URI 必须是 s3:// 而不是 oss://
+
+这条我第一版就写错了。lakeFS import 源的 scheme 要匹配 **lakeFS 自己的
+blockstore adapter 类型**，不是云厂商的名字——OSS 是通过 lakeFS 的 `s3` adapter
+访问的（`blockstore.type: s3` + OSS 的 S3 兼容端点）。
+
+2026-08-03 在真实 lakeFS 1.84.1 + OSS 后端上对照实测：
+
+| `--object-store-uri` | 结果 |
+|---|---|
+| `oss://<bucket>` | 失败：`invalid storage scheme oss: invalid address` |
+| `s3://<bucket>` | 成功，4 个对象零拷贝 import |
+
+坏在这个错**要等 import 任务在服务端跑起来才出现**，堆栈指向 lakeFS SDK 内部，
+看不出真正原因是 scheme 写错。所以 `commit` 现在会在本地先校验一次
+（`assert_lakefs_import_scheme`），把它变成一句能直接照做的话。
+`tests/unit/test_ingest.py` 里有一条测试直接读这个 workflow 文件，确认它用的是
+`s3://`——这一行写错的后果是整条 oss-ingest 在服务端失败，而普通单元测试
+不会有任何反应。
+
 ### oss-ingest 为什么两次校验注册表
 
 `preflight` 查一次，`ingest-commit` 里 `commit --registry` 再查一次。

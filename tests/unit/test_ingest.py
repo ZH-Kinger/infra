@@ -10,6 +10,7 @@ from dataset_sink.ingest import (
     CommitResult,
     LocalObjectWriter,
     archive_staging,
+    assert_lakefs_import_scheme,
     build_commit_metadata,
     import_and_commit,
     object_store_uri_for,
@@ -233,3 +234,44 @@ class ObjectStoreUriSplitTests(unittest.TestCase):
 
         with self.assertRaises(DatasetSinkError):
             split_object_store_uri("bucket/prefix")
+
+
+class LakeFSImportSchemeTest(unittest.TestCase):
+    """lakeFS import 源的 scheme 必须匹配 blockstore adapter 类型，不是云厂商名。
+
+    2026-08-03 真实 lakeFS 1.84.1 + OSS 后端实测：写 oss:// 会失败，报
+    `invalid storage scheme oss: invalid address`，而且要等 import 任务在服务端
+    跑起来才出现——堆栈指向 lakeFS SDK 内部，看不出真正原因是 scheme 写错。
+
+    这个坑我自己踩过一次：oss-ingest 流水线第一版写的就是 oss://。
+    """
+
+    def test_s3_is_accepted(self):
+        self.assertEqual(assert_lakefs_import_scheme("s3://bucket/prefix/"), "s3")
+
+    def test_local_is_accepted(self):
+        self.assertEqual(assert_lakefs_import_scheme("local:///mnt/x/"), "local")
+
+    def test_oss_is_rejected_with_actionable_message(self):
+        with self.assertRaises(DatasetSinkError) as ctx:
+            assert_lakefs_import_scheme("oss://bucket/prefix/")
+        message = str(ctx.exception)
+        self.assertIn("s3://", message)
+        self.assertIn("invalid storage scheme oss", message)
+
+    def test_unknown_scheme_lists_the_valid_ones(self):
+        with self.assertRaises(DatasetSinkError) as ctx:
+            assert_lakefs_import_scheme("ftp://bucket/")
+        self.assertIn("s3", str(ctx.exception))
+
+    def test_pipeline_uses_s3_not_oss(self):
+        """流水线里 oss-ingest 的 --object-store-uri 必须是 s3://。
+
+        直接读 workflow 文件而不是相信注释：这一行写错的后果是整条
+        oss-ingest 在服务端失败，而单元测试不会有任何反应。
+        """
+        workflow = (
+            Path(__file__).resolve().parents[2] / ".github/workflows/dataset-release.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("--object-store-uri 's3://${{ inputs.source_bucket }}'", workflow)
+        self.assertNotIn("oss://${{ inputs.source_bucket }}", workflow)

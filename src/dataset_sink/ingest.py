@@ -759,6 +759,41 @@ def object_store_uri_for(scheme_uri: str, prefix: str) -> str:
     return f"{base}/{normalized}/"
 
 
+# lakeFS import 源的 scheme 必须匹配 lakeFS 自己的 **blockstore adapter 类型**，
+# 而不是云厂商的名字。阿里云 OSS 是通过 lakeFS 的 `s3` adapter 访问的（配
+# `blockstore.type: s3` + OSS 的 S3 兼容端点），所以源地址要写 `s3://`。
+#
+# 2026-08-03 在真实 lakeFS 1.84.1 + OSS 后端上实测，写 `oss://` 会失败：
+#
+#     Import Error: import error: error on ingest:
+#     creating object-store walker on path oss://<bucket>/<prefix>/:
+#     invalid storage scheme oss: invalid address
+#
+# 这个错要等到 import 任务在服务端跑起来才出现，堆栈很深、指向 lakeFS SDK 内部，
+# 看不出真正的原因是「scheme 写错了」。所以在本地先拦一次，给一句能直接照做的话。
+_LAKEFS_IMPORT_SCHEMES = ("s3", "gs", "azure", "local", "mem")
+
+
+def assert_lakefs_import_scheme(uri: str) -> str:
+    """校验 URI 的 scheme 是 lakeFS import 认得的，返回该 scheme。"""
+    scheme = uri.split("://", 1)[0] if "://" in uri else ""
+    if scheme in _LAKEFS_IMPORT_SCHEMES:
+        return scheme
+    if scheme == "oss":
+        raise DatasetSinkError(
+            f"lakeFS 不认识 oss:// 这个 scheme: {uri}\n"
+            "把它改成 s3://（桶名前缀不变）。原因是 scheme 要匹配 lakeFS 的 "
+            "blockstore adapter 类型，而不是云厂商：OSS 是用 lakeFS 的 s3 adapter "
+            "访问的（blockstore.type = s3 + OSS 的 S3 兼容端点）。\n"
+            "写成 oss:// 的话，import 会在服务端失败并报 "
+            "`invalid storage scheme oss: invalid address`。"
+        )
+    raise DatasetSinkError(
+        f"lakeFS import 不支持的 scheme {scheme!r}: {uri}\n"
+        f"可用的是 {', '.join(_LAKEFS_IMPORT_SCHEMES)}（阿里云 OSS 用 s3）。"
+    )
+
+
 def split_object_store_uri(uri: str) -> Tuple[str, str]:
     """把 `<scheme>://<bucket>/<prefix>/` 拆成 (bucket, prefix)。
 

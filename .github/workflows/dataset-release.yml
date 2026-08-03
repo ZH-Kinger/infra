@@ -395,7 +395,11 @@ jobs:
           )
 
           if [ '${{ inputs.mode }}' = 'oss-ingest' ]; then
-            args+=(--object-store-uri 'oss://${{ inputs.source_bucket }}')
+            # **必须是 s3:// 而不是 oss://**。scheme 要匹配 lakeFS 的 blockstore
+            # adapter 类型，不是云厂商名字：OSS 是通过 lakeFS 的 s3 adapter 访问的。
+            # 2026-08-03 真实 lakeFS 1.84.1 + OSS 后端实测，oss:// 会在服务端报
+            # `invalid storage scheme oss: invalid address`。commit 现在会在本地先拦。
+            args+=(--object-store-uri 's3://${{ inputs.source_bucket }}')
             args+=(--prefix '${{ inputs.source_prefix }}')
             # 只有 oss-ingest 走 --registry。preflight 已经查过一次，这里再查
             # 是因为两者之间隔着一次 scan，注册表有可能在中间被改。

@@ -188,11 +188,14 @@ sink scan-oss \
   --output "$work_dir/manifest-scratch.jsonl" >/dev/null
 printf 'scan-oss 允许扫描工作区（可写位置也能扫）\n'
 
-# commit 的桶名来自 --object-store-uri，所以这里用 oss:// 形状。
+# commit 的桶名来自 --object-store-uri，所以这里要给一个带桶名的形状。
+# 用 s3:// 而不是 oss://——lakeFS 的 scheme 要匹配它的 blockstore adapter 类型，
+# OSS 是走 s3 adapter 的（2026-08-03 真机实测，见 AGENTS.md）。写 oss:// 会先被
+# assert_lakefs_import_scheme 拦掉，就验不到注册表这一层了。
 # 注册表校验发生在联系 lakeFS 之前，所以没有凭证也能验到这一步。
 ws_err=$(sink commit \
   --repository robotics-data \
-  --object-store-uri oss://e2e-scratch \
+  --object-store-uri s3://e2e-scratch \
   --prefix scratch/exp1 \
   --destination datasets/scratch \
   --manifest "$work_dir/manifest-scratch.jsonl" \
@@ -207,13 +210,17 @@ printf '\n===== C3. commit 必须拦住填错的 --destination =====\n'
 # 这里不能只断言「命令失败」：没有 lakeFS 凭证时 commit 本来就会失败，
 # 那样即使检查根本不存在，测试也会通过。必须比对失败原因。
 try_commit() {
+  # scheme 用 local://（lakeFS 本地 adapter 的真实 scheme），不是 file://。
+  # 之前写 file:// 能跑到 destination 检查，只是因为那时还没有 scheme 校验——
+  # 也就是说这个用例一直在用一个 lakeFS 根本不认的 URI。
+  #
   # `2>&1 >/dev/null` 的顺序是**故意**的：先把 stderr 接到当前的 stdout
   # （也就是 $(...) 的捕获），再把 stdout 丢掉。效果是「只捕获报错信息」，
   # 正是这里要的——断言的是 commit 的拒绝理由。反过来写就什么都捕获不到。
   # shellcheck disable=SC2069
   sink commit \
     --repository robotics-data \
-    --object-store-uri "file://$work_dir/oss" \
+    --object-store-uri "local://$work_dir/oss" \
     --prefix legacy/robotics \
     --destination "$1" \
     --manifest "$work_dir/manifest-legacy.jsonl" 2>&1 >/dev/null || true

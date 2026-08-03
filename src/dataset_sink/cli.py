@@ -18,6 +18,7 @@ from .ingest import (
     OssObjectReader,
     OssObjectWriter,
     archive_staging,
+    assert_lakefs_import_scheme,
     assert_manifest_matches_destination,
     build_commit_metadata,
     import_and_commit,
@@ -578,6 +579,7 @@ def _commit(args: argparse.Namespace) -> dict:
     manifest = Manifest.load(args.manifest)
     destination = validate_destination(args.destination)
     uri = object_store_uri_for(args.object_store_uri, args.prefix)
+    assert_lakefs_import_scheme(uri)
 
     if args.registry:
         # 建 Commit 之前确认这批字节所在的位置内容是稳定的。

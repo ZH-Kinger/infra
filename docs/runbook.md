@@ -212,6 +212,9 @@ dataset-sink scan-oss \
   --output /work/manifest.jsonl
 
 # ② 零拷贝 import 建 Commit（秒级，不搬字节）
+#    注意是 s3:// 而不是 oss://——scheme 要匹配 lakeFS 的 blockstore adapter
+#    类型，OSS 是走 lakeFS 的 s3 adapter 的。写 oss:// 会在服务端报
+#    `invalid storage scheme oss`，commit 现在会在本地先拦下。
 dataset-sink commit --repository robotics-data --branch main \
   --object-store-uri s3://legacy-data \
   --prefix legacy/robotics --destination datasets/robotics \
@@ -224,8 +227,11 @@ dataset-sink materialize --dataset robotics --repository robotics-data \
   --manifest /work/manifest.jsonl --source lakefs-s3 --target-root /mnt/cpfs/datasets
 ```
 
-三件必须注意的事：
+四件必须注意的事：
 
+0. **`--object-store-uri` 用 `s3://`，不是 `oss://`。** scheme 要匹配 lakeFS 的
+   blockstore adapter 类型而不是云厂商名字。2026-08-03 在真实 lakeFS 1.84.1 +
+   OSS 后端上实测确认。
 1. **`--destination` 两处必须一致。** manifest 的 `source_key` 是 Commit 内路径，
    填错会让后面的 `materialize` 全量 404。`commit` 会在建 Commit 之前拦下。
 2. **扫描期间前缀必须冻结写入。** `scan-oss` 会核对列举时的 size 与读取时的实际
