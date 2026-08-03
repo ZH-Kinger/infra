@@ -5,14 +5,96 @@
 #      直接读 output 即可，不需要二次转换，也就不会出现两份不一致的策略。
 #   2. 不依赖 Provider 的 data source schema，换 Provider 版本不会破。
 #
-# 关键约束（2026-08-02 通过读取官方系统策略 AliyunPAIFullAccess 核实）：
-# paidataset:*、paidlc:*、paiworkspace:* 在阿里云官方定义中全部是 Resource: "*"，
-# **无法用 RAM Policy 限定到某个 Dataset / Job / Workspace**。所以这三类权限的
+# 关键约束一（2026-08-03 实测 AliyunPAIFullAccess 的 PolicyDocument）：
+# PAI 的动作在官方定义里是 `pai:*`，且 Resource 为 `"*"`。
+# **无法用 RAM Policy 限定到某个 Dataset / Job / Workspace**。所以这类权限的
 # 收敛只能靠：收窄 Action 列表 + PAI Workspace 成员角色 + 流水线环境审批。
 # 不要在评审时误以为 Resource: "*" 是偷懒，它是平台的硬限制。
+#
+# 关键约束二：**动作命名空间必须按下面的 ds_ns/job_ns/ws_ns 成对写**，
+# 原因见 locals 里那段长注释。这条比约束一更容易出事，因为它静默失效。
 
 locals {
   name_prefix = "${var.project}-${var.environment}"
+
+  # ---------------------------------------------------------------------------
+  # PAI 动作的命名空间：**必须两个都写**
+  #
+  # 2026-08-03 实测 `ram GetPolicyVersion --PolicyName AliyunPAIFullAccess`，
+  # 官方策略授的是：
+  #     "Action": ["pai:*", "paiplugin:*", "eas:*"]
+  # 而不是本文件早先假定的 paidlc:* / paidataset:* / paiworkspace:*。
+  # 把账号里所有含 PAI 的系统策略翻了一遍，没有一条用那三个命名空间。
+  # ActionTrail 里 aiworkspace 的调用也记成 serviceName = "PAI"。
+  #
+  # 这件事的严重性在于：**RAM 按字面匹配动作串，命名空间不同就完全不匹配。**
+  # 一个持有 AliyunPAIFullAccess（= pai:*）的人，被我们 Deny 掉
+  # `paidataset:DeleteDataset` 是**没有任何效果**的——Deny 写错命名空间等于没写，
+  # 而且不会报错、不会有任何迹象，看策略还以为拦住了。
+  #
+  # 无法离线确证 paidataset:/paidlc:/paiworkspace: 到底是「不存在」还是
+  # 「存在但系统策略不用」，所以两个命名空间都写。取舍是明确的：
+  #     多余的 Deny 无害（匹配不到任何请求）
+  #     漏掉的 Deny 致命（静默失效）
+  # Allow 侧同理，多写一个不存在的动作不会放大权限。
+  #
+  # 换账号时用 scripts/preflight.sh 复核一次：如果哪天官方策略改了命名空间，
+  # 这里也要跟着加，而不是替换。
+  # ---------------------------------------------------------------------------
+  # 按动作族配对命名空间，而不是每个动作都乘以全部命名空间：
+  # RAM 自定义策略文档有长度上限，全交叉会迅速把它撑爆，而且
+  # `paidataset:CreateJob` 这种组合本身就是无意义的。
+  ds_ns  = ["pai", "paidataset"]
+  job_ns = ["pai", "paidlc"]
+  ws_ns  = ["pai", "paiworkspace"]
+
+  # ---- Deny 用（写错命名空间会静默失效，所以这几组最要紧）----------------
+
+  # 数据集改写类。**CreateDataset 之前漏了**——只 Deny 了 CreateDatasetVersion，
+  # 于是研发能新建一个 Dataset 指向任意 URI（包括可变位置），再在 GUI 的
+  # DSW/DLC 里把它挂上去。这是「用 GUI 绕过流水线」最直接的一条路。
+  pai_dataset_mutation_actions = flatten([
+    for a in [
+      "CreateDataset",
+      "CreateDatasetVersion",
+      "UpdateDataset",
+      "UpdateDatasetVersion",
+      "DeleteDataset",
+      "DeleteDatasetVersion",
+    ] : [for ns in local.ds_ns : "${ns}:${a}"]
+  ])
+
+  # 作业提交类。研发组之前只是「没 Allow」CreateJob，靠隐式拒绝——
+  # 但隐式拒绝只在本组策略是他唯一策略时成立。既有用户往往还挂着
+  # AliyunPAIFullAccess，并集里 CreateJob 就是放行的，所以必须显式 Deny。
+  pai_job_submit_actions = flatten([
+    for a in ["CreateJob", "UpdateJob"] : [for ns in local.job_ns : "${ns}:${a}"]
+  ])
+
+  # ---- Allow 用 ----------------------------------------------------------
+  # 这几组写错命名空间的后果不同：Deny 是静默失效，Allow 是角色**完全不能工作**，
+  # 一跑就报 AccessDenied。响亮的失败比静默的失效好，但两个都写就都不会发生。
+  pai_dataset_read_actions = flatten([
+    for a in ["GetDataset", "ListDatasets", "ListDatasetVersions", "GetDatasetVersion"] :
+    [for ns in local.ds_ns : "${ns}:${a}"]
+  ])
+  pai_dataset_register_actions = flatten([
+    for a in ["CreateDatasetVersion"] : [for ns in local.ds_ns : "${ns}:${a}"]
+  ])
+  pai_workspace_read_actions = flatten([
+    for a in ["GetWorkspace", "ListWorkspaces"] : [for ns in local.ws_ns : "${ns}:${a}"]
+  ])
+  pai_workspace_browse_actions = flatten([
+    for a in ["GetWorkspace", "ListWorkspaces", "ListMembers"] :
+    [for ns in local.ws_ns : "${ns}:${a}"]
+  ])
+  pai_job_read_actions = flatten([
+    for a in ["GetJob", "ListJobs", "GetPodLogs"] : [for ns in local.job_ns : "${ns}:${a}"]
+  ])
+  pai_job_operate_actions = flatten([
+    for a in ["CreateJob", "GetJob", "ListJobs", "StopJob", "GetPodLogs"] :
+    [for ns in local.job_ns : "${ns}:${a}"]
+  ])
 
   # OSS 资源 ARN：桶本身和桶内对象要分别声明，只写其中一个会导致
   # ListObjects 或 GetObject 之一失败。
@@ -209,14 +291,9 @@ locals {
         Resource = ["*"]
       },
       {
-        Sid    = "DenyDatasetRegistrationAndTraining"
-        Effect = "Deny"
-        Action = [
-          "paidataset:CreateDatasetVersion",
-          "paidataset:DeleteDatasetVersion",
-          "paidlc:CreateJob",
-          "paidlc:StopJob",
-        ]
+        Sid      = "DenyDatasetRegistrationAndTraining"
+        Effect   = "Deny"
+        Action   = concat(local.pai_dataset_mutation_actions, local.pai_job_submit_actions)
         Resource = ["*"]
       },
       ],
@@ -235,24 +312,15 @@ locals {
     Statement = concat([
       {
         # Resource 只能是 "*"，见文件顶部说明。
-        Sid    = "RegisterDatasetVersion"
-        Effect = "Allow"
-        Action = [
-          "paidataset:CreateDatasetVersion",
-          "paidataset:ListDatasetVersions",
-          "paidataset:GetDatasetVersion",
-          "paidataset:GetDataset",
-          "paidataset:ListDatasets",
-        ]
+        Sid      = "RegisterDatasetVersion"
+        Effect   = "Allow"
+        Action   = concat(local.pai_dataset_register_actions, local.pai_dataset_read_actions)
         Resource = ["*"]
       },
       {
-        Sid    = "ReadWorkspaceContext"
-        Effect = "Allow"
-        Action = [
-          "paiworkspace:GetWorkspace",
-          "paiworkspace:ListWorkspaces",
-        ]
+        Sid      = "ReadWorkspaceContext"
+        Effect   = "Allow"
+        Action   = local.pai_workspace_read_actions
         Resource = ["*"]
       },
       {
@@ -271,7 +339,7 @@ locals {
       {
         Sid      = "DenyTrainingSubmission"
         Effect   = "Deny"
-        Action   = ["paidlc:CreateJob"]
+        Action   = local.pai_job_submit_actions
         Resource = ["*"]
       },
       ],
@@ -287,37 +355,22 @@ locals {
     Version = "1"
     Statement = concat([
       {
-        Sid    = "SubmitAndObserveTrainingJobs"
-        Effect = "Allow"
-        Action = [
-          "paidlc:CreateJob",
-          "paidlc:GetJob",
-          "paidlc:ListJobs",
-          "paidlc:StopJob",
-          "paidlc:GetPodLogs",
-        ]
+        Sid      = "SubmitAndObserveTrainingJobs"
+        Effect   = "Allow"
+        Action   = local.pai_job_operate_actions
         Resource = ["*"]
       },
       {
         # 提交作业时需要按 Commit 找到对应的 Dataset Version，只需读。
-        Sid    = "ResolveDatasetVersion"
-        Effect = "Allow"
-        Action = [
-          "paidataset:GetDataset",
-          "paidataset:ListDatasetVersions",
-          "paidataset:GetDatasetVersion",
-        ]
+        Sid      = "ResolveDatasetVersion"
+        Effect   = "Allow"
+        Action   = local.pai_dataset_read_actions
         Resource = ["*"]
       },
       {
-        Sid    = "DenyDatasetMutation"
-        Effect = "Deny"
-        Action = [
-          "paidataset:CreateDatasetVersion",
-          "paidataset:UpdateDatasetVersion",
-          "paidataset:DeleteDatasetVersion",
-          "paidataset:DeleteDataset",
-        ]
+        Sid      = "DenyDatasetMutation"
+        Effect   = "Deny"
+        Action   = local.pai_dataset_mutation_actions
         Resource = ["*"]
       },
       {
@@ -384,13 +437,9 @@ locals {
         ]
       },
       {
-        Sid    = "DenyDatasetAndJobMutation"
-        Effect = "Deny"
-        Action = [
-          "paidataset:CreateDatasetVersion",
-          "paidataset:DeleteDatasetVersion",
-          "paidlc:CreateJob",
-        ]
+        Sid      = "DenyDatasetAndJobMutation"
+        Effect   = "Deny"
+        Action   = concat(local.pai_dataset_mutation_actions, local.pai_job_submit_actions)
         Resource = ["*"]
       },
       ],
@@ -407,18 +456,11 @@ locals {
       {
         Sid    = "BrowsePaiWorkspaceAndDatasets"
         Effect = "Allow"
-        Action = [
-          "paiworkspace:GetWorkspace",
-          "paiworkspace:ListWorkspaces",
-          "paiworkspace:ListMembers",
-          "paidataset:GetDataset",
-          "paidataset:ListDatasets",
-          "paidataset:ListDatasetVersions",
-          "paidataset:GetDatasetVersion",
-          "paidlc:GetJob",
-          "paidlc:ListJobs",
-          "paidlc:GetPodLogs",
-        ]
+        Action = concat(
+          local.pai_workspace_browse_actions,
+          local.pai_dataset_read_actions,
+          local.pai_job_read_actions,
+        )
         Resource = ["*"]
       },
       {
@@ -449,14 +491,30 @@ locals {
         Resource = ["*"]
       },
       {
-        Sid    = "DenyDatasetMutation"
-        Effect = "Deny"
-        Action = [
-          "paidataset:CreateDatasetVersion",
-          "paidataset:UpdateDatasetVersion",
-          "paidataset:DeleteDatasetVersion",
-          "paidataset:DeleteDataset",
-        ]
+        # 这条是「用户拿 GUI 绕过流水线」的主要强制点，不只是防误删。
+        #
+        # 研发不能建 Dataset，也不能建 Version，意味着**他在 DSW/DLC 控制台的
+        # 数据集下拉框里只能看到 register 角色发布过的东西**——而那些全都是
+        # 以 Commit ID 命名的不可变 release。于是「GUI 挂载」这条路本身是安全的：
+        # 菜单里没有可变引用可选。
+        #
+        # 拦不住的是「在 DSW 里直接填一个 OSS 路径挂载」，见 docs/permissions.md
+        # 的 §10——那条只能靠检测和产出侧把关，RAM 表达不了。
+        Sid      = "DenyDatasetMutation"
+        Effect   = "Deny"
+        Action   = local.pai_dataset_mutation_actions
+        Resource = ["*"]
+      },
+      {
+        # 研发组不提交训练作业——作业由流水线用 dlc-submit 角色提交，
+        # 这样「提交了什么」有记录、有审批。
+        #
+        # 必须**显式** Deny 而不是靠「没 Allow」：隐式拒绝只在本组策略是他
+        # 唯一策略时成立，而 §5 明确说了我们不动用户已有的策略。谁还挂着
+        # AliyunPAIFullAccess，并集里 CreateJob 就是放行的。
+        Sid      = "DenyTrainingJobSubmission"
+        Effect   = "Deny"
+        Action   = local.pai_job_submit_actions
         Resource = ["*"]
       },
       ],
@@ -483,6 +541,10 @@ locals {
           "nas:DeleteFileset",
           "nas:DeleteMountTarget",
           "oss:DeleteBucket",
+          "pai:DeleteDataset",
+          "pai:DeleteDatasetVersion",
+          "pai:DeleteWorkspace",
+          "pai:DeleteMembers",
           "paidataset:DeleteDataset",
           "paidataset:DeleteDatasetVersion",
           "paiworkspace:DeleteWorkspace",

@@ -208,6 +208,8 @@ for s in doc.get("data_sources", []):
       *)
         fail "  缺 cpfs-dataflow 标签"
         note "  没有这个标签，CreateDataFlow 会直接拒绝。这条在官方文档里很不显眼。"
+        note "  归档桶由 platform 层建时会自动打上（local.dataset_bucket_tags）。"
+        note "  这里报 FAIL 说明桶不是本项目建的，或者是在补这个标签之前建的。"
         ;;
       esac
 

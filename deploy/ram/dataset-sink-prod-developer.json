@@ -2,15 +2,25 @@
   "Statement": [
     {
       "Action": [
+        "pai:GetWorkspace",
         "paiworkspace:GetWorkspace",
+        "pai:ListWorkspaces",
         "paiworkspace:ListWorkspaces",
+        "pai:ListMembers",
         "paiworkspace:ListMembers",
+        "pai:GetDataset",
         "paidataset:GetDataset",
+        "pai:ListDatasets",
         "paidataset:ListDatasets",
+        "pai:ListDatasetVersions",
         "paidataset:ListDatasetVersions",
+        "pai:GetDatasetVersion",
         "paidataset:GetDatasetVersion",
+        "pai:GetJob",
         "paidlc:GetJob",
+        "pai:ListJobs",
         "paidlc:ListJobs",
+        "pai:GetPodLogs",
         "paidlc:GetPodLogs"
       ],
       "Effect": "Allow",
@@ -53,16 +63,37 @@
     },
     {
       "Action": [
+        "pai:CreateDataset",
+        "paidataset:CreateDataset",
+        "pai:CreateDatasetVersion",
         "paidataset:CreateDatasetVersion",
+        "pai:UpdateDataset",
+        "paidataset:UpdateDataset",
+        "pai:UpdateDatasetVersion",
         "paidataset:UpdateDatasetVersion",
-        "paidataset:DeleteDatasetVersion",
-        "paidataset:DeleteDataset"
+        "pai:DeleteDataset",
+        "paidataset:DeleteDataset",
+        "pai:DeleteDatasetVersion",
+        "paidataset:DeleteDatasetVersion"
       ],
       "Effect": "Deny",
       "Resource": [
         "*"
       ],
       "Sid": "DenyDatasetMutation"
+    },
+    {
+      "Action": [
+        "pai:CreateJob",
+        "paidlc:CreateJob",
+        "pai:UpdateJob",
+        "paidlc:UpdateJob"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "DenyTrainingJobSubmission"
     },
     {
       "Action": [

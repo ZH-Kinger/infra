@@ -26,6 +26,18 @@ locals {
     Environment = "prod"
     Layer       = "platform"
   })
+
+  # 归档桶额外要这个标签，否则 CPFS 数据流动直接拒绝建立。
+  #
+  # 这是六条前提里最不显眼的一条：`CreateDataFlow` 会检查源 OSS 桶上有没有
+  # `cpfs-dataflow` 标签，没有就报错，而报错信息不会告诉你缺的是标签。
+  # 2026-08-03 在真实 CPFS 2.0 上撞出来的。
+  #
+  # 建桶时就打上，而不是等 preflight 报 FAIL 再手工补——我们本来就能避免的
+  # 问题不该让人再排查一遍。标签值本身不重要，存在即可。
+  dataset_bucket_tags = merge(local.tags, {
+    "cpfs-dataflow" = "true"
+  })
 }
 
 # ---------------------------------------------------------------------------
@@ -51,7 +63,7 @@ resource "alicloud_oss_bucket" "dataset" {
     }
   }
 
-  tags = local.tags
+  tags = local.dataset_bucket_tags
 
   lifecycle {
     # 生产数据集归档桶。RAM 侧也 Deny 了 oss:DeleteBucket，两层都拦。

@@ -51,10 +51,22 @@
     },
     {
       "Action": [
+        "pai:CreateDataset",
+        "paidataset:CreateDataset",
+        "pai:CreateDatasetVersion",
         "paidataset:CreateDatasetVersion",
+        "pai:UpdateDataset",
+        "paidataset:UpdateDataset",
+        "pai:UpdateDatasetVersion",
+        "paidataset:UpdateDatasetVersion",
+        "pai:DeleteDataset",
+        "paidataset:DeleteDataset",
+        "pai:DeleteDatasetVersion",
         "paidataset:DeleteDatasetVersion",
+        "pai:CreateJob",
         "paidlc:CreateJob",
-        "paidlc:StopJob"
+        "pai:UpdateJob",
+        "paidlc:UpdateJob"
       ],
       "Effect": "Deny",
       "Resource": [

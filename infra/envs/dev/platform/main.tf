@@ -23,8 +23,15 @@ provider "alicloud" {
 
 locals {
   tags = merge(var.tags, {
-    Environment = "prod"
+    # 这里曾经硬编码成 "prod"（从 prod 目录复制过来没改），于是 dev 的资源
+    # 全部被标成生产。标签是出账和审计的依据，标错比不标更糟。
+    Environment = "dev"
     Layer       = "platform"
+  })
+
+  # 归档桶额外要这个标签，否则 CPFS 数据流动直接拒绝建立。理由见 prod/platform。
+  dataset_bucket_tags = merge(local.tags, {
+    "cpfs-dataflow" = "true"
   })
 }
 
@@ -51,10 +58,12 @@ resource "alicloud_oss_bucket" "dataset" {
     }
   }
 
-  tags = local.tags
+  tags = local.dataset_bucket_tags
 
   lifecycle {
-    # 生产数据集归档桶。RAM 侧也 Deny 了 oss:DeleteBucket，两层都拦。
+    # dev 也保留 prevent_destroy：这个桶里躺着被 lakeFS 零拷贝 import 引用的
+    # 对象，删桶会让 dev 的 Commit 集体悬空。要拆 dev 环境请显式改这里，
+    # 而不是让一次无关的 apply 顺手把它带走。
     prevent_destroy = true
   }
 }

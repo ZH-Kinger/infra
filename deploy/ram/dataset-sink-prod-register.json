@@ -2,11 +2,16 @@
   "Statement": [
     {
       "Action": [
+        "pai:CreateDatasetVersion",
         "paidataset:CreateDatasetVersion",
-        "paidataset:ListDatasetVersions",
-        "paidataset:GetDatasetVersion",
+        "pai:GetDataset",
         "paidataset:GetDataset",
-        "paidataset:ListDatasets"
+        "pai:ListDatasets",
+        "paidataset:ListDatasets",
+        "pai:ListDatasetVersions",
+        "paidataset:ListDatasetVersions",
+        "pai:GetDatasetVersion",
+        "paidataset:GetDatasetVersion"
       ],
       "Effect": "Allow",
       "Resource": [
@@ -16,7 +21,9 @@
     },
     {
       "Action": [
+        "pai:GetWorkspace",
         "paiworkspace:GetWorkspace",
+        "pai:ListWorkspaces",
         "paiworkspace:ListWorkspaces"
       ],
       "Effect": "Allow",
@@ -40,7 +47,10 @@
     },
     {
       "Action": [
-        "paidlc:CreateJob"
+        "pai:CreateJob",
+        "paidlc:CreateJob",
+        "pai:UpdateJob",
+        "paidlc:UpdateJob"
       ],
       "Effect": "Deny",
       "Resource": [

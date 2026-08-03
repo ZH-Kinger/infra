@@ -29,17 +29,44 @@
 
 ---
 
-## 2. 一个必须知道的平台硬限制
+## 2. 两个必须知道的平台硬限制
 
-2026-08-02 读取阿里云官方系统策略 `AliyunPAIFullAccess` 确认：
+### 2.1 动作命名空间是 `pai:`，不是 `paidataset:` / `paidlc:` / `paiworkspace:`
 
+2026-08-03 实测 `ram GetPolicyVersion --PolicyName AliyunPAIFullAccess`：
+
+```json
+{ "Effect": "Allow", "Action": ["pai:*", "paiplugin:*", "eas:*"], "Resource": "*" }
 ```
-Effect: Allow   Resource: *   Action: [paidlc:*, paidataset:*, paiworkspace:*]
-```
 
-**`paidlc`、`paidataset`、`paiworkspace` 三个命名空间在官方定义中全部是
-`Resource: "*"`。** 也就是说，RAM 层面**无法**把权限限定到某个 Dataset、
-某个 Job 或某个 Workspace。
+账号里所有含 PAI 的系统策略翻了一遍，**没有一条使用 `paidataset:` /
+`paidlc:` / `paiworkspace:`**。ActionTrail 里 `aiworkspace.*.aliyuncs.com`
+的调用也记成 `serviceName: "PAI"`。
+
+**为什么这件事很严重**：RAM 按字面匹配动作串，命名空间不同就完全不匹配。
+一个持有 `AliyunPAIFullAccess`（即 `pai:*`）的人，被 Deny 掉
+`paidataset:DeleteDataset` 是**没有任何效果**的。
+
+而且它**静默失效**——不报错、没有任何迹象，看策略还以为拦住了。
+这比 §2.2 那条硬限制危险得多，因为那条是公开的已知限制，这条会骗人。
+
+本仓库的处理是**两个命名空间都写**（`policies.tf` 的 `ds_ns` / `job_ns` /
+`ws_ns`）。取舍很明确：
+
+| | 后果 |
+|---|---|
+| 多余的 Deny | 无害，匹配不到任何请求 |
+| 漏掉的 Deny | **致命，且静默** |
+| 多余的 Allow | 无害，不放大权限 |
+| 漏掉的 Allow | 角色不能工作，但**一跑就报 AccessDenied**（响亮） |
+
+无法离线确证那三个命名空间是「不存在」还是「存在但系统策略不用」，
+所以不做替换，只做叠加。换账号时复核一次。
+
+### 2.2 RAM 无法限定到某个 Dataset / Job / Workspace
+
+`pai:*` 的 `Resource` 在官方定义里是 `"*"`。也就是说，RAM 层面**无法**把权限
+限定到某个 Dataset、某个 Job 或某个 Workspace。
 
 这不是我们偷懒，是平台能力的边界。因此这三类权限的收敛必须靠另外三层：
 
@@ -438,6 +465,78 @@ Terraform 会据此生成两组语句：
 第 3 条是唯一能挡住主账号误操作的手段。存放被 import 引用的存量数据的桶应该开启它。
 
 ---
+
+## 6.2 用户直接在 GUI 里开 DSW/DLC 挂数据集怎么办
+
+这是最现实的绕过路径：整套流水线管得住 CI，管不住一个人打开控制台点几下。
+必须分清哪部分**拦得住**、哪部分只能**发现**、哪部分**根本拦不住**。
+
+### 拦得住的：菜单里没有可变引用可选
+
+关键不在「禁止用 GUI」，而在**控制台的数据集下拉框里有什么**。
+
+研发组被 Deny 了 `CreateDataset` 和 `CreateDatasetVersion`（两个命名空间都写，
+见 §2.1）。于是他在 DSW/DLC 控制台能挂的 PAI Dataset，**只有 register 角色
+发布过的那些**——而那些全部指向以 Commit ID 命名的不可变 release 目录。
+
+所以「用 GUI 挂数据集」这条路本身是安全的：**能挂的东西都是不可变的、
+可追溯到 Commit 的。** 挂了也不破坏可复现性。
+
+> 注意 `CreateDataset`（不带 Version）之前是**漏的**——只 Deny 了
+> `CreateDatasetVersion`。研发因此能新建一个 Dataset 指向任意 URI，包括
+> 自己的工作区，再在 GUI 里挂上去。2026-08-03 补上。
+
+同理 Deny 了 `CreateJob`：作业由流水线用 dlc-submit 角色提交，「提交了什么」
+才有记录和审批。这里**必须显式 Deny**，不能靠「没 Allow」的隐式拒绝——
+隐式拒绝只在本项目策略是他唯一策略时成立，而 §5 明确说了我们不动用户已有的
+策略。谁还挂着 `AliyunPAIFullAccess`，并集里 `CreateJob` 就是放行的。
+
+### 拦不住的：DSW 里的交互式会话
+
+**`training-guard` 在 DSW 里提供的保护是零。**
+
+它之所以生效，是因为 `deploy/pai/training-entrypoint.sh` 在启动训练前调用了它。
+DLC 作业由流水线提交，入口脚本是我们控制的。**DSW 不是**——用户打开 Notebook
+或终端，直接 `python train.py`，没有任何我们控制的入口。
+
+而且这是**原理上拦不住**的，不是配置疏漏：一个人对某个目录有 POSIX 读权限，
+就能读它并拿去训练。RAM 管不到「读完之后拿去干什么」。
+
+（`training-entrypoint.sh` 的注释写着 "DLC/DSW must mount..."，容易让人以为
+DSW 也被覆盖了。实际只覆盖走这个入口的作业。）
+
+### 所以真正的强制点在产出侧，不在挂载侧
+
+对交互式开发，正确的模型不是「阻止他读」，而是：
+
+> **一次实验，如果它的产出说不出对应哪个 Commit，就不算一次有效实验。**
+
+这条在**模型/结果登记**的时候强制，而不是在挂载的时候。谁在 DSW 里拿自己
+工作区的数据随便试，那是探索，本来就该自由；一旦要把结果当成正式产出，
+就必须能指认版本，而 `verify --deep` 能验证这个指认是不是真的。
+
+### 需要补的检测（尚未实现）
+
+RAM 拦不住、也不该拦的部分，只能靠事后发现：
+
+- 列出所有 DLC Job 与 DSW 实例的挂载来源，标出**不是已注册 release** 的；
+- 标出挂了 `workspace` mode 位置的作业。
+
+这是**检测性控制**，不是预防性的——它不阻止，只让绕过行为无法长期隐藏。
+这一项还没做，`docs/runbook.md` 的差距表里记着。
+
+### 一句话
+
+| 行为 | 能否阻止 | 靠什么 |
+|---|---|---|
+| GUI 挂已发布 release | 不需要阻止 | 本来就是不可变的 |
+| GUI 新建 Dataset 指向可变位置 | **能** | Deny `CreateDataset` / `CreateDatasetVersion` |
+| GUI 提交 DLC 作业 | **能** | Deny `CreateJob` |
+| DSW 里读自己工作区去训练 | **不能，且原理上不能** | 只能检测 + 产出侧把关 |
+| 持有 `AliyunRAMFullAccess` 的人 | **不能** | 他能删掉上面所有 Deny（见 §5） |
+
+---
+
 
 ## 7. 长期凭证
 

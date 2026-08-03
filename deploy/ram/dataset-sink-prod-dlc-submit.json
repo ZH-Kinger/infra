@@ -2,10 +2,15 @@
   "Statement": [
     {
       "Action": [
+        "pai:CreateJob",
         "paidlc:CreateJob",
+        "pai:GetJob",
         "paidlc:GetJob",
+        "pai:ListJobs",
         "paidlc:ListJobs",
+        "pai:StopJob",
         "paidlc:StopJob",
+        "pai:GetPodLogs",
         "paidlc:GetPodLogs"
       ],
       "Effect": "Allow",
@@ -16,8 +21,13 @@
     },
     {
       "Action": [
+        "pai:GetDataset",
         "paidataset:GetDataset",
+        "pai:ListDatasets",
+        "paidataset:ListDatasets",
+        "pai:ListDatasetVersions",
         "paidataset:ListDatasetVersions",
+        "pai:GetDatasetVersion",
         "paidataset:GetDatasetVersion"
       ],
       "Effect": "Allow",
@@ -28,10 +38,18 @@
     },
     {
       "Action": [
+        "pai:CreateDataset",
+        "paidataset:CreateDataset",
+        "pai:CreateDatasetVersion",
         "paidataset:CreateDatasetVersion",
+        "pai:UpdateDataset",
+        "paidataset:UpdateDataset",
+        "pai:UpdateDatasetVersion",
         "paidataset:UpdateDatasetVersion",
-        "paidataset:DeleteDatasetVersion",
-        "paidataset:DeleteDataset"
+        "pai:DeleteDataset",
+        "paidataset:DeleteDataset",
+        "pai:DeleteDatasetVersion",
+        "paidataset:DeleteDatasetVersion"
       ],
       "Effect": "Deny",
       "Resource": [
