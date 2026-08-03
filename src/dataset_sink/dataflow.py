@@ -48,6 +48,16 @@ Export → Evict：先确保源存储里有一份，再释放本地数据块。�
    真正的原因**（缺标签、缺 Throughput 都可能先表现为它），排查时要逐个参数
    剥离才能看到真话。
 
+跑任务时还有两条：
+
+5. **Export 要求源 OSS 桶开启版本控制**，否则报
+   `InvalidSourceStorage.NeedVersioning`。Import 不要求。所以归档桶必须开版本
+   控制，否则沉淀这条路根本用不了——这也和「被 import 引用的前缀是只读区」
+   的兜底措施是同一件事，一举两得。
+6. **同一个 DataFlow 上的任务是串行的。** 前一个还在跑时提交下一个会报
+   `The operation is not permitted when the status is processing`。所以预热和
+   沉淀不能并发，编排时要等前一个到终态。
+
 **数据流动不做校验。** 它只保证字节到位，不保证内容和 manifest 一致。所以预热
 之后仍然要走 `certify`：全量比对文件集合、大小、SHA-256，通过了才 rename 发布。
 换句话说数据流动替掉的是「搬」，替不掉「验」和「封」。

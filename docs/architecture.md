@@ -275,6 +275,23 @@ Export 只增不减，单独 Evict 则要求数据本来就在源存储里。
 两者都是可读路径。这个前缀记在 Commit metadata 的 `object_store_uri` 里，
 预热时就从它拉。
 
+#### 落地前提（2026-08-03 真实 CPFS 2.0 实测）
+
+官方文档没写全，这六条是逐个撞出来的，其中前三条**属于 Terraform 该管的资源属性**：
+
+| # | 前提 | 归属 |
+|---|---|---|
+| 1 | CPFS 上的数据集根目录必须是 **Fileset** | Terraform `platform` |
+| 2 | 归档 OSS 桶必须打 **`cpfs-dataflow` 标签** | Terraform `platform` |
+| 3 | 归档 OSS 桶必须**开版本控制**（Export 要求，Import 不要求） | Terraform `platform` |
+| 4 | `Throughput` 必填，只接受 600 / 1200 / 1500 MB/s | 调用方 |
+| 5 | 相关资源未就绪时报 `OperationDenied.InvalidState`，**会盖住真正原因** | 排查经验 |
+| 6 | 同一 DataFlow 的任务**串行**，不能并发 | 编排 |
+
+第 1~3 条都是「不配就在很靠后的地方失败」的类型，正适合由 Terraform 保证而不是
+靠人记。第 3 条顺带和「被 import 引用的前缀是只读区」的兜底措施重合——归档桶开
+版本控制本来就该做。
+
 #### 数据流动替不掉什么
 
 它只保证**字节到位**，不保证内容和 manifest 一致。所以预热之后仍然要走 `certify`：
