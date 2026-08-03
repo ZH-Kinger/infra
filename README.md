@@ -103,6 +103,12 @@ dataset-sink certify --prepared-dir /mnt/cpfs/staging/batch-001 \
   --repository robotics-data --commit 6f2b7c91c2 \
   --source-reference robotics-v2026.08.02.1 --manifest /work/manifest.jsonl
 
+# 字节搬运交给 CPFS 数据流动（archive 沉淀 / materialize 预热）
+#   目标前缀由 DataFlow 绑定推导，--prefix 无效；落点会作为 object_store_uri 回报
+dataset-sink archive /mnt/cpfs/staging/batch-001 --manifest /work/manifest.jsonl \
+  --via dataflow --cpfs-filesystem-id cpfs-xxxx --cpfs-mount-prefix /mnt/cpfs \
+  --region cn-hangzhou
+
 # 回收不再需要的 CPFS release（默认 dry-run；删除前核对 Commit 是否仍在 lakeFS）
 dataset-sink reclaim /mnt/cpfs/datasets \
   --lakefs-api-endpoint https://lakefs.internal --min-age-days 14 --keep-last 2

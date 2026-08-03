@@ -218,6 +218,34 @@ dataset-sink commit --repository robotics-data --branch main \
 `release.json` 之类的残留，`scan` 会在第一步就失败并给出清理命令——这是有意的，
 否则要到归档完一整轮之后才在 `certify` 撞上报错。
 
+### 2.4.2 用 CPFS 数据流动搬字节
+
+`archive` 和 `materialize` 默认 `--via client`（本进程逐个文件搬）。如果 CPFS
+上已经配好数据流动，改用 `--via dataflow` 交给平台搬：
+
+```bash
+# 沉淀：CPFS staging → OSS
+dataset-sink archive /mnt/cpfs/staging/batch-001 --manifest /work/manifest.jsonl \
+  --via dataflow --cpfs-filesystem-id cpfs-xxxxxxxxxxxxxxxx \
+  --cpfs-mount-prefix /mnt/cpfs --region cn-hangzhou
+
+# 预热：OSS → CPFS，然后照常全量校验 + 原子发布
+dataset-sink materialize --dataset robotics --repository robotics-data \
+  --commit 6f2b7c91c2 --manifest /work/manifest.jsonl --target-root /mnt/cpfs/datasets \
+  --via dataflow --cpfs-filesystem-id cpfs-xxxxxxxxxxxxxxxx \
+  --cpfs-mount-prefix /mnt/cpfs --region cn-hangzhou
+```
+
+**`--prefix` 在 `--via dataflow` 下无效。** 数据流动把 `FileSystemPath` 和
+`SourceStoragePath` 死绑在一起，目标前缀只能由绑定推导。命令会把真实落点作为
+`object_store_uri` 回报出来——直接拿它喂给 `commit --object-store-uri`。
+
+这条路要求环境先满足六条前提，见[架构](architecture.md)。其中三条是 Terraform
+该管的：数据集根目录是 Fileset、归档桶打 `cpfs-dataflow` 标签、归档桶开版本控制。
+
+**沉淀不释放 CPFS 空间**——它只是在 OSS 多存一份。要腾容量得再跑
+`reclaim --strategy cpfs-evict`。
+
 ### 2.5 回收 CPFS 容量
 
 CPFS release 只增不减，写满之后 `materialize` 会直接失败。**这是必须定期做的事**，

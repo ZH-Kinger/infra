@@ -67,7 +67,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .errors import DatasetSinkError
 
@@ -179,6 +179,48 @@ class CpfsDataFlow:
                 f"`aliyun nas DescribeDataFlows --FileSystemId {self.filesystem_id}` 确认。"
             )
         return str(best_id)
+
+    def binding_for(self, inner_path: str) -> Tuple[str, str, str]:
+        """返回覆盖该路径的 (dataflow_id, FileSystemPath, SourceStoragePath)。"""
+        best = None
+        best_len = -1
+        for flow in self.list_dataflows():
+            fs_path = str(flow.get("FileSystemPath") or "/").rstrip("/") or "/"
+            boundary = fs_path if fs_path.endswith("/") else fs_path + "/"
+            if (inner_path == fs_path or inner_path.startswith(boundary)) and len(
+                fs_path
+            ) > best_len:
+                best, best_len = flow, len(fs_path)
+        if best is None:
+            raise DatasetSinkError(
+                f"{inner_path} 不在任何数据流动的范围内。\n"
+                "预热/沉淀都需要该路径先由一个绑定了 OSS 的 DataFlow 管理。用 "
+                f"`aliyun nas DescribeDataFlows --FileSystemId {self.filesystem_id}` 确认。"
+            )
+        fs_path = str(best.get("FileSystemPath") or "/").rstrip("/") or "/"
+        # SourceStoragePath 可能是完整 URI，也可能只给桶级 SourceStorage。
+        source = str(best.get("SourceStoragePath") or best.get("SourceStorage") or "").rstrip("/")
+        if not source:
+            raise DatasetSinkError(f"数据流动 {best.get('DataFlowId')} 没有可用的源存储路径")
+        return str(best.get("DataFlowId")), fs_path, source
+
+    def object_uri_for(self, inner_path: str) -> str:
+        """CPFS 内部路径 → 它在 OSS 上对应的 URI。
+
+        DataFlow 把 `FileSystemPath`(F) 和 `SourceStoragePath`(S) 死绑在一起：
+        路径 D 对应的对象前缀就是 `S + (D - F)`。**这意味着 OSS 的前缀布局必须
+        镜像 CPFS 的路径布局**，不能各按各的来——这是接入数据流动时最容易忽略
+        的约束，也是 `archive --via dataflow` 不能再接受任意 `--prefix` 的原因。
+
+        算出这个 URI 之后就能喂给 `commit --object-store-uri`，让 lakeFS 从
+        同一个位置零拷贝 import。
+        """
+        _, fs_path, source = self.binding_for(inner_path)
+        relative = inner_path[len(fs_path) :] if fs_path != "/" else inner_path
+        relative = relative.strip("/")
+        uri = f"{source}/{relative}" if relative else source
+        # lakeFS import 要求 URI 指向前缀，末尾斜杠有意义。
+        return uri.rstrip("/") + "/"
 
     # -- 任务 -------------------------------------------------------------
 

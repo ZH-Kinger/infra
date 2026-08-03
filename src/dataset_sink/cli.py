@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from .aliyun_cli import register_pai_dataset_version
+from .dataflow import CpfsDataFlow
 from .errors import DatasetSinkError
 from .ingest import (
     LocalObjectReader,
@@ -70,6 +71,21 @@ def build_parser() -> argparse.ArgumentParser:
     materialize.add_argument("--lakefs-secret-access-key")
     materialize.add_argument("--lakefs-region", default="us-east-1")
     materialize.add_argument("--no-verify-tls", action="store_true")
+    materialize.add_argument(
+        "--via",
+        choices=("client", "dataflow"),
+        default="client",
+        help=(
+            "client：本进程从 lakeFS S3 Gateway 逐个文件拷贝。"
+            "dataflow：交给 CPFS 数据流动做预热（Import），服务端并行、"
+            "执行者不需要挂载 CPFS 来搬数据。要求 OSS 前缀布局镜像 CPFS 路径布局"
+        ),
+    )
+    materialize.add_argument("--cpfs-filesystem-id", help="--via dataflow 时必填")
+    materialize.add_argument("--cpfs-mount-prefix", help="--via dataflow 时必填")
+    materialize.add_argument("--region", help="--via dataflow 时必填")
+    materialize.add_argument("--profile", help="aliyun CLI profile")
+    materialize.add_argument("--wait-timeout", type=int, default=7200)
 
     # ---- CPFS 上处理完的数据接入版本体系：scan → archive → commit ----
     #
@@ -129,6 +145,26 @@ def build_parser() -> argparse.ArgumentParser:
     archive.add_argument("--security-token", help="使用 STS 临时凭证时提供")
     archive.add_argument("--workers", type=int, default=8)
     archive.add_argument("--no-verify-tls", action="store_true")
+    archive.add_argument(
+        "--via",
+        choices=("client", "dataflow"),
+        default="client",
+        help=(
+            "client：本进程逐个文件上传，任何环境可用。"
+            "dataflow：交给 CPFS 数据流动做沉淀（Export），服务端并行、"
+            "不需要本进程读数据；但目标前缀由 DataFlow 绑定推导，--prefix 会被忽略"
+        ),
+    )
+    archive.add_argument("--cpfs-filesystem-id", help="--via dataflow 时必填")
+    archive.add_argument("--cpfs-mount-prefix", help="--via dataflow 时必填")
+    archive.add_argument("--region", help="--via dataflow 时必填")
+    archive.add_argument("--profile", help="aliyun CLI profile")
+    archive.add_argument(
+        "--wait-timeout",
+        type=int,
+        default=7200,
+        help="--via dataflow 时等待任务完成的上限秒数（超时按失败处理）",
+    )
 
     commit = commands.add_parser(
         "commit",
@@ -452,6 +488,9 @@ def _scan_oss(args: argparse.Namespace) -> dict:
 def _archive(args: argparse.Namespace) -> dict:
     manifest = Manifest.load(args.manifest)
 
+    if args.via == "dataflow":
+        return _archive_via_dataflow(args, manifest)
+
     if args.target == "local":
         if args.local_root is None:
             raise ValueError("--target local 需要 --local-root")
@@ -528,6 +567,105 @@ def _commit(args: argparse.Namespace) -> dict:
     }
 
 
+def _dataflow_from(args: argparse.Namespace) -> CpfsDataFlow:
+    missing = [
+        name
+        for name, value in (
+            ("--cpfs-filesystem-id", args.cpfs_filesystem_id),
+            ("--cpfs-mount-prefix", args.cpfs_mount_prefix),
+            ("--region", args.region),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError(f"--via dataflow 需要: {', '.join(missing)}")
+    return CpfsDataFlow(
+        filesystem_id=args.cpfs_filesystem_id,
+        region=args.region,
+        mount_prefix=args.cpfs_mount_prefix,
+        profile=args.profile,
+    )
+
+
+def _archive_via_dataflow(args: argparse.Namespace, manifest: Manifest) -> dict:
+    """沉淀：把 CPFS staging 目录 Export 到 OSS。
+
+    目标前缀**不由调用方指定**，而是从 DataFlow 的 FileSystemPath ↔
+    SourceStoragePath 绑定推导出来的——数据流动把两个命名空间死绑在一起，
+    OSS 布局必须镜像 CPFS 布局。所以 `--prefix` 在这条路径上没有意义，
+    这里显式忽略并把真实落点回报出去，免得使用者以为自己控制了它。
+    """
+    df = _dataflow_from(args)
+    inner = df.filesystem_path(str(args.staging_dir))
+    uri = df.object_uri_for(inner)
+
+    task = df.flush(str(args.staging_dir))
+    final = df.wait(task.task_id, timeout_seconds=args.wait_timeout)
+
+    return {
+        "via": "dataflow",
+        "task_id": final.task_id,
+        "status": final.status,
+        "dataflow_id": final.dataflow_id,
+        "filesystem_path": inner,
+        # 这个 URI 直接喂给 commit --object-store-uri
+        "object_store_uri": uri,
+        "manifest_sha256": manifest.sha256,
+        # 沉淀是复制不是移动，必须说清楚，否则容易以为空间已经腾出来了。
+        "note": (
+            "沉淀只把数据复制到 OSS，CPFS 上那份还在、空间没有释放。"
+            "要腾容量得再跑 reclaim --strategy cpfs-evict。"
+        ),
+        "ignored_prefix": args.prefix or None,
+    }
+
+
+def _materialize_via_dataflow(args: argparse.Namespace, manifest: Manifest, commit_id: str) -> dict:
+    """预热：让 CPFS 从 OSS 把这个 Commit 的数据拉进来，然后校验发布。
+
+    与 `--via client` 的关键差别：数据不经过本进程，所以执行者**不需要挂载
+    CPFS 来搬数据**——但仍然需要能访问 CPFS 来做校验和原子发布。
+
+    落点由 DataFlow 绑定决定，我们只能选目录、不能选映射。所以这里先把数据
+    拉进 `.materializing/<commit>/`（它必须也在同一个 DataFlow 覆盖范围内），
+    再走 certify 的全量校验 + 同文件系统 rename，发布协议不变。
+    """
+    df = _dataflow_from(args)
+    staging = Path(args.target_root) / ".materializing" / args.dataset / commit_id
+    # 在提交任务之前就确认这个路径被某个 DataFlow 覆盖，并算出它对应的 OSS
+    # 前缀。放在前面是为了让「暂存目录不在 DataFlow 范围内」这类配置错误立刻
+    # 失败，而不是提交一个注定拉不到东西的任务再等它超时。
+    inner = df.filesystem_path(str(staging))
+    source_uri = df.object_uri_for(inner)
+
+    task = df.prefetch(str(staging))
+    final = df.wait(task.task_id, timeout_seconds=args.wait_timeout)
+
+    # 数据流动只保证字节到位，不保证内容与 manifest 一致，所以照常全量校验。
+    result = certify_prepared_release(
+        prepared_dir=staging,
+        target_root=args.target_root,
+        dataset=args.dataset,
+        repository=args.repository,
+        source_reference=args.ref or commit_id,
+        commit_id=commit_id,
+        manifest=manifest,
+        lakefs_tag=args.lakefs_tag or args.ref,
+        paimon_snapshot_id=args.paimon_snapshot_id,
+    )
+    payload = asdict(result)
+    payload.update(
+        {
+            "via": "dataflow",
+            "task_id": final.task_id,
+            "prefetch_status": final.status,
+            "prefetched_from": source_uri,
+            "staging_filesystem_path": inner,
+        }
+    )
+    return payload
+
+
 def _materialize(args: argparse.Namespace) -> dict:
     access_key = args.lakefs_access_key_id or os.getenv("LAKEFS_ACCESS_KEY_ID")
     secret_key = args.lakefs_secret_access_key or os.getenv("LAKEFS_SECRET_ACCESS_KEY")
@@ -550,6 +688,11 @@ def _materialize(args: argparse.Namespace) -> dict:
         )
         source_reference = args.ref
 
+    manifest = Manifest.load(args.manifest)
+
+    if args.via == "dataflow":
+        return _materialize_via_dataflow(args, manifest, commit_id)
+
     if args.source == "local":
         if args.local_source_root is None:
             raise ValueError("local source requires --local-source-root")
@@ -567,7 +710,6 @@ def _materialize(args: argparse.Namespace) -> dict:
             verify_tls=not args.no_verify_tls,
         )
 
-    manifest = Manifest.load(args.manifest)
     result = Materializer(args.target_root, source, workers=args.workers).materialize(
         dataset=args.dataset,
         repository=args.repository,

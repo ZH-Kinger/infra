@@ -123,3 +123,76 @@ class DataFlowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ObjectUriMappingTests(unittest.TestCase):
+    """DataFlow 把 FileSystemPath 和 SourceStoragePath 死绑在一起。
+
+    路径 D 对应的对象前缀是 `S + (D - F)`，所以 OSS 布局必须镜像 CPFS 布局。
+    算错这个映射的后果是 commit 从错误的前缀 import，建出来的 Commit 指向
+    别的数据——而 manifest 校验要到 materialize 时才发现。
+    """
+
+    def _df(self, flows):
+        return CpfsDataFlow(
+            filesystem_id="cpfs-x",
+            region="cn-hangzhou",
+            mount_prefix="/mnt/cpfs",
+            runner=FakeAliyun(flows),
+        )
+
+    def test_maps_subpath_onto_source_prefix(self):
+        df = self._df(
+            [
+                {
+                    "DataFlowId": "df-1",
+                    "FileSystemPath": "/datasets",
+                    "SourceStoragePath": "oss://bucket/releases",
+                }
+            ]
+        )
+        self.assertEqual(
+            df.object_uri_for("/datasets/robotics/c1"),
+            "oss://bucket/releases/robotics/c1/",
+        )
+
+    def test_binding_root_maps_to_source_root(self):
+        df = self._df(
+            [
+                {
+                    "DataFlowId": "df-1",
+                    "FileSystemPath": "/datasets",
+                    "SourceStoragePath": "oss://bucket/releases",
+                }
+            ]
+        )
+        self.assertEqual(df.object_uri_for("/datasets"), "oss://bucket/releases/")
+
+    def test_falls_back_to_bucket_level_source_storage(self):
+        # 建 DataFlow 时可以只给 SourceStorage（桶级），不给 SourceStoragePath
+        df = self._df(
+            [{"DataFlowId": "df-1", "FileSystemPath": "/", "SourceStorage": "oss://bucket"}]
+        )
+        self.assertEqual(
+            df.object_uri_for("/datasets/robotics/c1"), "oss://bucket/datasets/robotics/c1/"
+        )
+
+    def test_trailing_slash_is_always_present(self):
+        # lakeFS import 要求 URI 指向前缀，少了斜杠可能被当成单个对象
+        df = self._df(
+            [
+                {
+                    "DataFlowId": "df-1",
+                    "FileSystemPath": "/datasets",
+                    "SourceStoragePath": "oss://bucket/releases/",
+                }
+            ]
+        )
+        self.assertTrue(df.object_uri_for("/datasets/robotics/c1").endswith("/"))
+
+    def test_uncovered_path_is_rejected(self):
+        df = self._df(
+            [{"DataFlowId": "df-1", "FileSystemPath": "/other", "SourceStorage": "oss://b"}]
+        )
+        with self.assertRaises(DatasetSinkError):
+            df.object_uri_for("/datasets/robotics/c1")
