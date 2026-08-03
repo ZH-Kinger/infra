@@ -24,6 +24,7 @@ from .ingest import (
     object_store_uri_for,
     scan_object_store,
     scan_staging,
+    split_object_store_uri,
     summarize_entries,
     validate_destination,
 )
@@ -213,6 +214,15 @@ def build_parser() -> argparse.ArgumentParser:
     commit.add_argument("--lakefs-api-endpoint")
     commit.add_argument("--lakefs-access-key-id")
     commit.add_argument("--lakefs-secret-access-key")
+    commit.add_argument(
+        "--registry",
+        type=Path,
+        help=(
+            "数据源注册表。给了就校验 --object-store-uri 指向的是内容稳定的位置——"
+            "工作区（mode=workspace）会被拒绝，因为零拷贝 import 之后那里的内容"
+            "还能被改，等于让已发布的版本可以被静默篡改"
+        ),
+    )
 
     certify = commands.add_parser(
         "certify",
@@ -563,6 +573,12 @@ def _commit(args: argparse.Namespace) -> dict:
     manifest = Manifest.load(args.manifest)
     destination = validate_destination(args.destination)
     uri = object_store_uri_for(args.object_store_uri, args.prefix)
+
+    if args.registry:
+        # 建 Commit 之前确认这批字节所在的位置内容是稳定的。
+        bucket, prefix = split_object_store_uri(uri)
+        if bucket:
+            load_registry(args.registry).assert_commit_source(bucket, prefix)
 
     # scan-oss 产出的 manifest 里 source_key 是 Commit 内路径，必须和这里的
     # destination 对得上；对不上就在建 Commit 之前停下，而不是等 materialize

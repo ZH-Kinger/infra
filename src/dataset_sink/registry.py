@@ -33,7 +33,17 @@ from .errors import DatasetSinkError
 #           就不能再改，否则 Commit 悬空。
 # archive ：dataset-sink 自己写入的归档前缀。这类桶还必须打 cpfs-dataflow 标签
 #           并开启版本控制，否则 CPFS 数据流动的沉淀用不了。
-MODES = ("readonly", "archive")
+# workspace：用户可读写的工作区（个人区、公共区）。可以当 scan 的来源，
+#            但**绝不能**当 lakeFS Commit 的 object_store_uri——见
+#            assert_commit_source。数据要进版本体系，必须先 archive 出去。
+MODES = ("readonly", "archive", "workspace")
+
+# 这些 mode 允许写入。workspace 由用户自己写（靠 CPFS Fileset + POSIX 隔离），
+# archive 由 dataset-sink 写。
+WRITABLE_MODES = frozenset({"archive", "workspace"})
+
+# 这些 mode 可以作为 Commit 指向的物理位置。判据只有一条：**内容是否稳定**。
+COMMIT_SOURCE_MODES = frozenset({"readonly", "archive"})
 
 
 @dataclass(frozen=True)
@@ -89,12 +99,37 @@ class Registry:
     def assert_writable(self, bucket: str, prefix: str) -> DataSource:
         """确认该位置可写。`readonly` 数据源拒绝写入。"""
         source = self.resolve(bucket, prefix)
-        if source.mode != "archive":
+        if source.mode not in WRITABLE_MODES:
             raise DatasetSinkError(
                 f"数据源 {source.name}（{source.location}）是 {source.mode}，不允许写入。\n"
                 "只读数据源通常是已经被 lakeFS 零拷贝 import 引用的存量前缀——"
                 "改动其中的对象会让已发布的 Commit 悬空，且当时不会报错。\n"
                 '要归档新数据请写到 mode = "archive" 的数据源下。'
+            )
+        return source
+
+    def assert_commit_source(self, bucket: str, prefix: str) -> DataSource:
+        """确认该位置可以作为 lakeFS Commit 指向的物理位置。
+
+        判据只有一条：**内容是否稳定**。
+
+        lakeFS 的零拷贝 import 只记录对象的物理地址，不复制字节。所以 Commit
+        指向一个用户随时能改的位置时，明天有人改一个文件，**已发布的 Commit
+        就悄悄变了**——版本记录还在、内容不对，而且当时没有任何东西会报错。
+        这是整套协议里最隐蔽的一种损坏：`verify --deep` 要到下一次校验才发现，
+        而 training-guard 已经放行过一次训练了。
+
+        所以工作区（个人区、公共区）永远不能直接建 Commit，必须先 `archive`
+        到一个稳定位置。这也正是 cpfs-ingest 里 archive 那一步不能省的原因。
+        """
+        source = self.resolve(bucket, prefix)
+        if source.mode not in COMMIT_SOURCE_MODES:
+            raise DatasetSinkError(
+                f"数据源 {source.name}（{source.location}）是 {source.mode}，"
+                "不能作为 lakeFS Commit 的来源。\n"
+                "工作区的内容随时可能被改动，而零拷贝 import 只记录物理地址不复制字节——"
+                "Commit 指向可写位置，等于让已发布的版本可以被静默篡改。\n"
+                '正确做法：先 `archive` 到 mode = "archive" 的位置，再对那个位置建 Commit。'
             )
         return source
 

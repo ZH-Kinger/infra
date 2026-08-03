@@ -209,3 +209,27 @@ class CommitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ObjectStoreUriSplitTests(unittest.TestCase):
+    def test_splits_bucket_and_prefix(self):
+        from dataset_sink.ingest import split_object_store_uri
+
+        self.assertEqual(split_object_store_uri("s3://bucket/a/b/"), ("bucket", "a/b"))
+        self.assertEqual(split_object_store_uri("oss://bucket/a/"), ("bucket", "a"))
+        self.assertEqual(split_object_store_uri("s3://bucket"), ("bucket", ""))
+
+    def test_local_scheme_has_no_bucket(self):
+        from dataset_sink.ingest import split_object_store_uri
+
+        # local:// 没有桶的概念，返回空桶名让调用方跳过注册表校验
+        self.assertEqual(
+            split_object_store_uri("local:///mnt/cpfs/archive/x/"), ("", "mnt/cpfs/archive/x")
+        )
+
+    def test_missing_scheme_is_rejected(self):
+        from dataset_sink.errors import DatasetSinkError
+        from dataset_sink.ingest import split_object_store_uri
+
+        with self.assertRaises(DatasetSinkError):
+            split_object_store_uri("bucket/prefix")

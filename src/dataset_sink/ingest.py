@@ -759,6 +759,25 @@ def object_store_uri_for(scheme_uri: str, prefix: str) -> str:
     return f"{base}/{normalized}/"
 
 
+def split_object_store_uri(uri: str) -> Tuple[str, str]:
+    """把 `<scheme>://<bucket>/<prefix>/` 拆成 (bucket, prefix)。
+
+    lakeFS import 的 URI 可能是 s3:// / oss:// / local://。前两者第一段是桶名；
+    `local://` 没有桶的概念，返回空桶名，由调用方决定怎么处理。
+    """
+    text = uri.strip()
+    if "://" not in text:
+        raise DatasetSinkError(f"object_store_uri 缺少 scheme: {uri!r}")
+    scheme, rest = text.split("://", 1)
+    rest = rest.strip("/")
+    if scheme == "local":
+        return "", rest
+    if not rest:
+        raise DatasetSinkError(f"object_store_uri 没有桶名: {uri!r}")
+    bucket, _, prefix = rest.partition("/")
+    return bucket, prefix
+
+
 def validate_destination(destination: str) -> str:
     """校验并**规范化** Commit 内的目标路径，拒绝 `..` 与空值。
 

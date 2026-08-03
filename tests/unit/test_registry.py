@@ -115,3 +115,58 @@ class LoadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkspaceModeTests(unittest.TestCase):
+    """工作区可写、可扫描，但**绝不能**作为 Commit 的来源。
+
+    零拷贝 import 只记录物理地址不复制字节。Commit 指向可写位置，等于让已发布
+    的版本可以被静默篡改——verify --deep 要到下一次校验才发现，而那时
+    training-guard 已经放行过训练了。
+    """
+
+    def setUp(self):
+        self.reg = build_registry(
+            [
+                {
+                    "name": "alice",
+                    "bucket": "workspaces",
+                    "prefix": "users/alice",
+                    "mode": "workspace",
+                },
+                {"name": "shared", "bucket": "workspaces", "prefix": "shared", "mode": "workspace"},
+                {
+                    "name": "archive",
+                    "bucket": "ds-archive",
+                    "prefix": "releases",
+                    "mode": "archive",
+                },
+                {"name": "legacy", "bucket": "legacy", "prefix": "raw", "mode": "readonly"},
+            ]
+        )
+
+    def test_workspace_is_writable(self):
+        self.assertEqual(
+            self.reg.assert_writable("workspaces", "users/alice/exp").mode, "workspace"
+        )
+
+    def test_workspace_is_rejected_as_commit_source(self):
+        with self.assertRaises(DatasetSinkError) as ctx:
+            self.reg.assert_commit_source("workspaces", "users/alice/exp")
+        message = str(ctx.exception)
+        self.assertIn("不能作为 lakeFS Commit 的来源", message)
+        self.assertIn("静默篡改", message)
+        self.assertIn("archive", message)  # 告诉用户正确做法
+
+    def test_shared_workspace_is_rejected_too(self):
+        # 公共区「全体可读写」，比个人区更不稳定
+        with self.assertRaises(DatasetSinkError):
+            self.reg.assert_commit_source("workspaces", "shared/scratch")
+
+    def test_archive_and_readonly_are_valid_commit_sources(self):
+        self.assertEqual(self.reg.assert_commit_source("ds-archive", "releases/x").mode, "archive")
+        self.assertEqual(self.reg.assert_commit_source("legacy", "raw/2026").mode, "readonly")
+
+    def test_readonly_is_not_writable(self):
+        with self.assertRaises(DatasetSinkError):
+            self.reg.assert_writable("legacy", "raw/2026")
