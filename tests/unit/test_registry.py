@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from dataset_sink.errors import DatasetSinkError
-from dataset_sink.registry import build_registry, load_registry
+from dataset_sink.registry import MODES, build_registry, load_registry
 
 ENTRIES = [
     {
@@ -170,3 +170,37 @@ class WorkspaceModeTests(unittest.TestCase):
     def test_readonly_is_not_writable(self):
         with self.assertRaises(DatasetSinkError):
             self.reg.assert_writable("legacy", "raw/2026")
+
+
+class RenderedRegistryContractTest(unittest.TestCase):
+    """守住 Terraform 与 Python 之间的 mode 契约。
+
+    注册表由 Terraform 的 `data_sources` 变量渲染成 deploy/data-sources.json，
+    Python 只是消费方。所以 **Terraform 表达不了的 mode 等于不存在**——
+    曾经出现过 registry.py 支持 workspace 而 Terraform 的 validation 只允许
+    readonly/archive 的情况，结果是这个 mode 永远无法通过管理面声明。
+
+    这个测试直接读渲染产物而不是 fixture：fixture 会跟着代码一起改，
+    渲染产物不会。
+    """
+
+    RENDERED = Path(__file__).resolve().parents[2] / "deploy" / "data-sources.json"
+
+    def test_rendered_document_parses(self):
+        registry = load_registry(self.RENDERED)
+        self.assertTrue(registry.sources, "渲染出的注册表不该是空的")
+
+    def test_every_mode_is_exercised_by_the_render_fixture(self):
+        """render.tfvars 必须为每个 mode 都放一条占位数据源。
+
+        deploy/ram/*.json 是评审时实际会看的东西。少放一个 mode，那个 mode
+        生成的语句形状就从未被任何人看到过。
+        """
+        registry = load_registry(self.RENDERED)
+        rendered_modes = {s.mode for s in registry.sources}
+        self.assertEqual(
+            rendered_modes,
+            set(MODES),
+            "render.tfvars 的 data_sources 没有覆盖全部 mode；"
+            "缺的那个在 deploy/ram/*.json 里看不到语句形状",
+        )

@@ -27,4 +27,5 @@ imported_data_prefixes = [
 data_sources = [
   { name = "legacy-readonly", bucket = "LEGACY_BUCKET", prefix = "LEGACY_PREFIX", mode = "readonly" },
   { name = "sink-archive", bucket = "ARCHIVE_BUCKET", prefix = "releases", mode = "archive" },
+  { name = "team-workspace", bucket = "WORKSPACE_BUCKET", prefix = "scratch", mode = "workspace" },
 ]

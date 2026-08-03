@@ -66,6 +66,32 @@
     },
     {
       "Action": [
+        "oss:GetObject",
+        "oss:GetObjectMeta",
+        "oss:HeadObject",
+        "oss:PutObject",
+        "oss:DeleteObject",
+        "oss:AbortMultipartUpload"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:WORKSPACE_BUCKET/scratch/*"
+      ],
+      "Sid": "ReadWriteWorkspaceDataSources"
+    },
+    {
+      "Action": [
+        "oss:ListObjects",
+        "oss:GetBucketInfo"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:WORKSPACE_BUCKET"
+      ],
+      "Sid": "ListWorkspaceDataSourceBuckets"
+    },
+    {
+      "Action": [
         "oss:PutObject",
         "oss:DeleteObject",
         "oss:DeleteObjects",

@@ -96,6 +96,20 @@ variable "data_sources" {
       readonly  只读，禁止写删。存量数据前缀属于这类。
       archive   dataset-sink 写入的归档前缀。这类桶还需要打 cpfs-dataflow 标签
                 并开启版本控制，否则 CPFS 数据流动的沉淀用不了——见 platform 层。
+      workspace 用户可读写的工作区。研发组在这里拿到读写权限，可以被 scan-oss
+                扫描，但**不能**作为 lakeFS Commit 的物理位置。
+
+    关于 workspace 的一个诚实说明：「不能作为 Commit 来源」这条**在 RAM 层无法
+    表达**。RAM 只看得到 GetObject，看不出这次读取是 scan 还是零拷贝 import 的
+    寻址。所以这条约束只有 CLI 一道强制（`commit --registry`），比 readonly 的
+    「CLI + RAM 双强制」弱一档。绕过它不需要提权，只要不传 --registry。
+
+    真正兜底的不是权限而是校验：Commit 记录了 manifest_sha256，工作区内容一改
+    `verify --deep` 就会失败。所以 workspace 数据源要配合发布前的 verify 使用，
+    不要指望权限拦住它。
+
+    这个 mode 列表必须与 src/dataset_sink/registry.py 的 MODES 保持一致——
+    deploy/data-sources.json 由这里生成，这里表达不了的 mode 等于不存在。
   EOT
   type = list(object({
     name   = string
@@ -106,8 +120,8 @@ variable "data_sources" {
   default = []
 
   validation {
-    condition     = alltrue([for s in var.data_sources : contains(["readonly", "archive"], s.mode)])
-    error_message = "data_sources 的 mode 只能是 readonly 或 archive。"
+    condition     = alltrue([for s in var.data_sources : contains(["readonly", "archive", "workspace"], s.mode)])
+    error_message = "data_sources 的 mode 只能是 readonly、archive 或 workspace。"
   }
 
   validation {

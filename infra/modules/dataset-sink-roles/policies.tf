@@ -60,6 +60,45 @@ locals {
     },
   ]
 
+  # workspace 的数据源：用户自己的工作区，研发组在这里可读写。
+  #
+  # 这是整套策略里唯一给**人**（而不是给 CI 角色）的写权限。理由是发布协议
+  # 只管「已发布的不可变 release」，但用户总得有地方做预处理和实验；不给一个
+  # 合法的可写位置，他们就会往别处写，而别处往往是没人看得住的地方。
+  #
+  # 边界很清楚：可写 ≠ 可发布。工作区能被 scan-oss 扫描，但 `commit` 会拒绝
+  # 以它为物理位置——见 registry.assert_commit_source。
+  workspace_object_arns = [
+    for s in var.data_sources : (
+      s.prefix == "" ? "acs:oss:*:${var.account_id}:${s.bucket}/*" : "acs:oss:*:${var.account_id}:${s.bucket}/${s.prefix}/*"
+    ) if s.mode == "workspace"
+  ]
+  workspace_bucket_arns = distinct([
+    for s in var.data_sources : "acs:oss:*:${var.account_id}:${s.bucket}" if s.mode == "workspace"
+  ])
+
+  workspace_rw_statements = length(local.workspace_object_arns) == 0 ? [] : [
+    {
+      Sid    = "ReadWriteWorkspaceDataSources"
+      Effect = "Allow"
+      Action = [
+        "oss:GetObject",
+        "oss:GetObjectMeta",
+        "oss:HeadObject",
+        "oss:PutObject",
+        "oss:DeleteObject",
+        "oss:AbortMultipartUpload",
+      ]
+      Resource = local.workspace_object_arns
+    },
+    {
+      Sid      = "ListWorkspaceDataSourceBuckets"
+      Effect   = "Allow"
+      Action   = ["oss:ListObjects", "oss:GetBucketInfo"]
+      Resource = local.workspace_bucket_arns
+    },
+  ]
+
   deny_readonly_source_statements = length(local.readonly_object_arns) == 0 ? [] : [
     {
       Sid    = "DenyMutatingReadonlyDataSources"
@@ -421,6 +460,7 @@ locals {
         Resource = ["*"]
       },
       ],
+      local.workspace_rw_statements,
       local.deny_readonly_source_statements,
     local.deny_imported_mutation_statements)
   })

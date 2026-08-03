@@ -71,7 +71,8 @@
       "Effect": "Allow",
       "Resource": [
         "acs:oss:*:ACCOUNT_ID:LEGACY_BUCKET/LEGACY_PREFIX/*",
-        "acs:oss:*:ACCOUNT_ID:ARCHIVE_BUCKET/releases/*"
+        "acs:oss:*:ACCOUNT_ID:ARCHIVE_BUCKET/releases/*",
+        "acs:oss:*:ACCOUNT_ID:WORKSPACE_BUCKET/scratch/*"
       ],
       "Sid": "ReadRegisteredDataSources"
     },
@@ -83,7 +84,8 @@
       "Effect": "Allow",
       "Resource": [
         "acs:oss:*:ACCOUNT_ID:LEGACY_BUCKET",
-        "acs:oss:*:ACCOUNT_ID:ARCHIVE_BUCKET"
+        "acs:oss:*:ACCOUNT_ID:ARCHIVE_BUCKET",
+        "acs:oss:*:ACCOUNT_ID:WORKSPACE_BUCKET"
       ],
       "Sid": "ListRegisteredDataSourceBuckets"
     },

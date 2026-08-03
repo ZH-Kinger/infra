@@ -11,6 +11,12 @@
       "mode": "archive",
       "name": "sink-archive",
       "prefix": "releases"
+    },
+    {
+      "bucket": "WORKSPACE_BUCKET",
+      "mode": "workspace",
+      "name": "team-workspace",
+      "prefix": "scratch"
     }
   ]
 }

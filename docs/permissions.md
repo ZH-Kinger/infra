@@ -326,18 +326,53 @@ managed_group_arns  = ["acs:ram:*:<账号>:group/pai-*", ...]
 
 ```hcl
 data_sources = [
-  { name = "robotics-legacy", bucket = "legacy-data", prefix = "legacy/robotics", mode = "readonly" },
-  { name = "sink-archive",    bucket = "ds-archive",  prefix = "releases",        mode = "archive"  },
+  { name = "robotics-legacy", bucket = "legacy-data", prefix = "legacy/robotics", mode = "readonly"  },
+  { name = "sink-archive",    bucket = "ds-archive",  prefix = "releases",        mode = "archive"   },
+  { name = "team-scratch",    bucket = "ds-work",     prefix = "scratch",         mode = "workspace" },
 ]
 ```
 
-**一份声明同时生成三样东西**，所以它们不会漂移：
+**一份声明同时生成四样东西**，所以它们不会漂移：
 
 | 产物 | 作用 |
 |---|---|
 | `ReadRegisteredDataSources` Allow | 沉降角色**只能读注册过的前缀**，不再是整桶 |
 | `DenyMutatingReadonlyDataSources` Deny | `readonly` 前缀禁止写删（存量数据被 import 后改了会让 Commit 悬空） |
+| `ReadWriteWorkspaceDataSources` Allow | 研发组在 `workspace` 前缀可读写——**整套策略里唯一给人的写权限** |
 | `deploy/data-sources.json` | 供 CLI 本地校验 |
+
+### 三个 mode
+
+| mode | 谁能写 | 能否 `scan-oss` | 能否当 Commit 来源 |
+|---|---|---|---|
+| `readonly` | 没有人（Deny 兜底） | 是 | **是** |
+| `archive` | 沉降角色 | 是 | **是** |
+| `workspace` | 研发组（人） | 是 | **否** |
+
+判据只有一条：**内容是否稳定**。零拷贝 import 只记录物理地址不复制字节，
+所以 Commit 指向一个用户随时能改的位置，等于让已发布的版本可以被静默篡改——
+版本记录还在、内容不对，而且当时不会有任何东西报错。
+
+### workspace 的强制力比另外两个弱一档（不要高估）
+
+「不能当 Commit 来源」这条**在 RAM 层无法表达**。RAM 只看得到 `GetObject`，
+看不出这次读取是 `scan-oss` 还是零拷贝 import 的寻址。
+
+| | CLI 校验 | RAM 强制 |
+|---|---|---|
+| 前缀没注册 | 有 | **有** |
+| 写 `readonly` 前缀 | 有 | **有** |
+| 拿 `workspace` 当 Commit 来源 | 有 | **没有** |
+
+绕过它不需要提权，只要不传 `--registry`。真正兜底的不是权限而是校验：
+Commit 里记了 `manifest_sha256`，工作区内容一改 `verify --deep` 就失败。
+**所以 workspace 数据源必须配合发布前的 `verify --deep` 使用**，
+不要指望权限拦住它。
+
+`infra/modules/dataset-sink-roles/variables.tf` 的 mode 列表必须与
+`src/dataset_sink/registry.py` 的 `MODES` 一致。注册表由 Terraform 渲染，
+**Terraform 表达不了的 mode 等于不存在**——这一条由
+`tests/unit/test_registry.py::RenderedRegistryContractTest` 直接读渲染产物守住。
 
 ### 为什么要两道强制
 
