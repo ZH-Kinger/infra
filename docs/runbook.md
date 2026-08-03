@@ -191,12 +191,18 @@ Actions → Dataset release → Run workflow，填参数。流水线会在 dry-r
 | 情况 | mode | 额外要填 |
 |---|---|---|
 | CPFS 上刚处理完一批新数据，还没有 Commit | `cpfs-ingest` | `prepared_dir`、`archive_prefix`；`ref` 填**要创建的** Tag 名 |
+| **数据本来就在 OSS 上**（存量数据，最常见） | `oss-ingest` | `source_bucket`、`source_prefix`；`ref` 填**要创建的** Tag 名 |
 | CPFS staging 已就绪，Commit 已存在 | `certify` | `prepared_dir`、`manifest_path` |
 | 数据在 lakeFS，要拷到 CPFS | `materialize` | `manifest_path` |
 
 ### 2.4.1 存量数据已经在 OSS 上
 
-这是最省事的一条：**不需要迁移，不需要归档**。目前走命令行，还没做成流水线 mode。
+这是最省事的一条：**不需要迁移，不需要归档**。
+
+**优先走流水线的 `oss-ingest` 模式**——它把下面三步串好了，而且每步换身份、
+有审批、有留痕。手敲命令行只适合摸底和排查，因为它绕过了这些。
+
+下面是这条路径实际在做的事（流水线内部就是这三步）：
 
 ```bash
 # ① 列举 + 算 SHA-256（会完整读一遍数据，TB 级请预留时间）
@@ -211,7 +217,11 @@ dataset-sink commit --repository robotics-data --branch main \
   --prefix legacy/robotics --destination datasets/robotics \
   --manifest /work/manifest.jsonl --tag robotics-v2026.08.02.1
 
-# ③ 之后按 materialize 模式跑流水线，把这个 Commit 拷到 CPFS
+# ③ 从 lakeFS 按 Commit 内路径取数，落到 CPFS 发布
+#    注意**不要**传 --commit-prefix：scan-oss 的 source_key 已经是 Commit 内路径了
+dataset-sink materialize --dataset robotics --repository robotics-data \
+  --commit <上一步产生的 commit_id> --lakefs-tag robotics-v2026.08.02.1 \
+  --manifest /work/manifest.jsonl --source lakefs-s3 --target-root /mnt/cpfs/datasets
 ```
 
 三件必须注意的事：
@@ -245,6 +255,18 @@ dataset-sink commit --repository robotics-data --branch main \
 | `ARCHIVE_ENDPOINT_URL` | OSS 的 S3 兼容端点 |
 | `ARCHIVE_OBJECT_STORE_URI` | 桶级 URI，如 `s3://dataset-sink-archive`，供 lakeFS import 使用 |
 | `LAKEFS_API_ENDPOINT` | lakeFS API 地址 |
+
+`oss-ingest` 模式**不需要** `ARCHIVE_*`（它不归档），需要的是：
+
+| 变量 | 说明 |
+|---|---|
+| `OSS_ENDPOINT_URL` | 区域级 OSS S3 兼容端点。留空回落到 `ARCHIVE_ENDPOINT_URL`——同 region 的桶本来就是同一个地址 |
+| `LAKEFS_API_ENDPOINT` | lakeFS API 地址，import 用 |
+| `LAKEFS_S3_ENDPOINT` | lakeFS S3 Gateway，之后 `materialize` 取数用 |
+
+触发时填 `source_bucket` + `source_prefix`，**不要**填 `prepared_dir` / `archive_prefix`
+（填了会被 preflight 拒绝——那说明模式选错了）。这个前缀必须已经在数据源注册表里，
+且 mode 不是 `workspace`。
 
 **staging 目录必须是干净的**：只包含数据集内容。有 `.DS_Store`、`_READY`、
 `release.json` 之类的残留，`scan` 会在第一步就失败并给出清理命令——这是有意的，

@@ -8,12 +8,13 @@ on:
         description: |
           发布方式。
           cpfs-ingest：CPFS 上处理完的新数据，还没有 Commit（scan→archive→commit→certify）
+          oss-ingest：数据本来就在对象存储上（scan-oss→commit→materialize，全程不搬字节）
           certify：CPFS staging 已就绪且 Commit 已存在，零拷贝发布
           materialize：从 lakeFS 拷贝到 CPFS
         required: true
         default: cpfs-ingest
         type: choice
-        options: [cpfs-ingest, certify, materialize]
+        options: [cpfs-ingest, oss-ingest, certify, materialize]
       dataset:
         description: 数据集名（如 robotics）
         required: true
@@ -23,7 +24,7 @@ on:
       ref:
         description: |
           materialize/certify：已存在的 lakeFS Tag 或 Commit（严禁 Branch 名或 latest）
-          cpfs-ingest：本次要**创建**的 Tag 名（同名已存在会失败，不会覆盖）
+          cpfs-ingest/oss-ingest：本次要**创建**的 Tag 名（同名已存在会失败，不会覆盖）
         required: true
       prepared_dir:
         description: CPFS staging 目录（cpfs-ingest 与 certify 必填）
@@ -31,9 +32,24 @@ on:
       archive_prefix:
         description: 对象存储归档前缀（cpfs-ingest 必填），如 staging/batch-20260802-001
         required: false
-      manifest_path:
-        description: Manifest 路径（materialize 与 certify 必填；cpfs-ingest 由 scan 生成）
+      source_bucket:
+        description: 存量数据所在的 OSS 桶（oss-ingest 必填）。必须是注册过的数据源
         required: false
+      source_prefix:
+        description: 存量数据所在的前缀（oss-ingest 必填），如 legacy/robotics
+        required: false
+      manifest_path:
+        description: |
+          Manifest 路径（materialize 与 certify 必填；
+          cpfs-ingest 由 scan 生成，oss-ingest 由 scan-oss 生成）
+        required: false
+      no_digest:
+        description: |
+          oss-ingest：跳过 SHA-256 计算。快，但发布出来的 release **永久**失去深度校验能力
+          （manifest 随发布固化，事后补不上）。仅用于摸底，正式发布不要开。
+        required: false
+        type: boolean
+        default: false
       paimon_snapshot_id:
         description: Paimon Snapshot ID
         required: false
@@ -88,6 +104,14 @@ jobs:
               [ -n '${{ inputs.prepared_dir }}' ]   || { echo "::error::cpfs-ingest 需要 prepared_dir"; exit 1; }
               [ -n '${{ inputs.archive_prefix }}' ] || { echo "::error::cpfs-ingest 需要 archive_prefix"; exit 1; }
               ;;
+            oss-ingest)
+              [ -n '${{ inputs.source_bucket }}' ] || { echo "::error::oss-ingest 需要 source_bucket"; exit 1; }
+              [ -n '${{ inputs.source_prefix }}' ] || { echo "::error::oss-ingest 需要 source_prefix"; exit 1; }
+              # oss-ingest 不接受 prepared_dir / archive_prefix：数据本来就在对象存储上，
+              # 没有 staging 目录，也不需要归档。填了说明用错了模式，早说比让它静默无效好。
+              [ -z '${{ inputs.prepared_dir }}' ] || { echo "::error::oss-ingest 不用 prepared_dir——数据已在对象存储上，没有 staging 目录"; exit 1; }
+              [ -z '${{ inputs.archive_prefix }}' ] || { echo "::error::oss-ingest 不用 archive_prefix——存量数据不需要再归档一遍，零拷贝 import 直接引用原位置"; exit 1; }
+              ;;
             certify)
               [ -n '${{ inputs.prepared_dir }}' ]  || { echo "::error::certify 需要 prepared_dir"; exit 1; }
               [ -n '${{ inputs.manifest_path }}' ] || { echo "::error::certify 需要 manifest_path"; exit 1; }
@@ -96,6 +120,34 @@ jobs:
               [ -n '${{ inputs.manifest_path }}' ] || { echo "::error::materialize 需要 manifest_path"; exit 1; }
               ;;
           esac
+
+      # 数据源注册表校验：oss-ingest 的来源必须是注册过的、内容稳定的位置。
+      # 单独成 step 而不是塞进上面的 case——heredoc 的结束符必须落在
+      # YAML 块标量的基准缩进上，嵌在 case 里就永远不会闭合。
+      - uses: actions/setup-python@v5
+        if: inputs.mode == 'oss-ingest'
+        with:
+          python-version: "3.11"
+
+      - name: 校验数据源已注册且可作为 Commit 来源
+        if: inputs.mode == 'oss-ingest'
+        env:
+          SOURCE_BUCKET: ${{ inputs.source_bucket }}
+          SOURCE_PREFIX: ${{ inputs.source_prefix }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python - <<'PY'
+          import os
+          from pathlib import Path
+
+          from dataset_sink.registry import load_registry
+
+          registry = load_registry(Path("deploy/data-sources.json"))
+          source = registry.assert_commit_source(
+              os.environ["SOURCE_BUCKET"], os.environ["SOURCE_PREFIX"]
+          )
+          print(f"数据源 {source.name}（{source.location}，mode={source.mode}）可作为 Commit 来源")
+          PY
 
       - name: 校验必需的仓库变量
         id: check
@@ -111,7 +163,11 @@ jobs:
           ARCHIVE_BUCKET: ${{ vars.ARCHIVE_BUCKET }}
           ARCHIVE_ENDPOINT_URL: ${{ vars.ARCHIVE_ENDPOINT_URL }}
           ARCHIVE_OBJECT_STORE_URI: ${{ vars.ARCHIVE_OBJECT_STORE_URI }}
+          # 区域级 OSS S3 兼容端点，同 region 的桶共用。留空时回落到归档桶的端点，
+          # 因为两者本来就是同一个地址，只是命名上一个偏归档、一个偏通用。
+          OSS_ENDPOINT_URL: ${{ vars.OSS_ENDPOINT_URL || vars.ARCHIVE_ENDPOINT_URL }}
           LAKEFS_API_ENDPOINT: ${{ vars.LAKEFS_API_ENDPOINT }}
+          LAKEFS_S3_ENDPOINT: ${{ vars.LAKEFS_S3_ENDPOINT }}
         run: |
           set -euo pipefail
           missing=""
@@ -124,6 +180,14 @@ jobs:
           # cpfs-ingest 还要归档到对象存储、再 import 进 lakeFS
           if [ "$MODE" = "cpfs-ingest" ]; then
             for v in ARCHIVE_BUCKET ARCHIVE_ENDPOINT_URL ARCHIVE_OBJECT_STORE_URI LAKEFS_API_ENDPOINT; do
+              eval "value=\${$v:-}"
+              [ -n "$value" ] || missing="$missing $v"
+            done
+          fi
+          # oss-ingest 不归档，所以不要 ARCHIVE_*；但要读源桶、要 import、
+          # 之后还要从 lakeFS 的 S3 Gateway 取数落到 CPFS。
+          if [ "$MODE" = "oss-ingest" ]; then
+            for v in OSS_ENDPOINT_URL LAKEFS_API_ENDPOINT LAKEFS_S3_ENDPOINT; do
               eval "value=\${$v:-}"
               [ -n "$value" ] || missing="$missing $v"
             done
@@ -200,6 +264,82 @@ jobs:
           retention-days: 30
 
   # ---------------------------------------------------------------------------
+  # oss-ingest ①：扫描存量前缀，生成 manifest。
+  #
+  # **这条路径没有 archive 步骤**，那正是它的价值：字节已经在持久位置上，
+  # 而 lakeFS import 又是零拷贝的，所以「存量 OSS 数据 → Commit」全程不搬一个
+  # 字节。cpfs-ingest 必须先归档，是因为 CPFS staging 不是持久位置。
+  #
+  # 但**读还是要读一遍**：对象存储不提供 SHA-256，要拿到校验能力只能把每个
+  # 对象读一遍算摘要。这是唯一的一次全量读，之后 verify --deep 都在 CPFS 上做。
+  # 因此这个 job 跑在 VPC 内的 runner 上——走 OSS 内网端点，而不是从
+  # GitHub 托管 runner 走公网把整个数据集拉一遍。
+  # ---------------------------------------------------------------------------
+  oss-scan:
+    name: 扫描存量对象存储前缀
+    if: inputs.mode == 'oss-ingest'
+    needs: preflight
+    runs-on: ${{ needs.preflight.outputs.cpfs_runner }}
+    outputs:
+      manifest_sha256: ${{ steps.scan.outputs.manifest_sha256 }}
+      file_count: ${{ steps.scan.outputs.file_count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e '.[all]'
+
+      # 只需要读注册过的前缀。materializer 角色的 ReadRegisteredDataSources
+      # 正是为此存在——它读不了整个桶，只读注册表里那些前缀。
+      - name: 假设 DatasetMaterializerRole
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ vars.MATERIALIZER_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
+          audience: ${{ env.ALIBABA_CLOUD_OIDC_AUDIENCE }}
+          role-session-name: oss-scan-${{ github.run_id }}
+
+      - name: scan-oss
+        id: scan
+        run: |
+          set -euo pipefail
+          # 用数组而不是字符串拼可选 flag：字符串要靠不加引号的展开才能拆成
+          # 多个参数，而那样 shellcheck 会报 SC2086，且带空格的值会被拆错。
+          # 数组从一开始就非空，也就不会踩 set -u 下空数组展开的坑。
+          args=(
+            --source oss
+            --bucket '${{ inputs.source_bucket }}'
+            --endpoint-url '${{ vars.OSS_ENDPOINT_URL || vars.ARCHIVE_ENDPOINT_URL }}'
+            --prefix '${{ inputs.source_prefix }}'
+            # --destination 必须与随后 commit --destination 完全一致，否则
+            # manifest 里的 source_key 与 Commit 内的实际路径对不上，
+            # materialize 会全量 NoSuchKey——而那时 Commit 和 Tag 都已经建好了。
+            --destination 'datasets/${{ inputs.dataset }}'
+            --registry deploy/data-sources.json
+            --output "$RUNNER_TEMP/manifest.jsonl"
+          )
+          if [ '${{ inputs.no_digest }}' = 'true' ]; then
+            echo "::warning::--no-digest 已开启。这次发布的 release 将**永久**没有 SHA-256，verify --deep 永远无法校验它。"
+            args+=(--no-digest)
+          fi
+
+          dataset-sink scan-oss "${args[@]}" | tee "$RUNNER_TEMP/scan.json"
+
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          d = json.load(open(os.environ["RUNNER_TEMP"] + "/scan.json"))
+          print(f"manifest_sha256={d['manifest_sha256']}")
+          print(f"file_count={d['file_count']}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.MANIFEST_ARTIFACT }}
+          path: ${{ runner.temp }}/manifest.jsonl
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
   # cpfs-ingest ③：lakeFS 零拷贝 import 产生 Commit。
   #
   # 这个 job **不假设任何阿里云角色**——它只需要 lakeFS 凭证。
@@ -207,10 +347,20 @@ jobs:
   # 建 Commit 这个动作不需要碰数据，也就不该有碰数据的能力。
   # 它也不需要 CPFS，所以跑在托管 runner 上。
   # ---------------------------------------------------------------------------
+  # 两条 ingest 路径共用这一个 job。差别只有「import 的源在哪」：
+  #   cpfs-ingest  刚归档进去的 ARCHIVE_OBJECT_STORE_URI + archive_prefix
+  #   oss-ingest   数据本来就在的 oss://<source_bucket> + source_prefix
+  # 建 Commit 这个动作本身在两种模式下完全一样，所以不复制一份。
   ingest-commit:
     name: lakeFS 零拷贝 import
-    if: inputs.mode == 'cpfs-ingest'
-    needs: [preflight, ingest-archive]
+    needs: [preflight, ingest-archive, oss-scan]
+    # 每次只会有一条 ingest 前置真正跑，另一条是 skipped，必须显式接受。
+    if: >-
+      ${{ !cancelled()
+      && (inputs.mode == 'cpfs-ingest' || inputs.mode == 'oss-ingest')
+      && needs.preflight.result == 'success'
+      && (needs.ingest-archive.result == 'success' || needs.ingest-archive.result == 'skipped')
+      && (needs.oss-scan.result == 'success' || needs.oss-scan.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read # 刻意不要 id-token：这一步不需要阿里云身份
@@ -236,16 +386,34 @@ jobs:
           LAKEFS_SECRET_ACCESS_KEY: ${{ secrets.LAKEFS_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
-          dataset-sink commit \
-            --repository '${{ inputs.repository }}' \
-            --branch '${{ inputs.lakefs_branch }}' \
-            --object-store-uri '${{ vars.ARCHIVE_OBJECT_STORE_URI }}' \
-            --prefix '${{ inputs.archive_prefix }}' \
-            --destination 'datasets/${{ inputs.dataset }}' \
-            --manifest "$RUNNER_TEMP/manifest.jsonl" \
-            --tag '${{ inputs.ref }}' \
-            ${{ inputs.paimon_snapshot_id && format('--paimon-snapshot-id {0}', inputs.paimon_snapshot_id) || '' }} \
-            | tee "$RUNNER_TEMP/commit.json"
+          args=(
+            --repository '${{ inputs.repository }}'
+            --branch '${{ inputs.lakefs_branch }}'
+            --destination 'datasets/${{ inputs.dataset }}'
+            --manifest "$RUNNER_TEMP/manifest.jsonl"
+            --tag '${{ inputs.ref }}'
+          )
+
+          if [ '${{ inputs.mode }}' = 'oss-ingest' ]; then
+            args+=(--object-store-uri 'oss://${{ inputs.source_bucket }}')
+            args+=(--prefix '${{ inputs.source_prefix }}')
+            # 只有 oss-ingest 走 --registry。preflight 已经查过一次，这里再查
+            # 是因为两者之间隔着一次 scan，注册表有可能在中间被改。
+            args+=(--registry deploy/data-sources.json)
+          else
+            args+=(--object-store-uri '${{ vars.ARCHIVE_OBJECT_STORE_URI }}')
+            args+=(--prefix '${{ inputs.archive_prefix }}')
+            # cpfs-ingest **刻意不传 --registry**：它的来源是本流水线上一步刚写进去的
+            # staging 前缀（如 staging/batch-20260802-001），而注册表登记的是
+            # 归档前缀（如 releases/）。传了会因为「staging 没注册」误报失败，
+            # 而那个位置的内容稳定性由「刚归档完、只有本流水线写过」保证，
+            # 不需要注册表来判断。
+          fi
+
+          snapshot='${{ inputs.paimon_snapshot_id }}'
+          [ -n "$snapshot" ] && args+=(--paimon-snapshot-id "$snapshot")
+
+          dataset-sink commit "${args[@]}" | tee "$RUNNER_TEMP/commit.json"
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
           d = json.load(open(os.environ["RUNNER_TEMP"] + "/commit.json"))
@@ -273,8 +441,10 @@ jobs:
       commit: ${{ steps.publish.outputs.commit }}
       manifest_sha256: ${{ steps.publish.outputs.manifest_sha256 }}
     env:
-      # cpfs-ingest 的 Commit 来自 import，其余模式来自调用者输入。
-      RESOLVED_COMMIT: ${{ inputs.mode == 'cpfs-ingest' && needs.ingest-commit.outputs.commit_id || inputs.ref }}
+      # 两条 ingest 路径的 Commit 都来自 import，其余模式来自调用者输入。
+      RESOLVED_COMMIT: >-
+        ${{ (inputs.mode == 'cpfs-ingest' || inputs.mode == 'oss-ingest')
+        && needs.ingest-commit.outputs.commit_id || inputs.ref }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -283,7 +453,7 @@ jobs:
       - run: python -m pip install -e '.[all]'
 
       - name: 取回 scan 生成的 manifest
-        if: inputs.mode == 'cpfs-ingest'
+        if: inputs.mode == 'cpfs-ingest' || inputs.mode == 'oss-ingest'
         uses: actions/download-artifact@v4
         with:
           name: ${{ env.MANIFEST_ARTIFACT }}
@@ -308,37 +478,63 @@ jobs:
           set -euo pipefail
           target_root='${{ vars.CPFS_TARGET_ROOT }}'
           snapshot='${{ inputs.paimon_snapshot_id }}'
-          snapshot_arg=""
-          [ -n "$snapshot" ] && snapshot_arg="--paimon-snapshot-id $snapshot"
 
-          if [ '${{ inputs.mode }}' = 'materialize' ]; then
-            dataset-sink materialize \
-              --dataset '${{ inputs.dataset }}' \
-              --repository '${{ inputs.repository }}' \
-              --ref '${{ inputs.ref }}' \
-              --lakefs-tag '${{ inputs.ref }}' \
-              --manifest '${{ inputs.manifest_path }}' \
-              --source lakefs-s3 \
-              --target-root "$target_root" \
-              --workers 32 \
-              $snapshot_arg | tee "$RUNNER_TEMP/release.json"
+          # 每个分支各自组一整份参数数组。这样数组永不为空——空数组在
+          # set -u 下展开会报错（bash 4.4 之前），而自托管 runner 的 bash
+          # 版本是我们控制不了的。
+          if [ '${{ inputs.mode }}' = 'oss-ingest' ]; then
+            # 从 lakeFS 的 S3 Gateway 按 Commit 内路径取数落到 CPFS。
+            #
+            # 用 --commit 而不是 --ref：Commit 是上一步 import 刚产生的，
+            # 已经是不可变标识，不需要再解析一次。
+            #
+            # **不传 --commit-prefix**：scan-oss 产出的 manifest 里 source_key
+            # 已经是「Commit 内路径」（= destination + 相对路径），差值为空。
+            # 照抄 scan 那条路径补上前缀，会变成 datasets/<ds>/datasets/<ds>/...，
+            # 而 lakeFS 上没有那个路径，表现为全量 NoSuchKey——而那时 Commit
+            # 和 Tag 都已经建好了，只能换个 Tag 名重来。
+            args=(materialize
+              --dataset '${{ inputs.dataset }}'
+              --repository '${{ inputs.repository }}'
+              --commit "$RESOLVED_COMMIT"
+              --lakefs-tag '${{ inputs.ref }}'
+              --manifest "$RUNNER_TEMP/manifest.jsonl"
+              --source lakefs-s3
+              --target-root "$target_root"
+              --workers 32
+            )
+          elif [ '${{ inputs.mode }}' = 'materialize' ]; then
+            args=(materialize
+              --dataset '${{ inputs.dataset }}'
+              --repository '${{ inputs.repository }}'
+              --ref '${{ inputs.ref }}'
+              --lakefs-tag '${{ inputs.ref }}'
+              --manifest '${{ inputs.manifest_path }}'
+              --source lakefs-s3
+              --target-root "$target_root"
+              --workers 32
+            )
           else
             if [ '${{ inputs.mode }}' = 'cpfs-ingest' ]; then
               manifest="$RUNNER_TEMP/manifest.jsonl"
             else
               manifest='${{ inputs.manifest_path }}'
             fi
-            dataset-sink certify \
-              --prepared-dir '${{ inputs.prepared_dir }}' \
-              --target-root "$target_root" \
-              --dataset '${{ inputs.dataset }}' \
-              --repository '${{ inputs.repository }}' \
-              --source-reference '${{ inputs.ref }}' \
-              --commit "$RESOLVED_COMMIT" \
-              --lakefs-tag '${{ inputs.ref }}' \
-              --manifest "$manifest" \
-              $snapshot_arg | tee "$RUNNER_TEMP/release.json"
+            args=(certify
+              --prepared-dir '${{ inputs.prepared_dir }}'
+              --target-root "$target_root"
+              --dataset '${{ inputs.dataset }}'
+              --repository '${{ inputs.repository }}'
+              --source-reference '${{ inputs.ref }}'
+              --commit "$RESOLVED_COMMIT"
+              --lakefs-tag '${{ inputs.ref }}'
+              --manifest "$manifest"
+            )
           fi
+
+          [ -n "$snapshot" ] && args+=(--paimon-snapshot-id "$snapshot")
+
+          dataset-sink "${args[@]}" | tee "$RUNNER_TEMP/release.json"
 
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os

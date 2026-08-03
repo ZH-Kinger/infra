@@ -480,8 +480,12 @@ def _oss_credentials(args: argparse.Namespace) -> dict:
 
 def _scan_oss(args: argparse.Namespace) -> dict:
     registered = None
-    if args.registry and args.source == "oss":
+    if args.registry:
         # 只读扫描：位置注册过即可，不要求可写。
+        #
+        # 刻意**不**限定 args.source == "oss"。之前那样写，等于「用 --source local
+        # 就自动跳过校验」——一道会自己关掉的检查，看起来是在强制，实际不是，
+        # 而且离线测试根本覆盖不到它。和 RAM 命名空间那个坑同一类问题。
         registered = load_registry(args.registry).resolve(args.bucket or "", args.prefix)
 
     if args.source == "local":
@@ -531,9 +535,10 @@ def _scan_oss(args: argparse.Namespace) -> dict:
 def _archive(args: argparse.Namespace) -> dict:
     manifest = Manifest.load(args.manifest)
 
-    if args.registry and args.target == "oss":
-        # 归档是写操作，所以要求 mode = archive；写进只读数据源会让已发布的
-        # Commit 悬空，而那种损坏当时不报错。
+    if args.registry:
+        # 归档是写操作，所以要求 mode = archive 或 workspace；写进只读数据源会让
+        # 已发布的 Commit 悬空，而那种损坏当时不报错。
+        # 同样不限定 target == "oss"，理由见 _scan_oss。
         load_registry(args.registry).assert_writable(args.bucket or "", args.prefix)
 
     if args.via == "dataflow":

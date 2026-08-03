@@ -100,26 +100,33 @@ state 锁，还可能让 state 和实际资源不一致。宁可排队。
 
 ## 3. dataset-release.yml —— 每步换身份
 
-手动触发（数据集发布是有意为之的动作，不该由代码推送触发）。三种模式：
+手动触发（数据集发布是有意为之的动作，不该由代码推送触发）。四种模式：
 
 | mode | 适用场景 | 前置条件 |
 |---|---|---|
 | `cpfs-ingest` | CPFS 上处理完的**新数据**，还没有 Commit | staging 目录已按 release 布局组织好 |
+| `oss-ingest` | **数据本来就在对象存储上**（存量数据的主路径） | 该前缀已在数据源注册表里，且 mode 不是 workspace |
 | `certify` | CPFS staging 已就绪，且 Commit **已存在** | 有 Commit 和 manifest |
 | `materialize` | 从 lakeFS 拷贝到 CPFS | 有 Commit/Tag 和 manifest |
 
 ```
 preflight        ← 校验配置齐全、按模式校验必填参数、拦截 latest/main 这类可变 ref
+  │                oss-ingest 还会校验数据源已注册且能作为 Commit 来源
   │
   ├─ [仅 cpfs-ingest]
   │  ingest-archive   ← DatasetMaterializerRole，CPFS runner
   │  │                  scan（无云权限）→ archive 到对象存储（幂等可续传）
+  │  │
+  ├─ [仅 oss-ingest]
+  │  oss-scan         ← DatasetMaterializerRole，CPFS runner（走 OSS 内网端点）
+  │  │                  scan-oss：列举存量前缀 + 算 SHA-256。**没有 archive**
   │  ↓
   │  ingest-commit    ← **无任何阿里云身份**，只有 lakeFS 凭证，托管 runner
   │                     lakeFS 零拷贝 import → Commit（+ Tag）
+  │                     两条 ingest 路径共用，只有「import 的源在哪」不同
   ↓
 publish          ← DatasetMaterializerRole，CPFS runner
-                   三种模式在这里汇合：certify 或 materialize
+                   四种模式在这里汇合：certify 或 materialize
   ↓ verify --deep
 build-request    ← 无云权限，产出可人工审阅的 JSON
   ↓
@@ -155,9 +162,9 @@ ingest-commit:
 `scan` 纯本地计算，不需要云权限。放在假设角色之前，"staging 不干净"
 这类错误就不会白白消耗一次 STS 凭证，也让最常见的失败最早发生。
 
-### 三种模式怎么汇合
+### 四种模式怎么汇合
 
-`publish` 用 `needs: [preflight, ingest-commit]`。非 `cpfs-ingest` 模式下
+`publish` 用 `needs: [preflight, ingest-commit]`。`certify` / `materialize` 模式下
 `ingest-commit` 是 skipped，而 GitHub 默认会连带跳过下游 job，所以要显式接受：
 
 ```yaml
@@ -167,12 +174,37 @@ if: >-
   && (needs.ingest-commit.result == 'success' || needs.ingest-commit.result == 'skipped') }}
 ```
 
-Commit 的来源也按模式解析：
+`ingest-commit` 自己也有同样的问题，而且更绕：它 `needs` 两条 ingest 前置，
+但每次只有一条真正跑，另一条必然 skipped。所以它的 `if` 要同时接受两者的
+skipped，否则 `oss-ingest` 会因为 `ingest-archive` 被跳过而连带不跑。
+
+Commit 的来源也按模式解析——两条 ingest 路径都来自 import：
 
 ```yaml
-RESOLVED_COMMIT: ${{ inputs.mode == 'cpfs-ingest'
+RESOLVED_COMMIT: >-
+  ${{ (inputs.mode == 'cpfs-ingest' || inputs.mode == 'oss-ingest')
   && needs.ingest-commit.outputs.commit_id || inputs.ref }}
 ```
+
+### oss-ingest 为什么没有 archive 步骤
+
+那正是它的价值。字节已经在持久位置上，而 lakeFS import 是零拷贝的——
+**整条路径不把任何字节搬到新位置**。`cpfs-ingest` 必须先归档，只是因为
+CPFS staging 不是持久位置。
+
+但它仍要把每个对象**读**一遍算 SHA-256（对象存储不提供）。这是全链路唯一的
+一次全量读，所以放在 VPC 内的 runner 上走内网端点。`--no-digest` 能跳过，
+但 manifest 随发布固化，事后补不上——那个 release 永久失去深度校验能力。
+
+### oss-ingest 为什么两次校验注册表
+
+`preflight` 查一次，`ingest-commit` 里 `commit --registry` 再查一次。
+两者之间隔着一次 scan（可能跑很久），注册表有可能在中间被改。
+
+`cpfs-ingest` 的 `commit` **刻意不传 `--registry`**：它的来源是上一步刚写进去的
+staging 前缀（如 `staging/batch-...`），而注册表登记的是归档前缀（如 `releases/`）。
+传了会因为「staging 没注册」误报失败。那个位置的内容稳定性由「刚归档完、
+只有本流水线写过」保证，不需要注册表判断。
 
 ### preflight 存在的理由
 

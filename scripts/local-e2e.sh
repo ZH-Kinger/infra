@@ -5,6 +5,7 @@
 #   A. CPFS 上处理完的新数据 → scan → archive → certify 零拷贝发布
 #   B. 数据已在 lakeFS         → materialize
 #   C. 存量数据已在对象存储     → scan-oss → (import) → materialize，全程不搬字节
+#      并覆盖 --registry：未注册前缀被拒、工作区不能当 Commit 来源
 # 然后共用后半段：深度校验 → 训练门禁 → 生成 PAI 请求。
 #
 # 唯一没覆盖的是 `dataset-sink commit`（lakeFS 零拷贝 import），它需要
@@ -135,6 +136,72 @@ for entry in entries:
     assert len(entry["sha256"]) == 64, entry
 print(f"{len(entries)} 条 entry 的两个坐标都正确")
 PY
+
+printf '\n===== C2b. --registry：oss-ingest 流水线依赖的那道校验 =====\n'
+# dataset-release.yml 的 oss-ingest 模式给 scan-oss 和 commit 都传了 --registry。
+# 单元测试覆盖了 Registry 本身，这里要验的是**CLI 的接线**：flag 真的接上了、
+# 真的会拒绝、拒绝的理由是对的。接错线的表现是「校验静默不生效」。
+#
+# 注意用了真实形状的桶名：注册表按 (bucket, prefix) 匹配，而 --source local
+# 只影响从哪里读字节，不影响这批字节「声明」在哪个桶上。
+cat > "$work_dir/registry.json" <<'JSON'
+{
+  "data_sources": [
+    {"name": "legacy", "bucket": "e2e-legacy", "prefix": "legacy/robotics", "mode": "readonly"},
+    {"name": "scratch", "bucket": "e2e-scratch", "prefix": "scratch", "mode": "workspace"}
+  ]
+}
+JSON
+
+# 已注册的只读前缀：放行。
+sink scan-oss \
+  --source local --local-root "$work_dir/oss" --bucket e2e-legacy \
+  --prefix legacy/robotics \
+  --destination datasets/robotics \
+  --registry "$work_dir/registry.json" \
+  --output "$work_dir/manifest-reg.jsonl" >/dev/null
+printf 'scan-oss --registry 放行了已注册的 readonly 前缀\n'
+
+# 没注册的前缀：必须拒绝，且报错要指出「没注册」而不是别的。
+mkdir -p "$work_dir/oss/unregistered/x"
+printf data > "$work_dir/oss/unregistered/x/a.bin"
+unreg_err=$(sink scan-oss \
+  --source local --local-root "$work_dir/oss" --bucket e2e-legacy \
+  --prefix unregistered/x \
+  --destination datasets/nope \
+  --registry "$work_dir/registry.json" \
+  --output "$work_dir/m.jsonl" 2>&1 >/dev/null || true)
+case "$unreg_err" in
+  *"不在数据源注册表里"*) printf 'scan-oss 正确拒绝了未注册前缀\n' ;;
+  *) printf 'FAIL: 未注册前缀的报错不对: %s\n' "$unreg_err" >&2; exit 1 ;;
+esac
+
+# 工作区：可以扫描（它是合法的可写位置），但**不能当 Commit 来源**。
+# 这是 workspace mode 存在的全部意义，也是最容易接错的一处。
+mkdir -p "$work_dir/oss/scratch/exp1"
+printf data > "$work_dir/oss/scratch/exp1/a.bin"
+sink scan-oss \
+  --source local --local-root "$work_dir/oss" --bucket e2e-scratch \
+  --prefix scratch/exp1 \
+  --destination datasets/scratch \
+  --registry "$work_dir/registry.json" \
+  --output "$work_dir/manifest-scratch.jsonl" >/dev/null
+printf 'scan-oss 允许扫描工作区（可写位置也能扫）\n'
+
+# commit 的桶名来自 --object-store-uri，所以这里用 oss:// 形状。
+# 注册表校验发生在联系 lakeFS 之前，所以没有凭证也能验到这一步。
+ws_err=$(sink commit \
+  --repository robotics-data \
+  --object-store-uri oss://e2e-scratch \
+  --prefix scratch/exp1 \
+  --destination datasets/scratch \
+  --manifest "$work_dir/manifest-scratch.jsonl" \
+  --registry "$work_dir/registry.json" 2>&1 >/dev/null || true)
+case "$ws_err" in
+  *"不能作为 lakeFS Commit 的来源"*)
+    printf 'commit --registry 正确拒绝了工作区作为 Commit 来源\n' ;;
+  *) printf 'FAIL: 工作区应被拒绝，实际报错: %s\n' "$ws_err" >&2; exit 1 ;;
+esac
 
 printf '\n===== C3. commit 必须拦住填错的 --destination =====\n'
 # 这里不能只断言「命令失败」：没有 lakeFS 凭证时 commit 本来就会失败，
