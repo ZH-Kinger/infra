@@ -41,6 +41,7 @@ from .reclaim import (
     scan_releases,
     sweep_trash,
 )
+from .registry import load_registry
 from .sources import LakeFSS3SourceReader, LocalSourceReader
 from .training_guard import validate_training_dataset
 
@@ -70,6 +71,16 @@ def build_parser() -> argparse.ArgumentParser:
     materialize.add_argument("--lakefs-access-key-id")
     materialize.add_argument("--lakefs-secret-access-key")
     materialize.add_argument("--lakefs-region", default="us-east-1")
+    materialize.add_argument(
+        "--commit-prefix",
+        default="",
+        help=(
+            "manifest 的 source_key 与 Commit 内路径之间的差值，通常就是 "
+            "commit --destination 填的值。scan 产出的 manifest 里 source_key 是 "
+            "staging 内相对路径，不含它，必须在这里补上，否则读 lakeFS 会全量 404；"
+            "scan-oss 产出的已经含了，留空即可"
+        ),
+    )
     materialize.add_argument("--no-verify-tls", action="store_true")
     materialize.add_argument(
         "--via",
@@ -128,6 +139,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scan_oss.add_argument("--workers", type=int, default=8)
     scan_oss.add_argument("--no-verify-tls", action="store_true")
+    scan_oss.add_argument(
+        "--registry",
+        type=Path,
+        help=(
+            "数据源注册表（deploy/data-sources.json）。给了就校验目标位置已注册，"
+            "在本地快速失败而不是等 RAM 报 AccessDenied"
+        ),
+    )
 
     archive = commands.add_parser(
         "archive",
@@ -145,6 +164,14 @@ def build_parser() -> argparse.ArgumentParser:
     archive.add_argument("--security-token", help="使用 STS 临时凭证时提供")
     archive.add_argument("--workers", type=int, default=8)
     archive.add_argument("--no-verify-tls", action="store_true")
+    archive.add_argument(
+        "--registry",
+        type=Path,
+        help=(
+            "数据源注册表（deploy/data-sources.json）。给了就校验目标位置已注册，"
+            "在本地快速失败而不是等 RAM 报 AccessDenied"
+        ),
+    )
     archive.add_argument(
         "--via",
         choices=("client", "dataflow"),
@@ -442,6 +469,11 @@ def _oss_credentials(args: argparse.Namespace) -> dict:
 
 
 def _scan_oss(args: argparse.Namespace) -> dict:
+    registered = None
+    if args.registry and args.source == "oss":
+        # 只读扫描：位置注册过即可，不要求可写。
+        registered = load_registry(args.registry).resolve(args.bucket or "", args.prefix)
+
     if args.source == "local":
         if args.local_root is None:
             raise ValueError("--source local 需要 --local-root")
@@ -472,6 +504,7 @@ def _scan_oss(args: argparse.Namespace) -> dict:
             "manifest": str(args.output),
             "manifest_sha256": manifest.sha256,
             "prefix": args.prefix,
+            "data_source": registered.name if registered else None,
             "destination": validate_destination(args.destination),
             "integrity": "SHA256" if result.digested else "SIZE_ONLY",
         }
@@ -487,6 +520,11 @@ def _scan_oss(args: argparse.Namespace) -> dict:
 
 def _archive(args: argparse.Namespace) -> dict:
     manifest = Manifest.load(args.manifest)
+
+    if args.registry and args.target == "oss":
+        # 归档是写操作，所以要求 mode = archive；写进只读数据源会让已发布的
+        # Commit 悬空，而那种损坏当时不报错。
+        load_registry(args.registry).assert_writable(args.bucket or "", args.prefix)
 
     if args.via == "dataflow":
         return _archive_via_dataflow(args, manifest)
@@ -708,6 +746,7 @@ def _materialize(args: argparse.Namespace) -> dict:
             secret_access_key=secret_key,
             region=args.lakefs_region,
             verify_tls=not args.no_verify_tls,
+            path_prefix=args.commit_prefix,
         )
 
     result = Materializer(args.target_root, source, workers=args.workers).materialize(

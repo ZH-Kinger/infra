@@ -94,4 +94,30 @@ for name in sorted(written):
     print(f"  wrote {name}")
 PY
 
-echo "==> 完成。deploy/ram/ 现在与 Terraform 一致。"
+# 数据源注册表与 RAM 策略同源于 var.data_sources，一起渲染，避免两边漂移：
+# 「CLI 说没注册」和「RAM 拒绝访问」必须永远是同一个判断。
+echo "==> 渲染数据源注册表"
+ds_raw=$(cd "$module_dir" && printf 'local.data_sources_document\n' \
+  | terraform console -var-file="$var_file")
+ds_out=$(mktemp "${TMPDIR:-/tmp}/ds-console.XXXXXX")
+printf '%s' "$ds_raw" > "$ds_out"
+
+python3 - "$project_dir/deploy/data-sources.json" "$ds_out" <<'PYEOF'
+import json
+import pathlib
+import sys
+
+target = pathlib.Path(sys.argv[1])
+raw = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").strip()
+# terraform console 把 jsonencode 的结果作为「带引号的字符串」输出，要解两层。
+document = json.loads(json.loads(raw)) if raw.startswith('"') else json.loads(raw)
+target.parent.mkdir(parents=True, exist_ok=True)
+target.write_text(
+    json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+print("  wrote " + target.name)
+PYEOF
+rm -f "$ds_out"
+
+echo "==> 完成。deploy/ram/ 与 deploy/data-sources.json 现在与 Terraform 一致。"

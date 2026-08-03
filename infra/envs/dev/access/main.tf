@@ -43,6 +43,7 @@ module "roles" {
   lakefs_backend_prefix = var.lakefs_backend_prefix
   dataset_bucket        = var.dataset_bucket
 
+  data_sources           = var.data_sources
   imported_data_prefixes = var.imported_data_prefixes
 
   developer_group_name = var.developer_group_name

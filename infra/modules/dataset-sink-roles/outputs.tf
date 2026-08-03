@@ -46,3 +46,8 @@ output "assume_role_policies" {
     training_runtime = local.training_runtime_trust
   }
 }
+
+output "data_sources_document" {
+  description = "数据源注册表 JSON，渲染进 deploy/data-sources.json 供 CLI 本地校验"
+  value       = local.data_sources_document
+}

@@ -309,6 +309,58 @@ managed_group_arns  = ["acs:ram:*:<账号>:group/pai-*", ...]
 本仓库预留了 `tags` 但**没有实现资源组**——需要的话再加，改动集中在
 `infra/bootstrap` 的 ARN 构造和各资源的 `resource_group_id` 参数。
 
+## 6.0 管理面与用户面
+
+谁能决定「什么可以当数据源」，和谁能使用数据源，是两件不同的事。
+
+| | 管理面 | 用户面 |
+|---|---|---|
+| 谁 | 管理员 + 安全团队 | 算法 / 数据工程 |
+| 改什么 | 数据源注册表、Workspace 成员、RAM 策略 | 只能从注册表里**选** |
+| 走哪条路 | `access` 层 PR + CODEOWNERS + Environment 审批 | CLI / 发布流水线 |
+| 强制点 | Terraform + 桶策略 | CLI 本地校验 + RAM |
+
+### 数据源注册表
+
+管理员在 `infra/envs/<env>/access/terraform.tfvars` 里声明：
+
+```hcl
+data_sources = [
+  { name = "robotics-legacy", bucket = "legacy-data", prefix = "legacy/robotics", mode = "readonly" },
+  { name = "sink-archive",    bucket = "ds-archive",  prefix = "releases",        mode = "archive"  },
+]
+```
+
+**一份声明同时生成三样东西**，所以它们不会漂移：
+
+| 产物 | 作用 |
+|---|---|
+| `ReadRegisteredDataSources` Allow | 沉降角色**只能读注册过的前缀**，不再是整桶 |
+| `DenyMutatingReadonlyDataSources` Deny | `readonly` 前缀禁止写删（存量数据被 import 后改了会让 Commit 悬空） |
+| `deploy/data-sources.json` | 供 CLI 本地校验 |
+
+### 为什么要两道强制
+
+```
+CLI 本地校验（--registry）   快速失败、报错清楚，但绕得过去
+RAM 策略                    绕不过去，但报错是难懂的 AccessDenied
+```
+
+只有前者是好用不安全，只有后者是安全不好用。两道都要，而且因为同源于一份声明，
+**「CLI 说没注册」和「RAM 拒绝访问」永远是同一个判断**。
+
+用户拿到的报错长这样，而不是 `AccessDenied`：
+
+```
+legacy-data/other 不在数据源注册表里。
+已注册的位置：ds-archive/releases, legacy-data/legacy/robotics
+数据源由管理员在 infra/envs/<env>/access 的 data_sources 里声明，
+改动走 PR + 安全团队评审。需要新增请找管理员，不要绕过——
+RAM 策略同样只放行注册过的前缀，绕过去也读不到。
+```
+
+---
+
 ## 6.1 被 import 引用的存量前缀
 
 存量数据大多本来就在 OSS 上。这类数据不用迁移：`scan-oss` 列举出 manifest，

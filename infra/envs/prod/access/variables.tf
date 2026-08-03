@@ -105,3 +105,22 @@ variable "imported_data_prefixes" {
   }))
   default = []
 }
+
+variable "data_sources" {
+  description = <<-EOT
+    数据源注册表：管理员声明哪些对象存储位置可以作为数据源，用户只能从中选。
+
+    这是管理面与用户面的分界。一份声明同时决定：沉降角色能读哪些前缀、
+    哪些前缀禁止写删、以及导出给 CLI 本地校验的 deploy/data-sources.json。
+    改它要走 access 层的 PR + 安全团队评审——因为它就是在改 RAM 策略。
+
+    mode: readonly（只读，存量数据）/ archive（可写，归档前缀）。
+  EOT
+  type = list(object({
+    name   = string
+    bucket = string
+    prefix = optional(string, "")
+    mode   = optional(string, "readonly")
+  }))
+  default = []
+}

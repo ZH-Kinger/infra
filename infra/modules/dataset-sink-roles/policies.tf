@@ -24,6 +24,58 @@ locals {
   release_object_arn = "acs:oss:*:${var.account_id}:${var.dataset_bucket}/${var.dataset_release_prefix}/*"
   output_object_arn  = "acs:oss:*:${var.account_id}:${var.dataset_bucket}/${var.dataset_output_prefix}/*"
 
+  # ---------------------------------------------------------------------------
+  # 数据源注册表 → ARN
+  #
+  # 沉降角色只能读注册过的前缀。这比「给整个桶的读权限」窄得多，代价是新增
+  # 数据源要改这里——但那正是我们想要的：谁能决定「什么算数据源」应该有一个
+  # 明确的、需要评审的地方。
+  # ---------------------------------------------------------------------------
+  registered_object_arns = [
+    for s in var.data_sources :
+    s.prefix == "" ? "acs:oss:*:${var.account_id}:${s.bucket}/*" : "acs:oss:*:${var.account_id}:${s.bucket}/${s.prefix}/*"
+  ]
+  registered_bucket_arns = distinct([
+    for s in var.data_sources : "acs:oss:*:${var.account_id}:${s.bucket}"
+  ])
+  # readonly 的数据源：禁止一切写删。archive 的不在此列，因为要往里归档。
+  readonly_object_arns = [
+    for s in var.data_sources : (
+      s.prefix == "" ? "acs:oss:*:${var.account_id}:${s.bucket}/*" : "acs:oss:*:${var.account_id}:${s.bucket}/${s.prefix}/*"
+    ) if s.mode == "readonly"
+  ]
+
+  read_registered_statements = length(var.data_sources) == 0 ? [] : [
+    {
+      Sid      = "ReadRegisteredDataSources"
+      Effect   = "Allow"
+      Action   = ["oss:GetObject", "oss:GetObjectMeta", "oss:HeadObject"]
+      Resource = local.registered_object_arns
+    },
+    {
+      Sid      = "ListRegisteredDataSourceBuckets"
+      Effect   = "Allow"
+      Action   = ["oss:ListObjects", "oss:GetBucketInfo"]
+      Resource = local.registered_bucket_arns
+    },
+  ]
+
+  deny_readonly_source_statements = length(local.readonly_object_arns) == 0 ? [] : [
+    {
+      Sid    = "DenyMutatingReadonlyDataSources"
+      Effect = "Deny"
+      Action = [
+        "oss:PutObject",
+        "oss:DeleteObject",
+        "oss:DeleteObjects",
+        "oss:AbortMultipartUpload",
+        "oss:PutObjectTagging",
+        "oss:RestoreObject",
+      ]
+      Resource = local.readonly_object_arns
+    },
+  ]
+
   # 存量数据前缀：被 lakeFS 零拷贝 import 引用之后即为只读区。
   # 桶 ARN 单独列一份，ListObjects 作用在桶上而不是对象上。
   imported_object_arns = [
@@ -129,7 +181,9 @@ locals {
         Resource = ["*"]
       },
       ],
+      local.read_registered_statements,
       local.read_imported_statements,
+      local.deny_readonly_source_statements,
     local.deny_imported_mutation_statements)
   })
 
@@ -182,6 +236,7 @@ locals {
         Resource = ["*"]
       },
       ],
+      local.deny_readonly_source_statements,
     local.deny_imported_mutation_statements)
   })
 
@@ -236,6 +291,7 @@ locals {
         ]
       },
       ],
+      local.deny_readonly_source_statements,
     local.deny_imported_mutation_statements)
   })
 
@@ -299,6 +355,7 @@ locals {
         Resource = ["*"]
       },
       ],
+      local.deny_readonly_source_statements,
     local.deny_imported_mutation_statements)
   })
 
@@ -364,6 +421,7 @@ locals {
         Resource = ["*"]
       },
       ],
+      local.deny_readonly_source_statements,
     local.deny_imported_mutation_statements)
   })
 
@@ -392,6 +450,19 @@ locals {
         ]
         Resource = ["*"]
       },
+    ]
+  })
+
+  # 导出给 CLI 做本地校验。和上面的 RAM 策略同源于 var.data_sources，
+  # 所以「CLI 说没注册」和「RAM 拒绝访问」永远是同一个判断，不会漂移。
+  data_sources_document = jsonencode({
+    data_sources = [
+      for s in var.data_sources : {
+        name   = s.name
+        bucket = s.bucket
+        prefix = s.prefix
+        mode   = s.mode
+      }
     ]
   })
 

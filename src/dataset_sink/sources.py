@@ -29,7 +29,23 @@ class LocalSourceReader:
 
 
 class LakeFSS3SourceReader:
-    """Read immutable objects through the lakeFS S3 Gateway."""
+    """Read immutable objects through the lakeFS S3 Gateway.
+
+    `path_prefix` 是 manifest 的 `source_key` 与 **Commit 内实际路径** 之间的差值。
+
+    为什么需要它：`source_key` 的含义是「在来源自己的坐标系里怎么找到这个文件」，
+    而不同命令的来源不同——
+
+        archive       来源是 CPFS staging 目录  → source_key 是 staging 内相对路径
+        materialize   来源是 lakeFS Commit      → 需要 Commit 内路径
+
+    `commit --destination D` 会把对象放到 Commit 的 `D/` 下面，所以同一份 manifest
+    拿去 materialize 时，键要变成 `<commit>/D/<source_key>`。少了 D 就是全量 404，
+    而且要等到逐个 get_object 才暴露——那时 Commit 和 Tag 都已经建好了。
+
+    `scan-oss` 产出的 manifest 已经把 D 写进 source_key 了，所以那条路径
+    `path_prefix` 留空；`scan` 产出的没有，必须显式传。
+    """
 
     def __init__(
         self,
@@ -39,6 +55,7 @@ class LakeFSS3SourceReader:
         secret_access_key: str,
         region: str = "us-east-1",
         verify_tls: bool = True,
+        path_prefix: str = "",
     ) -> None:
         try:
             import boto3
@@ -49,6 +66,7 @@ class LakeFSS3SourceReader:
             ) from exc
 
         self.repository = repository
+        self.path_prefix = path_prefix.strip("/")
         self.client = boto3.client(
             "s3",
             endpoint_url=endpoint_url,
@@ -61,7 +79,11 @@ class LakeFSS3SourceReader:
 
     @contextmanager
     def open(self, commit_id: str, entry: ManifestEntry) -> Iterator[BinaryIO]:
-        key = f"{commit_id}/{entry.source_key}"
+        parts = [commit_id]
+        if self.path_prefix:
+            parts.append(self.path_prefix)
+        parts.append(entry.source_key)
+        key = "/".join(parts)
         response = self.client.get_object(Bucket=self.repository, Key=key)
         with closing(response["Body"]) as stream:
             yield stream

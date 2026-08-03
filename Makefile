@@ -53,5 +53,5 @@ hooks: ## 对全仓库跑一遍 pre-commit
 discover: ## 只读探测阿里云资源 ID，输出 import 与 tfvars 草稿
 	./scripts/discover-aliyun-ids.sh
 
-render-ram: ## 从 Terraform 重新渲染 deploy/ram/*.json
+render-ram: ## 从 Terraform 重新渲染 deploy/ram/*.json 与 deploy/data-sources.json
 	./scripts/render-ram-policies.sh

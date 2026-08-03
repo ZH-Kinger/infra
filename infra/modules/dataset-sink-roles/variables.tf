@@ -81,6 +81,41 @@ variable "dataset_release_prefix" {
   default     = "datasets"
 }
 
+variable "data_sources" {
+  description = <<-EOT
+    数据源注册表：管理员声明哪些对象存储位置可以作为数据源，用户只能从中选。
+
+    这一份声明同时决定三件事，所以它是管理面和用户面的分界：
+      1. 沉降角色能读哪些前缀（不再是整桶）
+      2. 哪些前缀禁止写删（readonly——通常是已被 lakeFS 零拷贝 import 引用的
+         存量数据，改了会让 Commit 悬空且当时不报错）
+      3. 导出 deploy/data-sources.json 供 CLI 本地校验，让用户拿到
+         「这个前缀没注册」而不是难懂的 AccessDenied
+
+    mode:
+      readonly  只读，禁止写删。存量数据前缀属于这类。
+      archive   dataset-sink 写入的归档前缀。这类桶还需要打 cpfs-dataflow 标签
+                并开启版本控制，否则 CPFS 数据流动的沉淀用不了——见 platform 层。
+  EOT
+  type = list(object({
+    name   = string
+    bucket = string
+    prefix = optional(string, "")
+    mode   = optional(string, "readonly")
+  }))
+  default = []
+
+  validation {
+    condition     = alltrue([for s in var.data_sources : contains(["readonly", "archive"], s.mode)])
+    error_message = "data_sources 的 mode 只能是 readonly 或 archive。"
+  }
+
+  validation {
+    condition     = length(distinct([for s in var.data_sources : s.name])) == length(var.data_sources)
+    error_message = "data_sources 的 name 必须唯一。"
+  }
+}
+
 variable "imported_data_prefixes" {
   description = <<-EOT
     已被 lakeFS 零拷贝 import 引用的存量数据前缀。

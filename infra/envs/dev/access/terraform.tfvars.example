@@ -56,3 +56,9 @@ pai_members = {
 # imported_data_prefixes = [
 #   { bucket = "legacy-data", prefix = "legacy/robotics" },
 # ]
+
+# 数据源注册表。用户的 scan-oss / archive 只能指向这里声明过的位置。
+# data_sources = [
+#   { name = "robotics-legacy", bucket = "legacy-data", prefix = "legacy/robotics", mode = "readonly" },
+#   { name = "sink-archive",    bucket = "ds-archive",  prefix = "releases",        mode = "archive"  },
+# ]

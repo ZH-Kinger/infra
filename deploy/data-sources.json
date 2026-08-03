@@ -1,0 +1,16 @@
+{
+  "data_sources": [
+    {
+      "bucket": "LEGACY_BUCKET",
+      "mode": "readonly",
+      "name": "legacy-readonly",
+      "prefix": "LEGACY_PREFIX"
+    },
+    {
+      "bucket": "ARCHIVE_BUCKET",
+      "mode": "archive",
+      "name": "sink-archive",
+      "prefix": "releases"
+    }
+  ]
+}

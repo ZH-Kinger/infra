@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from dataset_sink.errors import DatasetSinkError
+from dataset_sink.registry import build_registry, load_registry
+
+ENTRIES = [
+    {
+        "name": "robotics-legacy",
+        "bucket": "legacy-data",
+        "prefix": "legacy/robotics",
+        "mode": "readonly",
+    },
+    {"name": "robotics-archive", "bucket": "ds-archive", "prefix": "releases", "mode": "archive"},
+    {"name": "whole-bucket", "bucket": "open-bucket", "prefix": "", "mode": "readonly"},
+]
+
+
+class ResolveTests(unittest.TestCase):
+    def setUp(self):
+        self.reg = build_registry(ENTRIES)
+
+    def test_resolves_exact_and_nested_prefixes(self):
+        self.assertEqual(self.reg.resolve("legacy-data", "legacy/robotics").name, "robotics-legacy")
+        self.assertEqual(
+            self.reg.resolve("legacy-data", "legacy/robotics/2026/01").name, "robotics-legacy"
+        )
+
+    def test_sibling_prefix_is_not_covered(self):
+        # legacy/robotics 不覆盖 legacy/robotics-old——只比字符串前缀会放行相邻目录
+        with self.assertRaises(DatasetSinkError):
+            self.reg.resolve("legacy-data", "legacy/robotics-old")
+
+    def test_different_bucket_is_not_covered(self):
+        with self.assertRaises(DatasetSinkError):
+            self.reg.resolve("other-bucket", "legacy/robotics")
+
+    def test_empty_prefix_covers_whole_bucket(self):
+        self.assertEqual(self.reg.resolve("open-bucket", "anything/at/all").name, "whole-bucket")
+
+    def test_unregistered_error_lists_known_locations_and_who_to_ask(self):
+        with self.assertRaises(DatasetSinkError) as ctx:
+            self.reg.resolve("nope", "x")
+        message = str(ctx.exception)
+        self.assertIn("不在数据源注册表里", message)
+        self.assertIn("legacy-data/legacy/robotics", message)  # 告诉用户有哪些可选
+        self.assertIn("管理员", message)  # 告诉用户找谁
+
+    def test_longest_match_wins(self):
+        reg = build_registry(
+            [
+                {"name": "broad", "bucket": "b", "prefix": "data", "mode": "readonly"},
+                {"name": "narrow", "bucket": "b", "prefix": "data/robotics", "mode": "archive"},
+            ]
+        )
+        self.assertEqual(reg.resolve("b", "data/robotics/x").name, "narrow")
+
+
+class WritabilityTests(unittest.TestCase):
+    def setUp(self):
+        self.reg = build_registry(ENTRIES)
+
+    def test_archive_mode_is_writable(self):
+        self.assertEqual(
+            self.reg.assert_writable("ds-archive", "releases/robotics").mode, "archive"
+        )
+
+    def test_readonly_mode_refuses_writes(self):
+        # 写进只读数据源会让已发布的 Commit 悬空，而那种损坏当时不报错
+        with self.assertRaises(DatasetSinkError) as ctx:
+            self.reg.assert_writable("legacy-data", "legacy/robotics")
+        self.assertIn("不允许写入", str(ctx.exception))
+        self.assertIn("悬空", str(ctx.exception))
+
+
+class ValidationTests(unittest.TestCase):
+    def test_rejects_unknown_mode(self):
+        with self.assertRaises(DatasetSinkError):
+            build_registry([{"name": "a", "bucket": "b", "mode": "whatever"}])
+
+    def test_rejects_duplicate_names(self):
+        with self.assertRaises(DatasetSinkError):
+            build_registry([{"name": "a", "bucket": "b1"}, {"name": "a", "bucket": "b2"}])
+
+    def test_rejects_missing_bucket(self):
+        with self.assertRaises(DatasetSinkError):
+            build_registry([{"name": "a"}])
+
+    def test_defaults_to_readonly(self):
+        self.assertEqual(build_registry([{"name": "a", "bucket": "b"}]).sources[0].mode, "readonly")
+
+
+class LoadTests(unittest.TestCase):
+    def test_loads_from_terraform_output_shape(self):
+        p = Path(tempfile.mkdtemp()) / "data-sources.json"
+        p.write_text(json.dumps({"data_sources": ENTRIES}), encoding="utf-8")
+        self.assertEqual(len(load_registry(p).sources), 3)
+
+    def test_missing_file_says_how_to_generate_it(self):
+        with self.assertRaises(DatasetSinkError) as ctx:
+            load_registry(Path("/nonexistent/data-sources.json"))
+        self.assertIn("Terraform", str(ctx.exception))
+
+    def test_malformed_json_is_reported_clearly(self):
+        p = Path(tempfile.mkdtemp()) / "bad.json"
+        p.write_text("{ not json", encoding="utf-8")
+        with self.assertRaises(DatasetSinkError) as ctx:
+            load_registry(p)
+        self.assertIn("不是合法 JSON", str(ctx.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

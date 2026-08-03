@@ -22,3 +22,9 @@ deny_destructive      = true
 imported_data_prefixes = [
   { bucket = "LEGACY_BUCKET", prefix = "LEGACY_PREFIX" },
 ]
+
+# 占位数据源，让 deploy/data-sources.json 和渲染出的策略里能看到这组语句的形状。
+data_sources = [
+  { name = "legacy-readonly", bucket = "LEGACY_BUCKET", prefix = "LEGACY_PREFIX", mode = "readonly" },
+  { name = "sink-archive", bucket = "ARCHIVE_BUCKET", prefix = "releases", mode = "archive" },
+]

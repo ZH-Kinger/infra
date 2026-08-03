@@ -37,3 +37,8 @@ output "pai_admin_members" {
   description = "持有 WorkspaceAdmin/Owner 的成员，生产应保持最多 1 人"
   value       = module.pai_access.admin_members
 }
+
+output "data_sources_document" {
+  description = "数据源注册表 JSON，与 RAM 策略同源"
+  value       = module.roles.data_sources_document
+}

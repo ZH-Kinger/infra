@@ -70,6 +70,31 @@
       ],
       "Effect": "Allow",
       "Resource": [
+        "acs:oss:*:ACCOUNT_ID:LEGACY_BUCKET/LEGACY_PREFIX/*",
+        "acs:oss:*:ACCOUNT_ID:ARCHIVE_BUCKET/releases/*"
+      ],
+      "Sid": "ReadRegisteredDataSources"
+    },
+    {
+      "Action": [
+        "oss:ListObjects",
+        "oss:GetBucketInfo"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:LEGACY_BUCKET",
+        "acs:oss:*:ACCOUNT_ID:ARCHIVE_BUCKET"
+      ],
+      "Sid": "ListRegisteredDataSourceBuckets"
+    },
+    {
+      "Action": [
+        "oss:GetObject",
+        "oss:GetObjectMeta",
+        "oss:HeadObject"
+      ],
+      "Effect": "Allow",
+      "Resource": [
         "acs:oss:*:ACCOUNT_ID:LEGACY_BUCKET/LEGACY_PREFIX/*"
       ],
       "Sid": "ReadImportedLegacyObjects"
@@ -84,6 +109,21 @@
         "acs:oss:*:ACCOUNT_ID:LEGACY_BUCKET"
       ],
       "Sid": "ListImportedLegacyBuckets"
+    },
+    {
+      "Action": [
+        "oss:PutObject",
+        "oss:DeleteObject",
+        "oss:DeleteObjects",
+        "oss:AbortMultipartUpload",
+        "oss:PutObjectTagging",
+        "oss:RestoreObject"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:LEGACY_BUCKET/LEGACY_PREFIX/*"
+      ],
+      "Sid": "DenyMutatingReadonlyDataSources"
     },
     {
       "Action": [
