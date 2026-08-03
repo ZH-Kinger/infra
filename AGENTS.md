@@ -67,7 +67,9 @@ make preflight     # 只读体检：换账号前先跑这个，看还差什么�
   `Resource.OutOfStock` 很常见；先用 `--DryRun true` 逐个可用区探库存再真建。
 - **CPFS 只支持部分可用区**（本账号 cn-hangzhou 只有 g/h/i），而现有 vSwitch 往往
   不在这些区里。vSwitch 免费，缺就建。
-- **`nas` 系 API 的 `Description` 不接受中文**，会报 `IllegalCharacters`。
+- **`nas` 系 API 的 `Description` 不接受中文，也不接受空格**，都报 `IllegalCharacters`。
+  2026-08-03 逐个试出来：`"cpfs verify dryrun"` 被拒，`"cpfs-verify"` 通过。
+  这个错会盖住真正的问题——比如库存不足，得先把 Description 弄干净才看得到 `Resource.OutOfStock`。
 - **`aliyun` CLI 的 profile 默认 region 可能与资源所在 region 不一致**（本账号 profile 是 `cn-shanghai`，PAI Workspace 在 `cn-hangzhou`）。所有命令显式带 `--region`。
 - **`aiworkspace` 产品必须显式 `--endpoint aiworkspace.<region>.aliyuncs.com`**，否则报 unknown endpoint。
 - **zsh 不做未加引号变量的单词切分。** 不要把多个 CLI flag 塞进一个变量再展开，会被当成单个参数。**注意 `/bin/sh` 脚本里同样的写法是安全的**（sh 会切分），所以 `scripts/*.sh` 里的 `$P` 能用；在交互式 zsh 里手敲同一条命令却会失败。
@@ -79,6 +81,32 @@ make preflight     # 只读体检：换账号前先跑这个，看还差什么�
   NAS→`nas://`、CPFS→`cpfs://`、BMCPFS→`bmcpfs://`。**官方文档说 CPFS 用
   `nas://` 是错的**（2026-08-03 真实账号实测）。`Property=DIRECTORY` 还要求
   Uri 以 `/` 结尾。
+- **CPFS 里已经有文件的目录不能注册成 Fileset。** Fileset 只能建在新的/空的路径上，
+  没法把一个已有数据的目录「就地」变成 Fileset。
+  **这条的连锁后果比它看起来大**：数据流动的第一条前提是必须挂 Fileset（`FsetId`
+  必填），所以**存量 CPFS 数据无法直接接入数据流动**——必须先把它搬进一个新建的
+  Fileset 路径。同一文件系统内的 `rename` 是元数据操作（秒级），但跨 Fileset 边界
+  未必，规划迁移时要先确认这一点，别假设一定是零拷贝。
+  推论：`cpfs-workspaces` 模块要在**目录还空着的时候**就建好 Fileset。等用户
+  往 `/users/<name>/` 写了东西再补，就来不及了。
+- **CPFS 不能跨可用区挂载。** 挂载点的 vSwitch 必须与文件系统同可用区，否则
+  `CreateProtocolMountTarget` 直接报 `VSwitchZoneMismatch.InvalidParam`
+  （`VSwitch Zone should be same with filesystem`）。
+  客户端不在挂载点所在 vSwitch 时，挂载域名会解析成 `127.0.1.255` 这种回环地址，
+  表现为 `mount.nfs: Connection refused`——看着像端口没开，实际是**没有给这个
+  客户端建接入点**。
+  **架构后果**：CPFS 只支持部分可用区（本账号 cn-hangzhou 只有 g/h/i），
+  而挂载又必须同区，所以**所有要挂 CPFS 的东西——自托管 runner、DSW、DLC——
+  都必须落在 CPFS 所在的那个可用区**。选可用区时要同时满足「CPFS 有库存」和
+  「算力资源可用」，这两个条件的交集可能很小。2026-08-03 实测。
+- **`Throughput` 在 CPFS 的两个 API 上要求正好相反。**
+  `CreateProtocolService --ProtocolSpec General` **不能**传 `Throughput`，传了报
+  `PermissionDenied.ThroughputInvalid`（`Standard protocol service should not
+  specified throughput`）；而 `CreateDataFlow` **必须**传，且只接受 600/1200/1500。
+  两个都在 `nas` 名下、参数同名、要求相反，很容易照着另一个抄错。
+- **建 DataFlow 之前协议服务必须已经 Running。** 协议服务还在 `Creating` 时建
+  DataFlow 会报 `OperationDenied.InvalidState`——就是下面那条说的「会盖住真正原因」
+  的典型：报的是文件系统状态不对，实际原因是另一个资源没就绪。2026-08-03 实测。
 - **CPFS 数据流动有六条前提**（2026-08-03 真实 CPFS 2.0 上逐条撞出来）：
   必须挂 Fileset（`FsetId` 必填）；`Throughput` 必填且只接受 600/1200/1500；
   **OSS 桶必须打 `cpfs-dataflow` 标签**否则拒绝；相关资源未就绪时报
