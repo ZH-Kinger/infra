@@ -180,8 +180,13 @@ class CpfsDataFlow:
             )
         return str(best_id)
 
-    def binding_for(self, inner_path: str) -> Tuple[str, str, str]:
-        """返回覆盖该路径的 (dataflow_id, FileSystemPath, SourceStoragePath)。"""
+    def _flow_for(self, inner_path: str) -> Tuple[str, str]:
+        """返回覆盖该路径的 (dataflow_id, FileSystemPath)。
+
+        提交任务只需要这两样。**刻意不要求 SourceStorage**：真实 API 不一定回
+        `SourceStoragePath`，而提交任务并不关心源在哪——把这个依赖塞进来会让
+        `submit()` 在完全正常的 DataFlow 上报「没有可用的源存储路径」。
+        """
         best = None
         best_len = -1
         for flow in self.list_dataflows():
@@ -198,11 +203,17 @@ class CpfsDataFlow:
                 f"`aliyun nas DescribeDataFlows --FileSystemId {self.filesystem_id}` 确认。"
             )
         fs_path = str(best.get("FileSystemPath") or "/").rstrip("/") or "/"
+        return str(best.get("DataFlowId")), fs_path
+
+    def binding_for(self, inner_path: str) -> Tuple[str, str, str]:
+        """返回覆盖该路径的 (dataflow_id, FileSystemPath, SourceStoragePath)。"""
+        flow_id, fs_path = self._flow_for(inner_path)
+        best = next(f for f in self.list_dataflows() if str(f.get("DataFlowId")) == flow_id)
         # SourceStoragePath 可能是完整 URI，也可能只给桶级 SourceStorage。
         source = str(best.get("SourceStoragePath") or best.get("SourceStorage") or "").rstrip("/")
         if not source:
             raise DatasetSinkError(f"数据流动 {best.get('DataFlowId')} 没有可用的源存储路径")
-        return str(best.get("DataFlowId")), fs_path, source
+        return flow_id, fs_path, source
 
     def object_uri_for(self, inner_path: str) -> str:
         """CPFS 内部路径 → 它在 OSS 上对应的 URI。
@@ -214,6 +225,19 @@ class CpfsDataFlow:
 
         算出这个 URI 之后就能喂给 `commit --object-store-uri`，让 lakeFS 从
         同一个位置零拷贝 import。
+
+        **一个无法在运行时校验的前提：DataFlow 必须绑在桶根上，不能设
+        `SourceStoragePath`。**
+
+        2026-08-03 在真实 CPFS 2.0 上实测：`DescribeDataFlows` 的响应里**根本
+        没有 `SourceStoragePath` 字段**——创建时传了 `/cpfs-verify`，回读时看不到。
+        所以如果有人建 DataFlow 时设了它，这里算出来的 URI 会**静默少掉那一段**，
+        而 `commit --object-store-uri` 就会指向一个错误的 OSS 前缀。
+
+        我们自己的 `cpfs-workspaces` 模块只设 `source_storage = oss://<bucket>`，
+        不设 path，所以这个计算对我们创建的 DataFlow 是对的。但对手工创建的
+        DataFlow 无法保证，而且**我们没有办法检测**（字段读不回来）。
+        接手别人建好的 DataFlow 时必须人工确认这一点。
         """
         _, fs_path, source = self.binding_for(inner_path)
         relative = inner_path[len(fs_path) :] if fs_path != "/" else inner_path
@@ -232,14 +256,37 @@ class CpfsDataFlow:
         data_type: str = "MetaAndData",
         dataflow_id: Optional[str] = None,
     ) -> DataFlowTask:
-        """提交一个数据流动任务。`directory` 是文件系统内部路径。"""
+        """提交一个数据流动任务。`directory` 是文件系统内部路径（绝对）。"""
         if action not in {"Import", "Export", "Evict", "StreamImport", "StreamExport"}:
             raise ValueError(f"不支持的 TaskAction: {action}")
         inner = directory if directory.startswith("/") else "/" + directory
         # Directory 要求首尾都是斜杠。
         if not inner.endswith("/"):
             inner += "/"
-        flow_id = dataflow_id or self.dataflow_for(inner.rstrip("/") or "/")
+        flow_id, fs_path = self._flow_for(inner.rstrip("/") or "/")
+        if dataflow_id:
+            flow_id = dataflow_id
+
+        # --------------------------------------------------------------------
+        # **`Directory` 是相对 DataFlow 的 FileSystemPath 的路径，不是绝对
+        # 文件系统内部路径。** 这是第三个坐标系。
+        #
+        # 2026-08-03 在真实 CPFS 2.0 上对照实测（FileSystemPath = /verify/）：
+        #
+        #     Directory=/verify/imp-test/   →  Failed，progress 0
+        #     Directory=/imp-test/          →  Completed，progress 100
+        #
+        # 传绝对路径**不会报参数错误**，任务会被正常受理、几秒后变成 Failed，
+        # 而且 `ProgressStats` 是空的、没有任何 ErrorMessage 字段——纯静默失败。
+        # 这也是为什么这个 bug 一直没被发现：单元测试注入的 runner 只检查我们
+        # 发出了什么，不知道服务端会怎么解释它。
+        # --------------------------------------------------------------------
+        base = fs_path.rstrip("/")
+        relative = inner[len(base) :] if base and inner.startswith(base) else inner
+        if not relative.startswith("/"):
+            relative = "/" + relative
+        if not relative.endswith("/"):
+            relative += "/"
 
         payload = self._run(
             [
@@ -254,7 +301,7 @@ class CpfsDataFlow:
                 "--DataType",
                 data_type,
                 "--Directory",
-                inner,
+                relative,
             ]
         )
         task_id = payload.get("TaskId") if isinstance(payload, dict) else None

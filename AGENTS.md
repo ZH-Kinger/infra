@@ -126,6 +126,19 @@ make preflight     # 只读体检：换账号前先跑这个，看还差什么�
 - **lakeFS 的配置项都能用环境变量覆盖**（`LAKEFS_` + 路径大写下划线，如
   `LAKEFS_BLOCKSTORE_S3_CREDENTIALS_SESSION_TOKEN`）。临时验证用它，
   凭证就只存在于进程环境里，不必写进配置文件。
+- **`CreateDataFlowTask` 的 `Directory` 是相对 DataFlow 的 `FileSystemPath` 的路径，
+  不是绝对的文件系统内部路径。** 这是第三个坐标系。2026-08-03 真机对照实测
+  （`FileSystemPath = /verify/`）：
+  `Directory=/verify/imp-test/` → **Failed，progress 0**；
+  `Directory=/imp-test/` → **Completed，progress 100**。
+  **传绝对路径不会报参数错误**——任务被正常受理，几秒后变 Failed，`ProgressStats`
+  是空的、没有任何 ErrorMessage。纯静默失败。`dataflow.py` 原来就是传绝对路径，
+  单元测试还把它固化成了期望值（注入的 runner 只检查我们发了什么，不知道服务端
+  怎么解释）。
+- **`DescribeDataFlows` 不返回 `SourceStoragePath`。** 创建时传了也读不回来。
+  于是「CPFS 路径 → OSS 前缀」的换算**无法在运行时校验**：如果 DataFlow 建的
+  时候设了 `SourceStoragePath`，我们算出的 URI 会静默少掉那一段。
+  本仓库的 `cpfs-workspaces` 只绑桶根，所以自建的没问题；接手别人建的必须人工确认。
 - **CPFS 挂载路径 ≠ CPFS 文件系统内部路径。** `pai-request` 的 `release_dir` 是挂载视角，`--filesystem-path` 是文件系统内部视角，两者不能混用。
 - **`terraform` 不在 homebrew-core**（BUSL 许可），需 `brew install hashicorp/tap/terraform`。
 - **本环境 `registry.terraform.io` 被网络策略拦截**，Provider schema 只能靠 `terraform validate` 核对，不要凭记忆写字段。查资源真名的最快方式是 `terraform providers schema -json` 后用 Python 过滤。

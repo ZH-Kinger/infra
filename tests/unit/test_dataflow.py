@@ -66,8 +66,33 @@ class DataFlowTests(unittest.TestCase):
         task = self._df(fake).prefetch("/mnt/cpfs/datasets/robotics/c1")
 
         self.assertEqual(fake.last("--TaskAction"), "Import")
-        self.assertEqual(fake.last("--Directory"), "/datasets/robotics/c1/")
+        # Directory 是**相对 DataFlow 的 FileSystemPath** 的路径，不是绝对的
+        # 文件系统内部路径。FLOWS 里 df-1 的 FileSystemPath 是 /datasets/，
+        # 所以 /datasets/robotics/c1 要发成 /robotics/c1/。
+        #
+        # 这条断言原来写的是绝对路径 /datasets/robotics/c1/，也就是把 bug 固化
+        # 成了期望值。2026-08-03 在真实 CPFS 2.0 上对照实测才发现：
+        #     Directory=/datasets/robotics/c1/  →  Failed，progress 0，无报错
+        #     Directory=/robotics/c1/           →  Completed，progress 100
+        self.assertEqual(fake.last("--Directory"), "/robotics/c1/")
         self.assertEqual(task.dataflow_id, "df-1")
+
+    def test_directory_is_relative_to_the_dataflow_binding(self):
+        """第三个坐标系：挂载视角 / 文件系统内部视角 / DataFlow 相对视角。
+
+        传绝对路径不会报参数错误——任务被正常受理，几秒后变 Failed，
+        ProgressStats 是空的、没有 ErrorMessage。纯静默失败，所以必须锁住。
+        """
+        for mount_path, expected in (
+            ("/mnt/cpfs/datasets/robotics/c1", "/robotics/c1/"),
+            ("/mnt/cpfs/datasets/robotics", "/robotics/"),
+            ("/mnt/cpfs/datasets/a/b/c", "/a/b/c/"),
+        ):
+            fake = FakeAliyun(FLOWS)
+            self._df(fake).prefetch(mount_path)
+            self.assertEqual(fake.last("--Directory"), expected, mount_path)
+            # 绝对文件系统路径绝不能出现在 Directory 里
+            self.assertNotIn("/datasets/", fake.last("--Directory"))
 
     def test_flush_submits_export(self):
         fake = FakeAliyun(FLOWS)
