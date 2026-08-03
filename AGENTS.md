@@ -77,6 +77,10 @@ make hooks         # pre-commit run --all-files
   NAS→`nas://`、CPFS→`cpfs://`、BMCPFS→`bmcpfs://`。**官方文档说 CPFS 用
   `nas://` 是错的**（2026-08-03 真实账号实测）。`Property=DIRECTORY` 还要求
   Uri 以 `/` 结尾。
+- **CPFS 数据流动有四条前提**：必须挂 Fileset（`FsetId` 必填）；`Throughput`
+  必填且只接受 600/1200/1500；**OSS 桶必须打 `cpfs-dataflow` 标签**否则拒绝；
+  相关资源未就绪时报 `OperationDenied.InvalidState`——这个错会盖住真正的原因，
+  排查要逐个参数剥离。
 - **CPFS 挂载路径 ≠ CPFS 文件系统内部路径。** `pai-request` 的 `release_dir` 是挂载视角，`--filesystem-path` 是文件系统内部视角，两者不能混用。
 - **`terraform` 不在 homebrew-core**（BUSL 许可），需 `brew install hashicorp/tap/terraform`。
 - **本环境 `registry.terraform.io` 被网络策略拦截**，Provider schema 只能靠 `terraform validate` 核对，不要凭记忆写字段。查资源真名的最快方式是 `terraform providers schema -json` 后用 Python 过滤。

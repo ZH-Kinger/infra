@@ -33,6 +33,21 @@ Export → Evict：先确保源存储里有一份，再释放本地数据块。�
 两者都是可读路径，数据流动都能按路径处理。这个前缀记在 Commit metadata 的
 `object_store_uri` 里。
 
+**建 DataFlow 的四条前提**（2026-08-03 在真实 CPFS 2.0 上逐条撞出来的）：
+
+1. **必须挂在 Fileset 上。** 不给 `FsetId` 直接报 `FsetId is mandatory`。
+   所以 CPFS 上的数据集根目录要先建成 Fileset，这是 Terraform 该管的东西。
+2. **`Throughput` 必填**，且只接受 600 / 1200 / 1500（MB/s），并且要小于文件
+   系统本身的 I/O 吞吐。
+3. **OSS 桶必须打上 `cpfs-dataflow` 标签**，否则报
+   `The operation is denied. The OSS Bucket tag cpfs-dataflow is missing.`
+   这是个显式的准入开关——没有它，CPFS 碰不了这个桶。归档桶的这个标签也该
+   由 Terraform 管，否则第一次预热会在很后面才失败。
+4. 协议服务、Fileset、文件系统都要处于就绪状态；任一还在创建中，
+   `CreateDataFlow` 会报 `OperationDenied.InvalidState`——**而这个报错会盖住
+   真正的原因**（缺标签、缺 Throughput 都可能先表现为它），排查时要逐个参数
+   剥离才能看到真话。
+
 **数据流动不做校验。** 它只保证字节到位，不保证内容和 manifest 一致。所以预热
 之后仍然要走 `certify`：全量比对文件集合、大小、SHA-256，通过了才 rename 发布。
 换句话说数据流动替掉的是「搬」，替不掉「验」和「封」。
@@ -214,8 +229,9 @@ class CpfsDataFlow:
                 task_id,
             ]
         )
-        info = payload.get("DataFlowTaskInfo", {}) if isinstance(payload, dict) else {}
-        tasks = info.get("DataFlowTask", []) if isinstance(info, dict) else []
+        # 真实响应是 TaskInfo.Task[]（2026-08-03 实测）。
+        info = payload.get("TaskInfo", {}) if isinstance(payload, dict) else {}
+        tasks = info.get("Task", []) if isinstance(info, dict) else []
         for task in tasks:
             if str(task.get("TaskId")) == task_id:
                 return DataFlowTask(

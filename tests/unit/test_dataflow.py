@@ -21,10 +21,22 @@ class FakeAliyun:
             body = {"DataFlowInfo": {"DataFlow": self.dataflows}}
         elif "DescribeDataFlowTasks" in command:
             status = self.statuses.pop(0) if self.statuses else "Completed"
+            # 结构照抄真实响应（2026-08-03 实测）。之前这里是凭空想的
+            # DataFlowTaskInfo.DataFlowTask，假数据和代码一起错，测试全绿
+            # 但对真实 API 直接失败——假数据必须来自真实抓包。
             body = {
-                "DataFlowTaskInfo": {
-                    "DataFlowTask": [
-                        {"TaskId": self.task_id, "Status": status, "TaskAction": "Import"}
+                "TaskInfo": {
+                    "Task": [
+                        {
+                            "TaskId": self.task_id,
+                            "Status": status,
+                            "TaskAction": "Import",
+                            "DataFlowId": "df-0078f0819f8d93ab",
+                            "DataType": "MetaAndData",
+                            "FsPath": "/datasets/",
+                            "Progress": 0,
+                            "SourceStorage": "oss://bucket",
+                        }
                     ]
                 }
             }
