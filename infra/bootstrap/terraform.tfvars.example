@@ -8,8 +8,10 @@ state_bucket = "REPLACE-ME-terraform-state" # 全局唯一，建议带公司前�
 lock_instance_name = "tf-state-lock"
 lock_table_name    = "terraform_state_lock"
 
-github_repo        = "your-org/infra-ci-cd"
-github_environment = "production"
+github_repo = "your-org/infra-ci-cd"
+
+platform_github_environments = ["development", "production"]
+access_github_environments   = ["development", "production-access"]
 
 oidc_provider_name = "GitHubActions"
 oidc_audience      = "github-actions"

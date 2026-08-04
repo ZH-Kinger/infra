@@ -134,6 +134,11 @@ Environment 名不是随便起的：它会成为 OIDC token 的 `sub`
 （`repo:<org>/<repo>:environment:<name>`），而 apply 角色的信任策略只接受这个
 `sub`。改 Environment 名等于改信任边界，必须同步改 `infra/bootstrap`。
 
+bootstrap 用 `platform_github_environments` 和 `access_github_environments` 分别声明
+两个 Apply Role 可以接受的 Environment。默认值与 workflow 矩阵一致：Platform 为
+`development`/`production`，Access 为 `development`/`production-access`。仓库迁移时
+还必须更新 `github_repo`；只改 Git remote 不会更新云端 OIDC 信任策略。
+
 同时开启分支保护：`main` 禁止直接推送，PR 需评审，`.github/CODEOWNERS` 生效。
 
 ### 1.5 跑 envs

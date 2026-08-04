@@ -41,10 +41,36 @@ variable "github_repo" {
   }
 }
 
+variable "platform_github_environments" {
+  description = "可假设 PlatformApplyRole 的 GitHub Environments；必须与 terraform.yml 矩阵一致"
+  type        = set(string)
+  default     = ["development", "production"]
+
+  validation {
+    condition = length(var.platform_github_environments) > 0 && alltrue([
+      for name in var.platform_github_environments : can(regex("^[A-Za-z0-9._-]+$", name))
+    ])
+    error_message = "platform_github_environments 不能为空，且只能包含字母、数字、点、下划线和连字符。"
+  }
+}
+
+variable "access_github_environments" {
+  description = "可假设 AccessApplyRole 的 GitHub Environments；生产权限应使用独立审批环境"
+  type        = set(string)
+  default     = ["development", "production-access"]
+
+  validation {
+    condition = length(var.access_github_environments) > 0 && alltrue([
+      for name in var.access_github_environments : can(regex("^[A-Za-z0-9._-]+$", name))
+    ])
+    error_message = "access_github_environments 不能为空，且只能包含字母、数字、点、下划线和连字符。"
+  }
+}
+
 variable "github_environment" {
-  description = "承载生产审批的 GitHub Environment 名称。apply 类角色只信任这个 Environment 的 OIDC token"
+  description = "已弃用，仅为兼容旧 tfvars；改用 platform_github_environments 与 access_github_environments"
   type        = string
-  default     = "production"
+  default     = null
 }
 
 variable "oidc_provider_name" {

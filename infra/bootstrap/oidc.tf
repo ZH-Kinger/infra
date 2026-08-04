@@ -18,6 +18,15 @@ resource "alicloud_ims_oidc_provider" "github" {
 locals {
   account_id = data.alicloud_account.current.id
 
+  platform_apply_subjects = [
+    for environment in var.platform_github_environments :
+    "repo:${var.github_repo}:environment:${environment}"
+  ]
+  access_apply_subjects = [
+    for environment in var.access_github_environments :
+    "repo:${var.github_repo}:environment:${environment}"
+  ]
+
   state_bucket_arn = "acs:oss:*:${local.account_id}:${var.state_bucket}"
   state_object_arn = "acs:oss:*:${local.account_id}:${var.state_bucket}/*"
   lock_table_arn   = "acs:ots:*:${local.account_id}:instance/${var.lock_instance_name}/table/${var.lock_table_name}"
@@ -396,7 +405,7 @@ module "platform_apply_role" {
 
   oidc_provider_arn = alicloud_ims_oidc_provider.github.arn
   audience          = var.oidc_audience
-  subjects          = ["repo:${var.github_repo}:environment:${var.github_environment}"]
+  subjects          = local.platform_apply_subjects
 
   policy_documents = {
     TerraformPlatformApplyRolePolicy = local.platform_apply_policy
@@ -411,7 +420,7 @@ module "access_apply_role" {
 
   oidc_provider_arn = alicloud_ims_oidc_provider.github.arn
   audience          = var.oidc_audience
-  subjects          = ["repo:${var.github_repo}:environment:${var.github_environment}"]
+  subjects          = local.access_apply_subjects
 
   policy_documents = {
     TerraformAccessApplyRolePolicy = local.access_apply_policy
