@@ -46,7 +46,7 @@ make preflight     # 只读体检：换账号前先跑这个，看还差什么�
 | `infra/modules/` | 可复用 Terraform 模块 | 变量要有 `description` 和 `type` |
 | `infra/envs/<env>/{platform,access}/` | 环境层，双 state | `access` 变更需更严格审批 |
 | `deploy/ram/` | Terraform 渲染出的 RAM 策略副本 | **不要手改**，改模块后跑 `scripts/render-ram-policies.sh` |
-| `deploy/pai/` | DLC/DSW 作业模板与训练入口 | 模板里的路径是容器内路径 |
+| `deploy/pai/` | DLC/DSW 模板与训练入口 | 模板里的路径是容器内路径 |
 | `docs/` | 架构与运维文档 | README 只做导航，细节写这里 |
 | `scripts/` | 本地演练与只读探测 | 只读脚本才可进 settings 的 allow |
 
