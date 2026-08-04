@@ -3,9 +3,13 @@ name: Terraform
 on:
   pull_request:
     paths: ["infra/**", ".github/workflows/terraform.yml"]
-  push:
-    branches: [main]
-    paths: ["infra/**", ".github/workflows/terraform.yml"]
+  workflow_dispatch:
+    inputs:
+      confirm_apply:
+        description: "Apply the generated plans after Environment approval"
+        required: true
+        default: false
+        type: boolean
 
 # id-token: write 只是允许本 Job 取 GitHub OIDC token，
 # 它本身不授予任何阿里云权限——权限完全由 RAM 角色的信任策略决定。
@@ -49,8 +53,8 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      # plan 用只读角色。它的 OIDC sub 是 repo:<org>/<repo>:pull_request，
-      # 而 fork 的 PR 也会产生这个 sub——所以这个角色必须完全无写权限。
+      # PR 的 sub 是 pull_request；手动 main 运行的 sub 是 ref:refs/heads/main。
+      # 两种入口都只能拿完全只读的 PlanRole。
       - name: 假设 TerraformPlanRole
         uses: aliyun/configure-aliyun-credentials-action@v1
         with:
@@ -118,7 +122,10 @@ jobs:
 
   apply:
     name: Apply ${{ matrix.layer }}
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch'
+      && github.ref == 'refs/heads/main'
+      && inputs.confirm_apply }}
     needs: plan
     runs-on: ubuntu-latest
     strategy:

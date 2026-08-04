@@ -625,13 +625,14 @@ PR → OIDC 假设 TerraformPlanRole（只读）
    → fmt / validate / plan -out=tfplan
    → tfplan 上传为 artifact + 评论到 PR
    → 代码评审
-合并 main → 下载同一个 tfplan
+main 手动运行（confirm_apply=true）→ 生成并上传本次 tfplan
    → GitHub Environment 人工审批
    → 按变更路径假设 Platform 或 Access Apply Role
    → apply 该 tfplan
 ```
 
 关键点：**apply 消费的是 plan 阶段产出的同一个 tfplan 文件**，不重新 plan。这保证审批时看到的变更和实际执行的变更逐字节一致——否则审批只是仪式。
+合并 main 本身不会触发云端 apply，开发提交与平台变更执行是两个独立动作。
 
 **数据集发布流水线**（数据变更触发）：
 

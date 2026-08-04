@@ -2,8 +2,16 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "scripts/**"
+      - "deploy/**"
+      - "infra/**"
+      - "pyproject.toml"
+      - "Makefile"
+      - ".github/workflows/**"
+  workflow_dispatch:
 
 # 这条流水线不接触任何云凭证：它只做代码校验。
 # 需要云身份的操作在 terraform.yml 和 dataset-release.yml 里。

@@ -1,8 +1,6 @@
 name: PAI mount audit
 
 on:
-  schedule:
-    - cron: "17 1 * * *"
   workflow_dispatch:
 
 permissions:

@@ -118,7 +118,8 @@ locals {
 
   # -------------------------------------------------------------------------
   # TerraformPlanRole：只读 + 读 state + 加锁。
-  # 它跑在 PR 上，触发者是任何能开 PR 的人，所以必须完全无写权限。
+  # 它跑在 PR 和 main 的手动 plan 上；PR 触发者可能是任何能开 PR 的人，
+  # 所以无论入口都必须完全无写权限。
   # -------------------------------------------------------------------------
   plan_policy = jsonencode({
     Version = "1"
@@ -370,13 +371,17 @@ module "plan_role" {
   source = "../modules/ci-oidc-role"
 
   role_name   = "TerraformPlanRole"
-  description = "Terraform plan（PR 触发）：只读 + 读 state + 加锁，无任何写权限"
+  description = "Terraform plan（PR 或 main 手动触发）：只读 + 读 state + 加锁，无写权限"
 
   oidc_provider_arn = alicloud_ims_oidc_provider.github.arn
   audience          = var.oidc_audience
 
-  # PR 触发，包括 fork 的 PR，因此这个 sub 只能配只读权限。
-  subjects = ["repo:${var.github_repo}:pull_request"]
+  # PR（包括 fork PR）与 main 上的手动 plan 都只能拿只读权限。
+  # main ref 是 workflow_dispatch 的身份，不能给任何写 Action。
+  subjects = [
+    "repo:${var.github_repo}:pull_request",
+    "repo:${var.github_repo}:ref:refs/heads/main",
+  ]
 
   policy_documents = {
     TerraformPlanRolePolicy = local.plan_policy

@@ -8,10 +8,10 @@
 
 | 流水线 | 触发 | 用途 | 是否需要云凭证 |
 |---|---|---|---|
-| [`ci.yml`](../.github/workflows/ci.yml) | 每个 PR / push main | 代码校验 | **否** |
-| [`terraform.yml`](../.github/workflows/terraform.yml) | `infra/**` 变更 | 基础设施与权限交付 | 是（OIDC） |
+| [`ci.yml`](../.github/workflows/ci.yml) | 相关代码 PR / 手动 | 代码校验；README/docs 不触发 | **否** |
+| [`terraform.yml`](../.github/workflows/terraform.yml) | `infra/**` PR 做 plan；main 手动 apply | 基础设施与权限交付 | 是（OIDC） |
 | [`dataset-release.yml`](../.github/workflows/dataset-release.yml) | 手动触发 | 数据集发布 | 是（OIDC，每步换角色） |
-| [`pai-mount-audit.yml`](../.github/workflows/pai-mount-audit.yml) | 每日 / 手动 | 检查 DLC/DSW 是否绕过不可变 release | 是（只读 OIDC 角色） |
+| [`pai-mount-audit.yml`](../.github/workflows/pai-mount-audit.yml) | 手动 | 检查 DLC/DSW 是否绕过不可变 release | 是（只读 OIDC 角色） |
 
 刻意让 `ci.yml` 完全不碰凭证：绝大多数 PR 只需要代码校验，没有理由让它们
 经过任何有权限的路径。
@@ -25,9 +25,16 @@
 审计输出上传为保留 90 天的 artifact；发现违规时命令退出码为 3，Job 失败并留下报告。
 它只读 PAI 控制面元数据，不挂载 CPFS，也不读取训练数据。
 
+开发仓库默认不设 schedule，避免未配置云变量时每天产生失败任务。生产接管后如需定时
+审计，应在受控分支恢复 schedule，并先确认只读 Role 与 Repository Variables 已部署。
+
 ---
 
 ## 1. ci.yml —— 六个门禁
+
+CI 只监听会影响可执行结果的路径：`src/`、`tests/`、`scripts/`、`deploy/`、`infra/`、
+`pyproject.toml`、`Makefile` 和全部 workflow。README 与 `docs/**` 变更不消耗 runner；
+需要时可从 Actions 页面手动运行。
 
 | Job | 检查什么 |
 |---|---|
@@ -58,12 +65,18 @@ PR (infra/**)
   → 检测 destroy / replace 并告警
   → 代码评审（CODEOWNERS：权限面需安全团队）
 
-合并 main
+main 上手动运行（`confirm_apply=true`）
+  → 重新假设 TerraformPlanRole（只读）
+  → 生成并上传本次要执行的 tfplan
   → GitHub Environment 人工审批（阻塞）
   → 假设对应的 Apply 角色
-  → 下载 plan 阶段那一个 tfplan
+  → 下载本次手动运行生成的同一个 tfplan
   → apply 该 tfplan
 ```
+
+合并 `main` 本身不再触发 Terraform。开发人员可以连续提交代码而不会碰云端；只有在
+Actions 页面明确勾选 `confirm_apply` 的手动运行才可能进入 apply，而且仍会被
+Environment required reviewers 阻塞。
 
 ### 为什么 apply 不重新 plan
 

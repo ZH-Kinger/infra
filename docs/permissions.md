@@ -100,7 +100,7 @@
 能力，「运行身份」和「交付身份」的隔离就没了。
 
 挂载审计也不复用 `dlc-submit`：审计任务只需要 `List/Get`，若复用能
-`CreateJob` 的角色，定时任务被劫持后就能创建算力作业。审计角色的信任策略只接受
+`CreateJob` 的角色，审计任务被劫持后就能创建算力作业。审计角色的信任策略只接受
 `repo:<org>/<repo>:ref:refs/heads/main`，策略再显式 Deny PAI 写操作和数据面访问。
 
 ### 交付面（3 个，由 bootstrap 管理）
@@ -119,7 +119,8 @@
 
 ### 4.1 plan 角色必须完全只读
 
-`TerraformPlanRole` 的 OIDC `sub` 是 `repo:<org>/<repo>:pull_request`。
+`TerraformPlanRole` 接受 PR 的 OIDC `sub`，以及 main 上手动 Terraform 运行的
+`repo:<org>/<repo>:ref:refs/heads/main`。
 **fork 仓库发起的 PR 也会产生这个 sub。** 所以任何能给这个仓库开 PR 的人，
 都能拿到这个角色。它必须一点写权限都没有——策略里除了精确的 Allow，
 还有一条覆盖所有写 Action 的兜底 Deny。

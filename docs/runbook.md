@@ -158,7 +158,8 @@ terraform plan
 
 ```
 改 infra/envs/*/platform/ → PR → 自动 plan 并评论到 PR → 评审 → 合并 main
-→ Environment 审批 → apply（执行 plan 阶段那一份 tfplan）
+→ Actions 手动运行 Terraform（main，confirm_apply=true）→ 重新生成 plan
+→ Environment 审批 → apply（执行该手动运行生成的同一份 tfplan）
 ```
 
 ### 2.2 改权限（更严格）
@@ -167,6 +168,7 @@ terraform plan
 改 infra/envs/*/access/terraform.tfvars → PR
 → CODEOWNERS 要求安全团队评审
 → plan 输出必须显式列出：新增了谁、移除了谁、授予/收回了哪些 Action
+→ 合并后由管理员在 main 手动运行 Terraform，并勾选 confirm_apply
 → production-access Environment 审批
 → apply
 ```

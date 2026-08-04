@@ -166,9 +166,10 @@ class AliyunPaiAuditReaderTests(unittest.TestCase):
 
 
 class AuditWorkflowContractTests(unittest.TestCase):
-    def test_scheduled_audit_uses_dedicated_readonly_role(self):
+    def test_manual_audit_uses_dedicated_readonly_role(self):
         workflow = Path(".github/workflows/pai-mount-audit.yml").read_text(encoding="utf-8")
-        self.assertIn("schedule:", workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertNotIn("schedule:", workflow)
         self.assertIn("PAI_MOUNT_AUDIT_ROLE_ARN", workflow)
         self.assertIn("audit-pai-mounts", workflow)
         self.assertNotIn("DLC_SUBMIT_ROLE_ARN", workflow)
