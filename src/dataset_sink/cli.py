@@ -33,11 +33,13 @@ from .lakefs_refs import resolve_reference
 from .manifest import Manifest, dump_manifest
 from .materializer import Materializer, certify_prepared_release, verify_release
 from .pai import CpfsRegistration, build_create_dataset_version_request
+from .pai_audit import AliyunPaiAuditReader, audit_workloads
 from .reclaim import (
     AssumeRecoverable,
     CpfsEvictStrategy,
     HardDeleteStrategy,
     LakeFSCommitProbe,
+    PaiUsageProbe,
     execute_plan,
     plan_reclaim,
     scan_releases,
@@ -302,6 +304,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reclaim.add_argument("--region", help="--strategy cpfs-evict 时必填")
     reclaim.add_argument("--profile", help="aliyun CLI profile")
+    reclaim.add_argument(
+        "--pai-usage-workspace-id",
+        help="启用 PAI 占用保护：只读检查该 Workspace 的活动 DLC/DSW 挂载",
+    )
+    reclaim.add_argument(
+        "--pai-usage-region",
+        help="PAI Workspace 所在 region；启用 --pai-usage-workspace-id 时必填",
+    )
+    reclaim.add_argument(
+        "--pai-usage-kind",
+        choices=("both", "dlc", "dsw"),
+        default="both",
+        help="占用检查范围（默认 both）",
+    )
     reclaim.add_argument("--sweep-trash", action="store_true", help="顺带清掉 .trash 里的残骸")
     reclaim.add_argument(
         "--execute",
@@ -356,6 +372,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="perform the mutation; without this flag only aliyun --dryrun is used",
     )
     register.add_argument("--aliyun-cli", default="aliyun")
+
+    audit = commands.add_parser(
+        "audit-pai-mounts",
+        help="只读审计 DLC/DSW 挂载，发现直接 URI、workspace 与非 release 数据",
+    )
+    audit.add_argument("--workspace-id", required=True)
+    audit.add_argument("--region", required=True)
+    audit.add_argument("--profile")
+    audit.add_argument("--aliyun-cli", default="aliyun")
+    audit.add_argument("--kind", choices=("both", "dlc", "dsw"), default="both")
+    audit.add_argument("--registry", type=Path, help="用于识别 OSS workspace 直接挂载")
+    audit.add_argument(
+        "--workspace-uri-prefix",
+        action="append",
+        default=[],
+        help="额外的可写工作区 URI 前缀，可重复；用于 CPFS/NAS workspace",
+    )
 
     guard = commands.add_parser(
         "training-guard",
@@ -421,6 +454,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 execute=args.execute,
                 cli_path=args.aliyun_cli,
             )
+        elif args.command == "audit-pai-mounts":
+            result = _audit_pai_mounts(args)
         else:
             if not args.expected_commit:
                 raise ValueError("training-guard requires --expected-commit or DATASET_COMMIT")
@@ -432,7 +467,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 deep=args.deep,
             )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
-        return 0
+        return 3 if result.get("status") == "VIOLATIONS_FOUND" else 0
     except (DatasetSinkError, ValueError, OSError) as exc:
         print(f"dataset-sink: {exc}", file=sys.stderr)
         return 2
@@ -452,6 +487,24 @@ def _scan(args: argparse.Namespace) -> dict:
         }
     )
     return payload
+
+
+def _audit_pai_mounts(args: argparse.Namespace) -> dict:
+    reader = AliyunPaiAuditReader(
+        region=args.region,
+        workspace_id=args.workspace_id,
+        profile=args.profile,
+        cli_path=args.aliyun_cli,
+    )
+    jobs, instances = reader.collect(args.kind)
+    registry = load_registry(args.registry) if args.registry else None
+    return audit_workloads(
+        dlc_jobs=jobs,
+        dsw_instances=instances,
+        resolve_version=reader.resolve_version,
+        registry=registry,
+        workspace_uri_prefixes=args.workspace_uri_prefix,
+    )
 
 
 def _first_env(*names: str) -> Optional[str]:
@@ -787,6 +840,21 @@ def _materialize(args: argparse.Namespace) -> dict:
 def _reclaim(args: argparse.Namespace) -> dict:
     releases = scan_releases(args.target_root)
 
+    usage_probe = None
+    if args.pai_usage_workspace_id or args.pai_usage_region:
+        if not (args.pai_usage_workspace_id and args.pai_usage_region):
+            raise ValueError(
+                "PAI 占用保护需要同时提供 --pai-usage-workspace-id 与 --pai-usage-region"
+            )
+        usage_probe = PaiUsageProbe(
+            AliyunPaiAuditReader(
+                region=args.pai_usage_region,
+                workspace_id=args.pai_usage_workspace_id,
+                profile=args.profile,
+            ),
+            kind=args.pai_usage_kind,
+        )
+
     if args.assume_recoverable:
         probe = AssumeRecoverable()
     else:
@@ -829,6 +897,7 @@ def _reclaim(args: argparse.Namespace) -> dict:
         keep_last=args.keep_last,
         reclaim_bytes=args.reclaim_bytes,
         include_incomplete=args.include_incomplete,
+        usage_probe=usage_probe,
         recoverability_probe=probe,
     )
     result = execute_plan(plan, args.target_root, execute=args.execute, strategy=strategy)

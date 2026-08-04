@@ -95,6 +95,14 @@ locals {
     for a in ["CreateJob", "GetJob", "ListJobs", "StopJob", "GetPodLogs"] :
     [for ns in local.job_ns : "${ns}:${a}"]
   ])
+  # 检测性控制：DLC/DSW 的挂载来源审计。PAI 官方策略长期存在 pai:* 与
+  # 产品命名空间不一致的问题，所以仍然成对写，理由同上。
+  pai_dsw_audit_actions = flatten([
+    for a in ["ListInstances", "GetInstance"] : [
+      "pai:${a}",
+      "paidsw:${a}",
+    ]
+  ])
 
   # OSS 资源 ARN：桶本身和桶内对象要分别声明，只写其中一个会导致
   # ListObjects 或 GetObject 之一失败。
@@ -388,7 +396,46 @@ locals {
   })
 
   # ---------------------------------------------------------------------------
-  # 4. 训练运行角色：容器内实际使用的身份。
+  # 4. 挂载审计角色：定时检查 DLC/DSW 是否绕过不可变 release。
+  #    这是纯检测身份，不复用能 CreateJob 的 dlc-submit 角色。
+  # ---------------------------------------------------------------------------
+  pai_mount_audit_policy = jsonencode({
+    Version = "1"
+    Statement = [
+      {
+        Sid    = "ReadPaiMountConfiguration"
+        Effect = "Allow"
+        Action = concat(
+          local.pai_job_read_actions,
+          local.pai_dsw_audit_actions,
+          local.pai_dataset_read_actions,
+          local.pai_workspace_read_actions,
+        )
+        Resource = ["*"]
+      },
+      {
+        Sid      = "DenyDatasetAndJobMutation"
+        Effect   = "Deny"
+        Action   = concat(local.pai_dataset_mutation_actions, local.pai_job_submit_actions)
+        Resource = ["*"]
+      },
+      {
+        Sid    = "DenyDataPlaneAccess"
+        Effect = "Deny"
+        Action = [
+          "oss:GetObject",
+          "oss:PutObject",
+          "oss:DeleteObject",
+          "oss:ListObjects",
+          "nas:CreateDataFlowTask",
+        ]
+        Resource = ["*"]
+      },
+    ]
+  })
+
+  # ---------------------------------------------------------------------------
+  # 5. 训练运行角色：容器内实际使用的身份。
   #    只读已发布归档 + 写自己的输出目录；绝不给 landing/lakeFS 后端。
   # ---------------------------------------------------------------------------
   training_runtime_policy = jsonencode({
@@ -574,6 +621,7 @@ locals {
       "${local.name_prefix}-materializer"     = local.materializer_policy
       "${local.name_prefix}-register"         = local.register_policy
       "${local.name_prefix}-dlc-submit"       = local.dlc_submit_policy
+      "${local.name_prefix}-pai-mount-audit"  = local.pai_mount_audit_policy
       "${local.name_prefix}-training-runtime" = local.training_runtime_policy
     },
     var.developer_group_name == "" ? {} : {

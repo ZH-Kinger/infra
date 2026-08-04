@@ -47,6 +47,8 @@
 | 关心权限怎么隔离、怎么防提权 | [权限模型](docs/permissions.md) |
 | 关心流水线怎么跑、审批在哪 | [CI/CD](docs/cicd.md) |
 | 要初始化环境或排查故障 | [运维手册](docs/runbook.md) |
+| 要把存量 CPFS 目录迁入 Fileset | [Fileset 迁移手册](docs/cpfs-fileset-migration.md) |
+| 要评估或扩展到多区域 | [多区域边界](docs/multi-region.md) |
 | 要改这个仓库的代码 | [仓库约定](AGENTS.md) |
 
 ---
@@ -56,7 +58,7 @@
 不装任何第三方包即可跑通全部本地验证：
 
 ```bash
-make test    # 57 个单元测试，离线、无需云凭证
+make test    # 单元与契约测试，离线、无需云凭证（真实云测试默认 skip）
 make e2e     # 全链路演练：三条入口 → 深度校验 → 训练门禁 → 回收 → PAI 请求
 make help    # 全部可用目标
 ```
@@ -111,7 +113,8 @@ dataset-sink archive /mnt/cpfs/staging/batch-001 --manifest /work/manifest.jsonl
 
 # 回收不再需要的 CPFS release（默认 dry-run；删除前核对 Commit 是否仍在 lakeFS）
 dataset-sink reclaim /mnt/cpfs/datasets \
-  --lakefs-api-endpoint https://lakefs.internal --min-age-days 14 --keep-last 2
+  --lakefs-api-endpoint https://lakefs.internal --min-age-days 14 --keep-last 2 \
+  --pai-usage-workspace-id 617398 --pai-usage-region cn-hangzhou
 
 # 校验（--deep 重算全部 SHA-256）
 dataset-sink verify /mnt/cpfs/datasets/robotics/6f2b7c91c2 --deep

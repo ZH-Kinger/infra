@@ -1,0 +1,75 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "pai:GetJob",
+        "paidlc:GetJob",
+        "pai:ListJobs",
+        "paidlc:ListJobs",
+        "pai:GetPodLogs",
+        "paidlc:GetPodLogs",
+        "pai:ListInstances",
+        "paidsw:ListInstances",
+        "pai:GetInstance",
+        "paidsw:GetInstance",
+        "pai:GetDataset",
+        "paidataset:GetDataset",
+        "pai:ListDatasets",
+        "paidataset:ListDatasets",
+        "pai:ListDatasetVersions",
+        "paidataset:ListDatasetVersions",
+        "pai:GetDatasetVersion",
+        "paidataset:GetDatasetVersion",
+        "pai:GetWorkspace",
+        "paiworkspace:GetWorkspace",
+        "pai:ListWorkspaces",
+        "paiworkspace:ListWorkspaces"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "ReadPaiMountConfiguration"
+    },
+    {
+      "Action": [
+        "pai:CreateDataset",
+        "paidataset:CreateDataset",
+        "pai:CreateDatasetVersion",
+        "paidataset:CreateDatasetVersion",
+        "pai:UpdateDataset",
+        "paidataset:UpdateDataset",
+        "pai:UpdateDatasetVersion",
+        "paidataset:UpdateDatasetVersion",
+        "pai:DeleteDataset",
+        "paidataset:DeleteDataset",
+        "pai:DeleteDatasetVersion",
+        "paidataset:DeleteDatasetVersion",
+        "pai:CreateJob",
+        "paidlc:CreateJob",
+        "pai:UpdateJob",
+        "paidlc:UpdateJob"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "DenyDatasetAndJobMutation"
+    },
+    {
+      "Action": [
+        "oss:GetObject",
+        "oss:PutObject",
+        "oss:DeleteObject",
+        "oss:ListObjects",
+        "nas:CreateDataFlowTask"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "DenyDataPlaneAccess"
+    }
+  ],
+  "Version": "1"
+}

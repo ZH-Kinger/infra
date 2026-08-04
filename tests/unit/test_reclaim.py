@@ -14,6 +14,7 @@ from dataset_sink.reclaim import (
     TRASH_DIR,
     AssumeRecoverable,
     CpfsEvictStrategy,
+    PaiUsageProbe,
     ReleaseInfo,
     execute_plan,
     plan_reclaim,
@@ -36,6 +37,81 @@ class InUseProbe:
 
     def in_use(self, release: ReleaseInfo) -> Optional[str]:
         return "job dlc-123 正在挂载" if release.label in self.labels else None
+
+
+class FakePaiReader:
+    def __init__(self, *, jobs=(), instances=(), versions=None, error=None):
+        self.jobs = list(jobs)
+        self.instances = list(instances)
+        self.versions = versions or {}
+        self.error = error
+        self.collect_calls = 0
+
+    def collect(self, kind="both"):
+        self.collect_calls += 1
+        if self.error:
+            raise DatasetSinkError(self.error)
+        jobs = self.jobs if kind in {"both", "dlc"} else []
+        instances = self.instances if kind in {"both", "dsw"} else []
+        return jobs, instances
+
+    def resolve_version(self, dataset_id, version):
+        return self.versions[(dataset_id, version)]
+
+
+class PaiUsageProbeTests(unittest.TestCase):
+    def _release(self, commit="c-old"):
+        tmp = Path(tempfile.mkdtemp())
+        root = _make_root(tmp, [("robotics", commit, 100, 100, True, False)])
+        return scan_releases(root)[0]
+
+    def test_protects_active_dlc_dataset_version_and_ignores_completed_job(self):
+        mount = {
+            "DataSourceId": "d-1",
+            "DataSourceVersion": "v2",
+            "MountAccess": "RO",
+        }
+        reader = FakePaiReader(
+            jobs=[
+                {"JobId": "active", "Status": "Running", "DataSources": [mount]},
+                {"JobId": "old", "Status": "Succeeded", "DataSources": [mount]},
+            ],
+            versions={
+                ("d-1", "v2"): {
+                    "SourceId": "c-old",
+                    "Uri": "cpfs://fs.region/datasets/robotics/c-old/",
+                    "Labels": [{"Key": "lakefs_commit", "Value": "c-old"}],
+                }
+            },
+        )
+
+        reason = PaiUsageProbe(reader).in_use(self._release())
+
+        self.assertIn("DLC active", reason)
+        self.assertNotIn("DLC old", reason)
+
+    def test_protects_direct_dsw_uri_even_when_mount_is_noncompliant(self):
+        reader = FakePaiReader(
+            instances=[
+                {
+                    "InstanceId": "dsw-1",
+                    "Status": "Running",
+                    "Datasets": [{"Uri": "cpfs://fs.region/datasets/robotics/c-old/"}],
+                }
+            ]
+        )
+        self.assertIn("DSW dsw-1", PaiUsageProbe(reader).in_use(self._release()))
+
+    def test_query_failure_retains_every_release_and_is_cached(self):
+        reader = FakePaiReader(error="AccessDenied")
+        probe = PaiUsageProbe(reader)
+
+        first = probe.in_use(self._release("c1"))
+        second = probe.in_use(self._release("c2"))
+
+        self.assertIn("保守保留全部", first)
+        self.assertIn("AccessDenied", second)
+        self.assertEqual(reader.collect_calls, 1)
 
 
 def _make_root(tmp: Path, releases) -> Path:

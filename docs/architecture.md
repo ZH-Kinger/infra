@@ -4,6 +4,9 @@
 
 相关文档：[权限模型](permissions.md)｜[CI/CD](cicd.md)｜[运维手册](runbook.md)｜[使用入门](onboarding.md)
 
+当前落地范围是单区域 `cn-hangzhou`；多区域需要拆分区域 state、PAI/CPFS 运行时与
+对象复制，不能靠把 `region` 变量改成列表实现。边界见[多区域方案](multi-region.md)。
+
 ---
 
 ## 1. 项目定位

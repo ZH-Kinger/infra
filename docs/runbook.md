@@ -38,16 +38,19 @@ ALIYUN_PROFILE=<profile> REGION=cn-hangzhou make preflight
 相关资源未就绪时报的 `OperationDenied.InvalidState`（这个错会盖住真正的原因）、
 以及同一 DataFlow 的任务必须串行。
 
-### 前置阻塞表
+### 当前 dev 环境与前置阻塞
+
+2026-08-04 已用 `make preflight` 重新做只读确认：CPFS
+`cpfs-00a27a8ec8b1e13a` 为 Running、已有一个 Fileset，PAI Workspace `617398`
+与 GitHub OIDC Provider 均存在。当前没有控制面缺失项。
 
 接入真实环境前，先确认下面几件事，否则会在中途卡住：
 
 | 阻塞项 | 现状 | 解除方式 |
 |---|---|---|
-| CPFS 文件系统 | 测试账号里 NAS/CPFS 服务已开通，但**一个文件系统都没有** | 建一个 CPFS 文件系统。没有它，CPFS 型 PAI Dataset 建不出来（PAI 会校验其真实存在） |
-| CPFS 类型 | 未确认是标准 CPFS 还是灵骏 BMCPFS | 标准 CPFS 走 `nas` API；BMCPFS 走 `eflo`，Terraform 数据源不同 |
-| 目标账号 | 本机 profile 登录的不是目标账号 | 在目标账号跑 `make discover` |
-| 执行身份 | 探测到的是主账号 root | 先建 Terraform 专用 RAM 用户，见下一节 |
+| CPFS 挂载点库存 | cn-hangzhou-i 文件系统可用，但此前 `CreateMountTarget` 返回 `Resource.OutOfStock` | 在同区先做挂载点库存探测；未恢复前不能验收 runner/DSW/DLC 数据面 |
+| 存量非空目录 | 已有数据的路径不能原地补 Fileset | 按 [Fileset 迁移手册](cpfs-fileset-migration.md) 迁入预建空 Fileset |
+| 执行身份 | 当前只读体检仍是主账号 root | 日常 CI 与训练改用 OIDC/RAM Role；root 只做账号级应急操作 |
 | PAI Dataset | 目标 Workspace 里 0 个 | 先建一个，`register-pai` 需要 DatasetId。注意 PAI 会自动带一个 `v1`，所以首次注册拿到的是 `v2` |
 | CI runner | GitHub 托管 runner 到不了 VPC 内 CPFS | 准备自托管 runner 或改用 ACK Job |
 
@@ -314,13 +317,22 @@ CPFS release 只增不减，写满之后 `materialize` 会直接失败。**这�
 ```bash
 # ① 先看计划（默认就是 dry-run，什么都不删）
 dataset-sink reclaim /mnt/cpfs/datasets \
-  --lakefs-api-endpoint "$LAKEFS_API_ENDPOINT"
+  --lakefs-api-endpoint "$LAKEFS_API_ENDPOINT" \
+  --pai-usage-workspace-id 617398 --pai-usage-region cn-hangzhou
 
 # ② 逐条看 reclaim[] 里的 release 和 retain[] 里的理由，确认无误
 # ③ 真删
 dataset-sink reclaim /mnt/cpfs/datasets \
-  --lakefs-api-endpoint "$LAKEFS_API_ENDPOINT" --sweep-trash --execute
+  --lakefs-api-endpoint "$LAKEFS_API_ENDPOINT" \
+  --pai-usage-workspace-id 617398 --pai-usage-region cn-hangzhou \
+  --sweep-trash --execute
 ```
+
+PAI 占用探针只读取活动 DLC/DSW 的挂载配置，把 Dataset Version 的 `SourceId`、
+`lakefs_commit` Label 和 URI 末级目录映射回 Commit。活动作业命中的 release 一律保留；
+查询失败时 fail-closed，全部保留；终态作业不会永久占住历史版本。它不替代 lakeFS
+可重建性检查、保护期与 `keep-last`，而是额外的交集条件。不传 Workspace 参数时保持
+原行为，仅依赖其他门禁。
 
 只想腾出指定容量（从最旧的开始删，够了就停）：
 

@@ -23,6 +23,7 @@ locals {
   # 注意：这里刻意不包含 `repo:<org>/<repo>:pull_request`——fork 的 PR 也会
   # 产生该 sub，等于把写权限交给任何能开 PR 的人。
   write_subjects = ["repo:${var.github_repo}:environment:${var.github_environment}"]
+  audit_subjects = ["repo:${var.github_repo}:ref:refs/heads/main"]
 }
 
 module "materializer_role" {
@@ -76,6 +77,25 @@ module "dlc_submit_role" {
 
   attach_custom_policy_names = concat(
     ["${local.name_prefix}-dlc-submit"],
+    local.guardrail_policy_names,
+  )
+
+  depends_on = [alicloud_ram_policy.this]
+}
+
+module "pai_mount_audit_role" {
+  source = "../ci-oidc-role"
+
+  role_name   = "${local.name_prefix}-pai-mount-audit"
+  description = "只读审计角色：定时检查 DLC/DSW 挂载是否来自不可变 Dataset Version。"
+
+  oidc_provider_arn    = var.oidc_provider_arn
+  audience             = var.oidc_audience
+  subjects             = local.audit_subjects
+  max_session_duration = var.max_session_duration
+
+  attach_custom_policy_names = concat(
+    ["${local.name_prefix}-pai-mount-audit"],
     local.guardrail_policy_names,
   )
 

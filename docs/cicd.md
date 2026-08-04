@@ -4,16 +4,26 @@
 
 ---
 
-## 三条流水线
+## 四条流水线
 
 | 流水线 | 触发 | 用途 | 是否需要云凭证 |
 |---|---|---|---|
 | [`ci.yml`](../.github/workflows/ci.yml) | 每个 PR / push main | 代码校验 | **否** |
 | [`terraform.yml`](../.github/workflows/terraform.yml) | `infra/**` 变更 | 基础设施与权限交付 | 是（OIDC） |
 | [`dataset-release.yml`](../.github/workflows/dataset-release.yml) | 手动触发 | 数据集发布 | 是（OIDC，每步换角色） |
+| [`pai-mount-audit.yml`](../.github/workflows/pai-mount-audit.yml) | 每日 / 手动 | 检查 DLC/DSW 是否绕过不可变 release | 是（只读 OIDC 角色） |
 
 刻意让 `ci.yml` 完全不碰凭证：绝大多数 PR 只需要代码校验，没有理由让它们
 经过任何有权限的路径。
+
+`pai-mount-audit.yml` 需要以下 GitHub Repository Variables：
+
+- `PAI_MOUNT_AUDIT_ROLE_ARN`：`terraform output pai_mount_audit_role_arn` 的值；
+- `ALIBABA_CLOUD_OIDC_PROVIDER_ARN`、`ALIBABA_CLOUD_REGION`、`PAI_WORKSPACE_ID`；
+- 可选的 `CPFS_USERS_URI_PREFIX`、`CPFS_SHARED_URI_PREFIX`，用于识别直接挂载的可写工作区。
+
+审计输出上传为保留 90 天的 artifact；发现违规时命令退出码为 3，Job 失败并留下报告。
+它只读 PAI 控制面元数据，不挂载 CPFS，也不读取训练数据。
 
 ---
 

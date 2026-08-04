@@ -53,5 +53,20 @@
       "Bash(docker *)",
       "Bash(brew *)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONPATH=src python3 -m dataset_sink.terraform_guard",
+            "timeout": 5,
+            "statusMessage": "检查 Terraform 本地变更护栏"
+          }
+        ]
+      }
+    ]
   }
 }

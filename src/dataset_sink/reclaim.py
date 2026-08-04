@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Protocol, Sequence, Tuple
+from urllib.parse import urlparse
 
 from .errors import DatasetSinkError
 
@@ -160,6 +161,77 @@ class NoUsageProbe:
     def in_use(self, release: ReleaseInfo) -> Optional[str]:
         del release
         return None
+
+
+class PaiUsageProbe:
+    """用 PAI DLC/DSW 的活动挂载保护正在训练的 Commit。
+
+    控制面查询或 Dataset Version 解析只要有一个失败，就对全部 release 返回“在用”。
+    回收场景必须 fail-closed：漏回收只是继续占容量，错回收会让训练读到残缺数据。
+    """
+
+    _TERMINAL = frozenset({"succeeded", "failed", "stopped", "completed", "deleted", "terminated"})
+
+    def __init__(self, reader, *, kind: str = "both") -> None:
+        self._reader = reader
+        self._kind = kind
+        self._uses: Optional[Dict[str, List[str]]] = None
+        self._error: Optional[str] = None
+
+    def in_use(self, release: ReleaseInfo) -> Optional[str]:
+        self._load()
+        if self._error:
+            return f"PAI 占用检查失败，保守保留全部 release: {self._error}"
+        matches = (self._uses or {}).get(release.commit_id, [])
+        return "; ".join(matches) if matches else None
+
+    def _load(self) -> None:
+        if self._uses is not None or self._error is not None:
+            return
+        uses: Dict[str, List[str]] = {}
+        try:
+            jobs, instances = self._reader.collect(self._kind)
+            workloads = [("DLC", item, "JobId", "DisplayName", "DataSources") for item in jobs] + [
+                ("DSW", item, "InstanceId", "InstanceName", "Datasets") for item in instances
+            ]
+            for kind, workload, id_field, name_field, mounts_field in workloads:
+                status = str(workload.get("Status") or workload.get("InstanceStatus") or "")
+                if status.lower() in self._TERMINAL:
+                    continue
+                label = f"{kind} {workload.get(id_field) or '?'}"
+                if workload.get(name_field):
+                    label += f" ({workload[name_field]})"
+                for mount in workload.get(mounts_field) or []:
+                    for commit in self._mount_commits(mount):
+                        uses.setdefault(commit, []).append(label)
+        except Exception as exc:  # noqa: BLE001 - 回收占用检查必须 fail-closed
+            self._error = str(exc)
+            return
+        self._uses = uses
+
+    def _mount_commits(self, mount: dict) -> set[str]:
+        commits = set()
+        dataset_id = mount.get("DataSourceId") or mount.get("DatasetId")
+        version = mount.get("DataSourceVersion") or mount.get("DatasetVersion")
+        if dataset_id and version:
+            released = self._reader.resolve_version(str(dataset_id), str(version))
+            source_id = str(released.get("SourceId") or "")
+            if source_id:
+                commits.add(source_id)
+            for item in released.get("Labels") or []:
+                if item.get("Key") == "lakefs_commit" and item.get("Value"):
+                    commits.add(str(item["Value"]))
+            uri_commit = _uri_leaf(str(released.get("Uri") or ""))
+            if uri_commit:
+                commits.add(uri_commit)
+        direct_commit = _uri_leaf(str(mount.get("Uri") or ""))
+        if direct_commit:
+            commits.add(direct_commit)
+        return commits
+
+
+def _uri_leaf(uri: str) -> str:
+    return urlparse(uri).path.rstrip("/").rsplit("/", 1)[-1] if uri else ""
 
 
 class RecoverabilityProbe(Protocol):

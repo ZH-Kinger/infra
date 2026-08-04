@@ -13,6 +13,11 @@ output "dlc_submit_role_arn" {
   value       = module.roles.dlc_submit_role_arn
 }
 
+output "pai_mount_audit_role_arn" {
+  description = "只读挂载审计角色 ARN"
+  value       = module.roles.pai_mount_audit_role_arn
+}
+
 output "training_runtime_role_arn" {
   description = "训练运行角色 ARN，填入 DLC CreateJob 的运行身份。不要配给 CI"
   value       = module.roles.training_runtime_role_arn

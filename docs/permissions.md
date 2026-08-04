@@ -81,13 +81,14 @@
 
 ## 3. 身份清单
 
-### 数据面（5 个）
+### 数据面（6 个）
 
 | 身份 | 能做 | 明确不能做 | 谁能扮演 |
 |---|---|---|---|
 | `dataset-sink-<env>-materializer` | 读 lakeFS 后端固定 Commit、写 CPFS release、读写 staging 前缀 | 注册 PAI 版本、提交训练 | GitHub OIDC，且 sub 必须是 `environment:<审批环境>` |
 | `dataset-sink-<env>-register` | `CreateDatasetVersion`、`ListDatasetVersions` | 读 lakeFS 后端桶、提交训练 | 同上 |
 | `dataset-sink-<env>-dlc-submit` | 提交/观察 DLC Job、解析 Dataset 版本 | 改写数据版本、读 lakeFS 后端 | 同上 |
+| `dataset-sink-<env>-pai-mount-audit` | 只读列举 DLC/DSW 挂载并解析 Dataset Version | 提交作业、修改数据集、读写 OSS/CPFS 数据面 | GitHub OIDC，仅 `main` 分支 |
 | `dataset-sink-<env>-training-runtime` | 只读已发布归档、写 output 前缀 | 读 lakeFS 后端与 staging、注册版本、提交作业 | **PAI 服务**（`pai-dlc` / `pai-dsw`），不是 CI |
 | `pai-<env>-developers`（用户组） | 浏览 Workspace、数据集、作业日志 | 取长期密钥、改写数据版本、读原始数据 | RAM 用户加组 |
 
@@ -97,6 +98,10 @@
 
 训练运行角色**刻意不走 OIDC**：如果 CI 也能假设它，流水线就获得了读训练数据的
 能力，「运行身份」和「交付身份」的隔离就没了。
+
+挂载审计也不复用 `dlc-submit`：审计任务只需要 `List/Get`，若复用能
+`CreateJob` 的角色，定时任务被劫持后就能创建算力作业。审计角色的信任策略只接受
+`repo:<org>/<repo>:ref:refs/heads/main`，策略再显式 Deny PAI 写操作和数据面访问。
 
 ### 交付面（3 个，由 bootstrap 管理）
 
@@ -515,15 +520,29 @@ DSW 也被覆盖了。实际只覆盖走这个入口的作业。）
 工作区的数据随便试，那是探索，本来就该自由；一旦要把结果当成正式产出，
 就必须能指认版本，而 `verify --deep` 能验证这个指认是不是真的。
 
-### 需要补的检测（尚未实现）
+### 检测性控制
 
 RAM 拦不住、也不该拦的部分，只能靠事后发现：
 
 - 列出所有 DLC Job 与 DSW 实例的挂载来源，标出**不是已注册 release** 的；
-- 标出挂了 `workspace` mode 位置的作业。
+- 标出挂了 `workspace` mode 位置、直接 URI、非只读或未固定 Version 的作业。
 
 这是**检测性控制**，不是预防性的——它不阻止，只让绕过行为无法长期隐藏。
-这一项还没做，`docs/runbook.md` 的差距表里记着。
+由 `dataset-sink audit-pai-mounts` 实现，只调用 List/Get API。退出码 3 表示发现违规，
+适合放进定时流水线告警：
+
+```bash
+dataset-sink audit-pai-mounts \
+  --workspace-id "$PAI_WORKSPACE_ID" \
+  --region cn-hangzhou \
+  --registry deploy/data-sources.json \
+  --workspace-uri-prefix cpfs://example/users/
+```
+
+其中 `--registry` 能识别 OSS 注册表里的 `workspace`；CPFS/NAS 工作区没有记录在
+对象存储注册表中，用可重复的 `--workspace-uri-prefix` 显式声明。审计会对 PAI
+Dataset Version 再调用 `GetDatasetVersion`，交叉检查 `SourceId`、`lakefs_commit`、
+`manifest_sha256` 与 URI 最后一级 Commit 目录，不能只看 Dataset ID 就放行。
 
 ### 一句话
 

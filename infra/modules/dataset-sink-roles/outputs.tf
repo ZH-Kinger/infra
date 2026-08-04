@@ -13,6 +13,11 @@ output "dlc_submit_role_arn" {
   value       = module.dlc_submit_role.role_arn
 }
 
+output "pai_mount_audit_role_arn" {
+  description = "只读挂载审计角色 ARN，供 main 分支定时任务使用"
+  value       = module.pai_mount_audit_role.role_arn
+}
+
 output "training_runtime_role_arn" {
   description = "训练运行角色 ARN，填入 DLC CreateJob 的运行身份，不要给 CI"
   value       = alicloud_ram_role.training_runtime.arn
@@ -43,6 +48,7 @@ output "assume_role_policies" {
     materializer     = module.materializer_role.assume_role_policy
     register         = module.register_role.assume_role_policy
     dlc_submit       = module.dlc_submit_role.assume_role_policy
+    pai_mount_audit  = module.pai_mount_audit_role.assume_role_policy
     training_runtime = local.training_runtime_trust
   }
 }
