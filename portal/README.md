@@ -17,6 +17,8 @@
   Profile 等少量参数，默认生成计划。完整流程见[用户手册](../docs/user-guide.md)。
 - 管理员负责 DataFlow、RAM/PAI 权限、执行白名单、GitHub 审批和故障处理，见
   [管理员手册](../docs/admin-guide.md)。
+- 用户也可以安装 [`dataset-platform-user`](../skills/dataset-platform-user/SKILL.md)，
+  让自己的 Agent 按相同字段契约生成门户/Workflow 请求。
 
 顶部六个页面分别覆盖运营总览、数据资产、存量纳管、容量与生命周期、DSW/DLC、
 权限与审计；导航副标题就是每个页面的责任范围。

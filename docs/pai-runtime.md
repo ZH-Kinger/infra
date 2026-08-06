@@ -15,6 +15,40 @@
 云身份、不产生费用。确认请求后再用 `execute=true` 运行；写操作进入 `pai-runtime`
 Environment 审批，通过后才使用 OIDC 临时角色创建资源。
 
+## 从提交到创建的 CI/CD 流程
+
+```text
+GitHub Actions / 门户提交少量参数
+  → request：检出代码并运行 dataset-sink runtime-request
+  → 校验 Commit、数据集映射、GitHub 用户映射和 Profile 组合
+  → 从 Repository Variables 与 runtime-profiles.json 补齐平台默认值
+  → 生成 runtime-envelope.json + runtime-request.json
+  → Artifact 保留 30 天，供用户和审批人核对
+  → execute=false：到此结束
+  → execute=true：等待 pai-runtime Environment 审批
+  → OIDC/STS 获取对应的 DSW 或 DLC 最小权限角色
+  → 使用本次 Run 的 runtime-request.json 调用阿里云 OpenAPI
+```
+
+DSW 分支执行 `pai-dsw CreateInstance`，DLC 分支执行 `pai-dlc CreateJob`。执行 Job 只下载
+`request` Job 生成的 Artifact，不根据用户输入临时拼装第二份请求。因此同一次执行 Run
+中，审批对象和发给阿里云的 OpenAPI Body 一致。
+
+`execute=false` 的预览 Run 和之后的 `execute=true` Run 不是同一个 Run：后者会重新生成
+请求，以取得新的 Run ID、输出路径和过期时间。审批人应核对执行 Run 自己的 Artifact，
+不能把先前预览 Run 当作最终审批对象。
+
+### 谁负责什么
+
+| 层 | 职责 |
+|---|---|
+| Terraform | 建设 Workspace、网络、OIDC Provider、RAM Role、GitHub Variables/Environment 所需基础配置 |
+| 用户或门户 | 提供运行类型、数据集、Commit、镜像 Profile、算力 Profile 和可选 DLC 命令 |
+| request Job | 无云身份生成、校验并固化完整请求 |
+| GitHub Environment | 由审批人决定本次请求能否取得云写权限 |
+| execute Job | 用 OIDC 临时角色创建 DSW/DLC，不保存 AccessKey |
+| PAI | 执行实例/作业，并按照请求挂载已发布 Dataset Version |
+
 ## 平台默认值
 
 [`runtime-profiles.json`](../deploy/pai/runtime-profiles.json) 是受代码评审的控制面：

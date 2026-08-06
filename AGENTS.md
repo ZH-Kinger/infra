@@ -49,6 +49,7 @@ make preflight     # 只读体检：换账号前先跑这个，看还差什么�
 | `deploy/pai/` | DLC/DSW 模板与训练入口 | 模板里的路径是容器内路径 |
 | `docs/` | 架构与运维文档 | README 只做导航，细节写这里 |
 | `scripts/` | 本地演练与只读探测 | 只读脚本才可进 settings 的 allow |
+| `skills/` | 面向用户 Agent 的可安装 Skill | 不放凭证；Workflow/权限/挂载契约变化时同步更新 |
 
 ## 代码风格
 

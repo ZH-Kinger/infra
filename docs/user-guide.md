@@ -18,19 +18,45 @@ Terraform、RAM 策略或 CPFS API。管理员配置、审批和排错见[管理
 
 页面上的资产数字如果标注为演示数据，不代表真实云资源；操作记录来自平台数据库。
 
+### 让自己的 Agent 帮忙
+
+仓库提供 [`dataset-platform-user`](../skills/dataset-platform-user/SKILL.md) Skill。它会
+先判断“使用现有版本、纳管 OSS/CPFS、启动 DSW/DLC、还是排错”，只向用户收集必要
+参数，并默认生成计划。
+
+Codex 用户可以把 `skills/dataset-platform-user/` 复制到自己的 Codex Skills 目录，
+重新打开任务后这样调用：
+
+```text
+Use $dataset-platform-user to adopt oss://legacy-data/robotics as robotics-legacy.
+Use $dataset-platform-user to prepare a DSW request for robotics commit 9b5d3e6c12.
+```
+
+支持 `SKILL.md` 的其他 Agent 也可以加载同一目录。Skill 不授予权限、不保存凭证，
+也不会替用户绕过审批；它的作用是生成正确、最小且可审阅的请求。
+
 ## 2. 普通用户的标准流程
 
 ### 使用已有数据训练
 
 1. 在“数据资产”选择数据集和固定 Commit。
 2. 进入“DSW / DLC”，选择 DSW 或 DLC、镜像 Profile 和算力 Profile。
-3. 先保持“仅生成计划”，核对数据集版本、只读挂载、网络和资源规格。
-4. 提交执行后等待审批；平台创建实例并把数据只读挂到 `/mnt/dataset`。
-5. 训练输出写 `/mnt/workspace` 或 `/mnt/output`，不要写 `/mnt/dataset`。
+3. 先保持“仅生成计划”。CI 在没有云身份的 Job 中生成完整请求和 Artifact，核对数据集
+   版本、ACR 镜像 Digest、只读挂载、网络、规格和运行时上限。
+4. 确认后用相同业务参数提交“执行”。新的 CI Run 会重新生成请求，并进入
+   `pai-runtime` Environment 等待审批。
+5. 审批通过后，GitHub OIDC 临时换取 DSW 或 DLC Submit Role；流水线使用该 Run 中
+   已审批的 JSON 调用 `CreateInstance` 或 `CreateJob`。
+6. 平台把数据只读挂到 `/mnt/dataset`；DSW 输出写 `/mnt/workspace`，DLC Checkpoint
+   和结果写 `/mnt/output`，不要写 `/mnt/dataset`。
 
-训练启动前会运行 `training-guard`。Commit、Manifest 或 Paimon Snapshot 不一致时，
-任务会直接停止，不能由用户绕过。完整示例见[使用入门](onboarding.md)和
-[DSW/DLC 自助使用](pai-runtime.md)。
+用户的 RAM 账号用于登录 PAI 和使用属于自己的资源，不需要保存 AccessKey，也不需要
+直接拥有创建任意 DSW/DLC 的权限。创建权限只在审批后的 CI Job 中以短期 STS 身份出现。
+
+DLC 通过受控入口启动时会先运行 `training-guard`。Commit、Manifest 或 Paimon Snapshot
+不一致时任务直接停止，用户命令不能绕过。DSW 是交互式环境，不声称由入口脚本强制
+覆盖；平台通过只读 Dataset Version、挂载审计和产出登记约束它。完整示例见
+[使用入门](onboarding.md)和[DSW/DLC 自助使用](pai-runtime.md)。
 
 ### 纳管已有 OSS 数据
 
@@ -87,4 +113,3 @@ GitHub OIDC 换取短期 RAM Role。
 | DataFlow 提示路径未覆盖 | 联系管理员补 Fileset/DataFlow，不要改用裸 OSS 训练 |
 | 只能生成计划 | 当前账号不在执行白名单，属于正常权限隔离 |
 | CPFS 数据读不到 | 检查 PAI 挂载、Fileset/POSIX 权限和版本状态 |
-

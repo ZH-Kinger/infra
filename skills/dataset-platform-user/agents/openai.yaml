@@ -1,0 +1,4 @@
+interface:
+  display_name: "训练数据平台用户助手"
+  short_description: "安全完成训练数据纳管、版本选择、PAI 训练提交与常见排错"
+  default_prompt: "Use $dataset-platform-user to help me safely prepare a dataset or submit a governed PAI training request."

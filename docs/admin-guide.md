@@ -15,6 +15,20 @@
 门户不保存阿里云 AccessKey，用户不能提交任意 Role ARN、PAI Dataset ID、VPC、镜像地址
 或挂载路径。所有写操作默认 plan-only。
 
+### 用户 Agent Skill 的管理
+
+仓库内的 [`dataset-platform-user`](../skills/dataset-platform-user/SKILL.md) 是用户侧统一
+入口。管理员应把它与平台代码一起评审和发布，不要在个人提示词里维护另一套规则。
+
+Skill 只生成计划和升级请求，不能创建 RAM/PAI/CPFS 资源。变更下列契约时必须同步更新
+Skill 及其引用：Workflow 输入、运行时 Profile、数据源目录、挂载路径、DataFlow 默认值、
+权限申请流程和常见错误。合并前运行仓库内的 Skill 契约测试；CI 的 `make test` 会执行
+同一个测试文件：
+
+```bash
+python3 tests/unit/test_user_skill.py
+```
+
 ## 2. 控制台页面与运维责任
 
 | 页面 | 管理员关注点 |
@@ -50,6 +64,34 @@ D1 保存操作类型、请求参数、操作人、Workflow、状态和链接。
 | 权限与挂载审计 | `pai-mount-audit.yml` | 只读 |
 
 发布流水线不会接受 Branch、`latest` 或日期作为训练版本，只接受不可变 Commit/Tag。
+
+### DSW/DLC 的 CI/CD 创建链路
+
+管理员应把 DSW/DLC 当作流水线按次创建的运行时，而不是让用户在控制台自由组合参数：
+
+```text
+workflow_dispatch / 门户请求
+  → request Job 无云身份渲染并校验完整 OpenAPI Body
+  → Artifact 固化审批对象
+  → pai-runtime Environment required reviewers
+  → OIDC 按 runtime 选择 DswSubmitRole 或 DlcSubmitRole
+  → 同一 Artifact 调用 CreateInstance / CreateJob
+```
+
+审批时至少核对 Commit、PAI Dataset Version、镜像 Digest、算力规格、网络、RO/RW 挂载、
+DSW 所有者或 DLC 命令，以及 TTL。不要只看用户表单；最终审批对象是当前执行 Run 的
+`runtime-envelope.json` 和 `runtime-request.json`。`execute=false` 的历史预览不能代替
+当前执行 Run 的审批，因为 Run ID、输出路径和过期时间会变化。
+
+DSW 与 DLC 使用不同 Submit Role。策略设计要求两个 Role 不能修改 Dataset Version、
+RAM Policy、网络或镜像白名单，Profile 与 Repository Variables 的变更必须走代码评审；
+但在真实账号完成授权对照测试前，不能把 DSW `CreateInstance` 的 Action 收敛描述为已经
+验证的强制隔离。创建响应和后续状态仍应关联 GitHub Run ID，供门户审计和资源回收使用。
+
+发布门禁必须同时包含：CI 对渲染后 RAM 策略的检查，以及真实账号下的成功/拒绝对照。
+受控请求应由对应 Submit Role 创建成功；修改 Dataset Version、RAM Policy、网络、镜像
+白名单或使用错误运行时角色的请求必须得到 `AccessDenied`。对照结果未留档前，不开放
+生产 `pai-runtime` Environment 的执行权限。
 
 ## 5. DataFlow 自动化
 
