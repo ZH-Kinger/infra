@@ -50,12 +50,23 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
             "pai-mount-audit.yml",
             "oidc-role-smoke.yml",
             "cloud-preflight.yml",
+            "terraform-force-unlock.yml",
         ):
             workflow = self._read(name)
             with self.subTest(workflow=name):
                 self.assertIn("  workflow_dispatch:\n", workflow)
                 self.assertNotIn("  push:\n", workflow)
                 self.assertNotIn("  schedule:\n", workflow)
+
+    def test_force_unlock_is_manual_confirmed_and_uses_apply_role(self):
+        workflow = self._read("terraform-force-unlock.yml")
+        self.assertIn("confirm_unlock:", workflow)
+        self.assertIn("if: ${{ inputs.confirm_unlock }}", workflow)
+        self.assertIn("concurrency:\n  group: terraform-${{ github.ref }}", workflow)
+        self.assertIn("ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN", workflow)
+        self.assertIn("ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN", workflow)
+        self.assertIn('force-unlock -force "$LOCK_ID"', workflow)
+        self.assertNotIn("-lock=false", workflow)
 
     def test_oidc_smoke_only_checks_temporary_credentials(self):
         workflow = self._read("oidc-role-smoke.yml")
