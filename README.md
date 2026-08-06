@@ -45,6 +45,7 @@ The primary rule is:
 | Goal | Document |
 |---|---|
 | Train with a published dataset | [User onboarding](docs/onboarding.md) |
+| Start a governed DSW or DLC runtime | [DSW/DLC self-service](docs/pai-runtime.md) |
 | Understand the architecture and tradeoffs | [Architecture](docs/architecture.md) |
 | Understand permission isolation and privilege escalation controls | [Permission model](docs/permissions.md) |
 | Understand pipelines and approvals | [CI/CD](docs/cicd.md) |
@@ -218,6 +219,7 @@ levels. Compromising one identity is insufficient to corrupt and consume a datas
 | Materializer | Read a fixed lakeFS Commit and write a CPFS release | Register a PAI version or submit training |
 | Register | Create and resolve Dataset Versions | Read the lakeFS backend or submit training |
 | DlcSubmit | Submit DLC jobs bound to approved versions | Modify dataset versions or read the lakeFS backend |
+| DswSubmit | Create private DSW instances for mapped RAM users | Submit DLC or modify dataset versions |
 | PaiMountAudit | Read DLC/DSW mount metadata | Submit jobs, mutate datasets, or read dataset bytes |
 | TrainingRuntime | Read published archives and write its own output | Read the lakeFS backend or staging area |
 | Developer group | Use published versions | Create long-lived keys or modify releases |

@@ -1,0 +1,106 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "pai:CreateInstance",
+        "paidsw:CreateInstance",
+        "pai:GetInstance",
+        "paidsw:GetInstance",
+        "pai:ListInstances",
+        "paidsw:ListInstances",
+        "pai:StopInstance",
+        "paidsw:StopInstance"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "CreateAndObserveDswInstances"
+    },
+    {
+      "Action": [
+        "pai:GetDataset",
+        "paidataset:GetDataset",
+        "pai:ListDatasets",
+        "paidataset:ListDatasets",
+        "pai:ListDatasetVersions",
+        "paidataset:ListDatasetVersions",
+        "pai:GetDatasetVersion",
+        "paidataset:GetDatasetVersion"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "ResolveDatasetVersion"
+    },
+    {
+      "Action": [
+        "pai:CreateDataset",
+        "paidataset:CreateDataset",
+        "pai:CreateDatasetVersion",
+        "paidataset:CreateDatasetVersion",
+        "pai:UpdateDataset",
+        "paidataset:UpdateDataset",
+        "pai:UpdateDatasetVersion",
+        "paidataset:UpdateDatasetVersion",
+        "pai:DeleteDataset",
+        "paidataset:DeleteDataset",
+        "pai:DeleteDatasetVersion",
+        "paidataset:DeleteDatasetVersion",
+        "pai:CreateJob",
+        "paidlc:CreateJob",
+        "pai:UpdateJob",
+        "paidlc:UpdateJob"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "DenyDatasetAndDlcMutation"
+    },
+    {
+      "Action": [
+        "oss:GetObject",
+        "oss:ListObjects"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:LAKEFS_BACKEND_BUCKET",
+        "acs:oss:*:ACCOUNT_ID:LAKEFS_BACKEND_BUCKET/*"
+      ],
+      "Sid": "DenyLakeFSBackendAccess"
+    },
+    {
+      "Action": [
+        "oss:PutObject",
+        "oss:DeleteObject",
+        "oss:DeleteObjects",
+        "oss:AbortMultipartUpload",
+        "oss:PutObjectTagging",
+        "oss:RestoreObject"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:LEGACY_BUCKET/LEGACY_PREFIX/*"
+      ],
+      "Sid": "DenyMutatingReadonlyDataSources"
+    },
+    {
+      "Action": [
+        "oss:PutObject",
+        "oss:DeleteObject",
+        "oss:DeleteObjects",
+        "oss:AbortMultipartUpload",
+        "oss:PutObjectTagging",
+        "oss:RestoreObject"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "acs:oss:*:ACCOUNT_ID:LEGACY_BUCKET/LEGACY_PREFIX/*"
+      ],
+      "Sid": "DenyMutatingImportedLegacyObjects"
+    }
+  ],
+  "Version": "1"
+}

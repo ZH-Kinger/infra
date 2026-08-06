@@ -1,0 +1,170 @@
+name: PAI runtime
+
+# DSW/DLC 是有成本的云资源，只允许人工触发。默认只生成并展示请求；明确勾选
+# execute 后仍要经过 pai-runtime Environment 审批，才会取得写入角色。
+on:
+  workflow_dispatch:
+    inputs:
+      runtime:
+        description: 运行类型
+        required: true
+        type: choice
+        options: [dsw, dlc]
+      dataset:
+        description: 平台数据集 Profile
+        required: true
+        default: robotics
+        type: choice
+        options: [robotics]
+      commit:
+        description: lakeFS Commit ID（不接受 Tag、Branch 或 latest）
+        required: true
+      image_profile:
+        description: 受控镜像 Profile
+        required: true
+        default: pytorch-2.6
+        type: choice
+        options: [pytorch-2.6]
+      compute_profile:
+        description: DSW 选 gpu-dev；DLC 选 gpu-training
+        required: true
+        type: choice
+        options: [gpu-dev, gpu-training]
+      command:
+        description: DLC 训练命令；DSW 留空，DLC 留空则使用 Profile 默认命令
+        required: false
+      execute:
+        description: 审批后真实创建 DSW/DLC；默认仅生成请求
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pai-runtime-${{ github.actor }}-${{ inputs.runtime }}
+  cancel-in-progress: false
+
+env:
+  ALIBABA_CLOUD_OIDC_AUDIENCE: github-actions
+
+jobs:
+  request:
+    name: 生成并校验请求
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装本项目
+        run: python -m pip install .
+
+      - name: 生成受控 DSW/DLC 请求
+        env:
+          PAI_WORKSPACE_ID: ${{ vars.PAI_WORKSPACE_ID }}
+          PAI_DATASET_ID: ${{ vars.PAI_DATASET_ID }}
+          PAI_ACR_REGISTRY: ${{ vars.PAI_ACR_REGISTRY }}
+          TRAINING_IMAGE: ${{ vars.TRAINING_IMAGE }}
+          DSW_ECS_SPEC: ${{ vars.DSW_ECS_SPEC }}
+          DSW_RESOURCE_ID: ${{ vars.DSW_RESOURCE_ID }}
+          DLC_ECS_SPEC: ${{ vars.DLC_ECS_SPEC }}
+          PAI_RESOURCE_ID: ${{ vars.PAI_RESOURCE_ID }}
+          VPC_ID: ${{ vars.VPC_ID }}
+          VSWITCH_ID: ${{ vars.VSWITCH_ID }}
+          SECURITY_GROUP_ID: ${{ vars.SECURITY_GROUP_ID }}
+          VPC_EXTENDED_CIDRS: ${{ vars.VPC_EXTENDED_CIDRS }}
+          PAI_DSW_OWNER_USER_ID: ${{ vars.PAI_DSW_OWNER_USER_ID }}
+          PAI_WORKSPACE_URI_PREFIX: ${{ vars.PAI_WORKSPACE_URI_PREFIX }}
+          PAI_OUTPUT_URI_PREFIX: ${{ vars.PAI_OUTPUT_URI_PREFIX }}
+          REQUEST_RUNTIME: ${{ inputs.runtime }}
+          REQUEST_DATASET: ${{ inputs.dataset }}
+          REQUEST_COMMIT: ${{ inputs.commit }}
+          REQUEST_IMAGE_PROFILE: ${{ inputs.image_profile }}
+          REQUEST_COMPUTE_PROFILE: ${{ inputs.compute_profile }}
+          REQUEST_ACTOR: ${{ github.actor }}
+          REQUEST_RUN_ID: ${{ github.run_id }}
+          USER_COMMAND: ${{ inputs.command }}
+        run: |
+          set -euo pipefail
+          args=(
+            runtime-request
+            --config deploy/pai/runtime-profiles.json
+            --runtime "$REQUEST_RUNTIME"
+            --dataset "$REQUEST_DATASET"
+            --commit "$REQUEST_COMMIT"
+            --image-profile "$REQUEST_IMAGE_PROFILE"
+            --compute-profile "$REQUEST_COMPUTE_PROFILE"
+            --actor "$REQUEST_ACTOR"
+            --run-id "$REQUEST_RUN_ID"
+            --output "$RUNNER_TEMP/runtime-envelope.json"
+            --request-output "$RUNNER_TEMP/runtime-request.json"
+          )
+          if [ -n "$USER_COMMAND" ]; then
+            args+=(--command "$USER_COMMAND")
+          fi
+          dataset-sink "${args[@]}"
+
+      - name: 展示审批对象
+        run: |
+          set -euo pipefail
+          python -m json.tool "$RUNNER_TEMP/runtime-envelope.json"
+          {
+            echo '## PAI runtime request'
+            echo
+            echo '```json'
+            python -m json.tool "$RUNNER_TEMP/runtime-envelope.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pai-runtime-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/runtime-envelope.json
+            ${{ runner.temp }}/runtime-request.json
+          retention-days: 30
+
+  execute:
+    name: 审批后创建 ${{ inputs.runtime }}
+    needs: request
+    if: ${{ inputs.execute }}
+    runs-on: ubuntu-latest
+    environment: pai-runtime
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pai-runtime-${{ github.run_id }}
+          path: ${{ runner.temp }}/pai-runtime
+
+      - name: 假设最小权限提交角色
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ inputs.runtime == 'dsw' && vars.DSW_SUBMIT_ROLE_ARN || vars.DLC_SUBMIT_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
+          audience: ${{ env.ALIBABA_CLOUD_OIDC_AUDIENCE }}
+          role-session-name: runtime-${{ inputs.runtime }}-${{ github.run_id }}
+
+      - name: 创建 DSW
+        if: inputs.runtime == 'dsw'
+        run: |
+          set -euo pipefail
+          aliyun pai-dsw CreateInstance \
+            --region '${{ vars.ALIBABA_CLOUD_REGION }}' \
+            --endpoint 'pai-dsw.${{ vars.ALIBABA_CLOUD_REGION }}.aliyuncs.com' \
+            --body "$(cat "$RUNNER_TEMP/pai-runtime/runtime-request.json")"
+
+      - name: 提交 DLC
+        if: inputs.runtime == 'dlc'
+        run: |
+          set -euo pipefail
+          aliyun pai-dlc CreateJob \
+            --region '${{ vars.ALIBABA_CLOUD_REGION }}' \
+            --endpoint 'pai-dlc.${{ vars.ALIBABA_CLOUD_REGION }}.aliyuncs.com' \
+            --body "$(cat "$RUNNER_TEMP/pai-runtime/runtime-request.json")"

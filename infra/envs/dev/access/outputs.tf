@@ -13,6 +13,11 @@ output "dlc_submit_role_arn" {
   value       = module.roles.dlc_submit_role_arn
 }
 
+output "dsw_submit_role_arn" {
+  description = "DSW 提交角色 ARN，填入 PAI runtime 流水线"
+  value       = module.roles.dsw_submit_role_arn
+}
+
 output "pai_mount_audit_role_arn" {
   description = "只读挂载审计角色 ARN"
   value       = module.roles.pai_mount_audit_role_arn

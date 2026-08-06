@@ -46,6 +46,7 @@ from .reclaim import (
     sweep_trash,
 )
 from .registry import load_registry
+from .runtime import build_runtime_request, load_runtime_config
 from .sources import LakeFSS3SourceReader, LocalSourceReader
 from .training_guard import validate_training_dataset
 
@@ -390,6 +391,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="额外的可写工作区 URI 前缀，可重复；用于 CPFS/NAS workspace",
     )
 
+    runtime = commands.add_parser(
+        "runtime-request",
+        help="用少量用户参数和平台 Profile 生成安全的 DSW/DLC 创建请求",
+    )
+    runtime.add_argument("--config", type=Path, required=True)
+    runtime.add_argument("--runtime", choices=("dsw", "dlc"), required=True)
+    runtime.add_argument("--dataset", required=True, help="平台登记的数据集短名称")
+    runtime.add_argument("--commit", required=True, help="不可变 lakeFS Commit ID")
+    runtime.add_argument("--image-profile", required=True)
+    runtime.add_argument("--compute-profile", required=True)
+    runtime.add_argument("--actor", required=True, help="审计身份，如 GitHub actor")
+    runtime.add_argument("--run-id", required=True, help="唯一运行 ID，用于名称和输出目录")
+    # option 名保留用户熟悉的 --command，但 dest 不能也叫 command：根 parser
+    # 已用 command 保存子命令名，否则它会把 "runtime-request" 覆盖掉。
+    runtime.add_argument("--command", dest="training_command", help="DLC 启动命令；DSW 忽略")
+    runtime.add_argument("--output", type=Path, help="完整 envelope 输出路径")
+    runtime.add_argument("--request-output", type=Path, help="仅 OpenAPI body 输出路径")
+
     guard = commands.add_parser(
         "training-guard",
         help="fail closed unless a mounted PAI dataset matches its immutable release",
@@ -456,6 +475,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         elif args.command == "audit-pai-mounts":
             result = _audit_pai_mounts(args)
+        elif args.command == "runtime-request":
+            result = _runtime_request(args)
         else:
             if not args.expected_commit:
                 raise ValueError("training-guard requires --expected-commit or DATASET_COMMIT")
@@ -505,6 +526,34 @@ def _audit_pai_mounts(args: argparse.Namespace) -> dict:
         registry=registry,
         workspace_uri_prefixes=args.workspace_uri_prefix,
     )
+
+
+def _runtime_request(args: argparse.Namespace) -> dict:
+    envelope = build_runtime_request(
+        load_runtime_config(args.config),
+        runtime=args.runtime,
+        dataset=args.dataset,
+        commit_id=args.commit,
+        image_profile=args.image_profile,
+        compute_profile=args.compute_profile,
+        actor=args.actor,
+        run_id=args.run_id,
+        command=args.training_command,
+    )
+    result = envelope.as_dict()
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(
+            json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    if args.request_output:
+        args.request_output.parent.mkdir(parents=True, exist_ok=True)
+        args.request_output.write_text(
+            json.dumps(envelope.request, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    return result
 
 
 def _first_env(*names: str) -> Optional[str]:

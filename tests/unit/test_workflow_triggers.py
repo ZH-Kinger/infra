@@ -52,12 +52,24 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
             "cloud-preflight.yml",
             "terraform-force-unlock.yml",
             "terraform-state-forget.yml",
+            "pai-runtime.yml",
         ):
             workflow = self._read(name)
             with self.subTest(workflow=name):
                 self.assertIn("  workflow_dispatch:\n", workflow)
                 self.assertNotIn("  push:\n", workflow)
                 self.assertNotIn("  schedule:\n", workflow)
+
+    def test_pai_runtime_is_profile_driven_dry_run_by_default(self):
+        workflow = self._read("pai-runtime.yml")
+        self.assertIn("default: false", workflow)
+        self.assertIn("environment: pai-runtime", workflow)
+        self.assertIn("runtime-request", workflow)
+        self.assertIn("--request-output", workflow)
+        self.assertIn("DSW_SUBMIT_ROLE_ARN", workflow)
+        self.assertIn("DLC_SUBMIT_ROLE_ARN", workflow)
+        self.assertIn("if: ${{ inputs.execute }}", workflow)
+        self.assertNotIn("ForwardInfos", workflow)
 
     def test_force_unlock_is_manual_confirmed_and_uses_apply_role(self):
         workflow = self._read("terraform-force-unlock.yml")

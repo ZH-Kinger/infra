@@ -57,6 +57,15 @@ variable "github_environment" {
   type        = string
 }
 
+variable "runtime_github_environment" {
+  description = <<-EOT
+    DSW/DLC 自助运行流水线使用的受保护 GitHub Environment。它与数据发布审批
+    分开，避免给一次训练审批顺带授予沉降或注册数据版本的身份。
+  EOT
+  type        = string
+  default     = "pai-runtime"
+}
+
 variable "lakefs_backend_bucket" {
   description = "lakeFS 的 OSS 后端桶名。沉降角色只读这里，其他角色一律禁止读"
   type        = string

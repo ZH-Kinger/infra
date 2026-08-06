@@ -1,0 +1,54 @@
+{
+  "platform": {
+    "allowed_image_registries": [
+      "${PAI_ACR_REGISTRY}"
+    ],
+    "default_route": "eth1",
+    "extended_cidrs": "${VPC_EXTENDED_CIDRS}",
+    "output_uri_template": "${PAI_OUTPUT_URI_PREFIX}/{actor}/{run_id}/",
+    "require_image_digest": true,
+    "security_group_id": "${SECURITY_GROUP_ID}",
+    "training_entrypoint": "/workspace/deploy/pai/training-entrypoint.sh",
+    "vpc_id": "${VPC_ID}",
+    "vswitch_id": "${VSWITCH_ID}",
+    "workspace_id": "${PAI_WORKSPACE_ID}",
+    "workspace_uri_template": "${PAI_WORKSPACE_URI_PREFIX}/{actor}/"
+  },
+  "users": {
+    "ZH-Kinger": {
+      "ram_user_id": "${PAI_DSW_OWNER_USER_ID}"
+    }
+  },
+  "datasets": {
+    "robotics": {
+      "dataset_id": "${PAI_DATASET_ID}",
+      "mount_path": "/mnt/dataset"
+    }
+  },
+  "image_profiles": {
+    "pytorch-2.6": {
+      "image": "${TRAINING_IMAGE}",
+      "runtimes": [
+        "dsw",
+        "dlc"
+      ]
+    }
+  },
+  "compute_profiles": {
+    "gpu-dev": {
+      "ecs_spec": "${DSW_ECS_SPEC}",
+      "resource_id": "${DSW_RESOURCE_ID}",
+      "runtime": "dsw",
+      "ttl_hours": 8
+    },
+    "gpu-training": {
+      "default_command": "python /workspace/train.py --dataset /mnt/dataset --output /mnt/output",
+      "ecs_spec": "${DLC_ECS_SPEC}",
+      "job_type": "PyTorchJob",
+      "pod_count": 1,
+      "resource_id": "${PAI_RESOURCE_ID}",
+      "runtime": "dlc",
+      "ttl_hours": 24
+    }
+  }
+}

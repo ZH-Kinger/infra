@@ -95,6 +95,18 @@ locals {
     for a in ["CreateJob", "GetJob", "ListJobs", "StopJob", "GetPodLogs"] :
     [for ns in local.job_ns : "${ns}:${a}"]
   ])
+  pai_dsw_operate_actions = flatten([
+    for a in ["CreateInstance", "GetInstance", "ListInstances", "StopInstance"] : [
+      "pai:${a}",
+      "paidsw:${a}",
+    ]
+  ])
+  pai_dsw_mutation_actions = flatten([
+    for a in ["CreateInstance", "UpdateInstance", "StartInstance", "StopInstance", "DeleteInstance"] : [
+      "pai:${a}",
+      "paidsw:${a}",
+    ]
+  ])
   # 检测性控制：DLC/DSW 的挂载来源审计。PAI 官方策略长期存在 pai:* 与
   # 产品命名空间不一致的问题，所以仍然成对写，理由同上。
   pai_dsw_audit_actions = flatten([
@@ -396,6 +408,45 @@ locals {
   })
 
   # ---------------------------------------------------------------------------
+  # 3b. DSW 提交角色：CI 只按受控 Profile 创建/查看/停止实例。
+  #     CreateInstance 的 UserId 由受评审的用户映射注入，实例保持 PRIVATE。
+  # ---------------------------------------------------------------------------
+  dsw_submit_policy = jsonencode({
+    Version = "1"
+    Statement = concat([
+      {
+        Sid      = "CreateAndObserveDswInstances"
+        Effect   = "Allow"
+        Action   = local.pai_dsw_operate_actions
+        Resource = ["*"]
+      },
+      {
+        Sid      = "ResolveDatasetVersion"
+        Effect   = "Allow"
+        Action   = local.pai_dataset_read_actions
+        Resource = ["*"]
+      },
+      {
+        Sid      = "DenyDatasetAndDlcMutation"
+        Effect   = "Deny"
+        Action   = concat(local.pai_dataset_mutation_actions, local.pai_job_submit_actions)
+        Resource = ["*"]
+      },
+      {
+        Sid    = "DenyLakeFSBackendAccess"
+        Effect = "Deny"
+        Action = ["oss:GetObject", "oss:ListObjects"]
+        Resource = [
+          local.lakefs_bucket_arn,
+          local.lakefs_object_arn,
+        ]
+      },
+      ],
+      local.deny_readonly_source_statements,
+    local.deny_imported_mutation_statements)
+  })
+
+  # ---------------------------------------------------------------------------
   # 4. 挂载审计角色：定时检查 DLC/DSW 是否绕过不可变 release。
   #    这是纯检测身份，不复用能 CreateJob 的 dlc-submit 角色。
   # ---------------------------------------------------------------------------
@@ -564,6 +615,14 @@ locals {
         Action   = local.pai_job_submit_actions
         Resource = ["*"]
       },
+      {
+        # DSW 也必须走 Profile 流水线，否则持有旧的 AliyunPAIFullAccess 的用户
+        # 可以在控制台重新打开公网/SSH、换任意镜像或挂裸存储 URI。
+        Sid      = "DenyDswInstanceMutation"
+        Effect   = "Deny"
+        Action   = local.pai_dsw_mutation_actions
+        Resource = ["*"]
+      },
       ],
       local.workspace_rw_statements,
       local.deny_readonly_source_statements,
@@ -596,6 +655,8 @@ locals {
           "paidataset:DeleteDatasetVersion",
           "paiworkspace:DeleteWorkspace",
           "paiworkspace:DeleteMembers",
+          "pai:DeleteInstance",
+          "paidsw:DeleteInstance",
         ]
         Resource = ["*"]
       },
@@ -621,6 +682,7 @@ locals {
       "${local.name_prefix}-materializer"     = local.materializer_policy
       "${local.name_prefix}-register"         = local.register_policy
       "${local.name_prefix}-dlc-submit"       = local.dlc_submit_policy
+      "${local.name_prefix}-dsw-submit"       = local.dsw_submit_policy
       "${local.name_prefix}-pai-mount-audit"  = local.pai_mount_audit_policy
       "${local.name_prefix}-training-runtime" = local.training_runtime_policy
     },

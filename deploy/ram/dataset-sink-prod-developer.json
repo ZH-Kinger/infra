@@ -97,6 +97,25 @@
     },
     {
       "Action": [
+        "pai:CreateInstance",
+        "paidsw:CreateInstance",
+        "pai:UpdateInstance",
+        "paidsw:UpdateInstance",
+        "pai:StartInstance",
+        "paidsw:StartInstance",
+        "pai:StopInstance",
+        "paidsw:StopInstance",
+        "pai:DeleteInstance",
+        "paidsw:DeleteInstance"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "*"
+      ],
+      "Sid": "DenyDswInstanceMutation"
+    },
+    {
+      "Action": [
         "oss:GetObject",
         "oss:GetObjectMeta",
         "oss:HeadObject",

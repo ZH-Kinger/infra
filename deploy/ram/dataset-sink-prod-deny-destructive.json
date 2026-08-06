@@ -13,7 +13,9 @@
         "paidataset:DeleteDataset",
         "paidataset:DeleteDatasetVersion",
         "paiworkspace:DeleteWorkspace",
-        "paiworkspace:DeleteMembers"
+        "paiworkspace:DeleteMembers",
+        "pai:DeleteInstance",
+        "paidsw:DeleteInstance"
       ],
       "Effect": "Deny",
       "Resource": [

@@ -12,6 +12,7 @@
 | [`terraform.yml`](../.github/workflows/terraform.yml) | `infra/**` PR 做 plan；main 手动 apply | 基础设施与权限交付 | 是（OIDC） |
 | [`dataset-release.yml`](../.github/workflows/dataset-release.yml) | 手动触发 | 数据集发布 | 是（OIDC，每步换角色） |
 | [`pai-mount-audit.yml`](../.github/workflows/pai-mount-audit.yml) | 手动 | 检查 DLC/DSW 是否绕过不可变 release | 是（只读 OIDC 角色） |
+| [`pai-runtime.yml`](../.github/workflows/pai-runtime.yml) | 手动 | 用受控 Profile 创建 DSW/DLC；默认只生成请求 | execute 后是 |
 
 刻意让 `ci.yml` 完全不碰凭证：绝大多数 PR 只需要代码校验，没有理由让它们
 经过任何有权限的路径。

@@ -17,5 +17,8 @@ if [ -n "${PAIMON_SNAPSHOT_ID:-}" ]; then
 fi
 dataset-sink "$@"
 
-# Replace this with torchrun/deepspeed. Keep model output on another writable mount.
-exec python /workspace/train.py --dataset "$DATASET_ROOT" --output "${OUTPUT_ROOT:-/mnt/output}"
+# 用户命令由 runtime profile 流水线注入，但永远只能在上面的门禁通过之后执行。
+# 用户本来就能在训练容器里执行代码；这里的安全边界是不可变只读挂载与 guard，
+# 不是尝试过滤 shell 命令。输出保持在单独的可写挂载。
+: "${TRAINING_COMMAND:=python /workspace/train.py --dataset $DATASET_ROOT --output ${OUTPUT_ROOT:-/mnt/output}}"
+exec /bin/sh -c "$TRAINING_COMMAND"
