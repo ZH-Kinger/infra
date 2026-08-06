@@ -61,9 +61,11 @@ jobs:
           script: |
             const token = await core.getIDToken(process.env.ALIBABA_CLOUD_OIDC_AUDIENCE);
             const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+            const immutableRepo = `${context.repo.owner}@${claims.repository_owner_id}`
+              + `/${context.repo.repo}@${claims.repository_id}`;
             const expectedSub = context.eventName === 'pull_request'
-              ? `repo:${context.repo.owner}/${context.repo.repo}:pull_request`
-              : `repo:${context.repo.owner}/${context.repo.repo}:ref:${context.ref}`;
+              ? `repo:${immutableRepo}:pull_request`
+              : `repo:${immutableRepo}:ref:${context.ref}`;
             const actual = { iss: claims.iss, aud: claims.aud, sub: claims.sub };
             core.info(`OIDC claims: ${JSON.stringify(actual)}`);
             if (claims.iss !== 'https://token.actions.githubusercontent.com'

@@ -41,6 +41,16 @@ variable "github_repo" {
   }
 }
 
+variable "github_oidc_repo" {
+  description = "GitHub 不可变 OIDC 仓库段，格式 <owner>@<owner-id>/<repo>@<repo-id>"
+  type        = string
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+@[0-9]+/[A-Za-z0-9._-]+@[0-9]+$", var.github_oidc_repo))
+    error_message = "github_oidc_repo 必须是 <owner>@<owner-id>/<repo>@<repo-id> 形式。"
+  }
+}
+
 variable "platform_github_environments" {
   description = "可假设 PlatformApplyRole 的 GitHub Environments；必须与 terraform.yml 矩阵一致"
   type        = set(string)

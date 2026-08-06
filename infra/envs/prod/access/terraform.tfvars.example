@@ -12,6 +12,7 @@ oidc_provider_arn = "acs:ram::REPLACE-ME-account-id:oidc-provider/GitHubActions"
 oidc_audience     = "github-actions"
 
 github_repo        = "your-org/infra-ci-cd"
+github_oidc_repo   = "your-org@123456789/infra-ci-cd@987654321"
 github_environment = "production"
 
 # lakeFS 的 OSS 后端桶：只有沉降角色可读

@@ -34,6 +34,7 @@ module "roles" {
   oidc_provider_arn  = var.oidc_provider_arn
   oidc_audience      = var.oidc_audience
   github_repo        = var.github_repo
+  github_oidc_repo   = var.github_oidc_repo
   github_environment = var.github_environment
 
   lakefs_backend_bucket = var.lakefs_backend_bucket

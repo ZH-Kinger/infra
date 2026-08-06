@@ -39,6 +39,16 @@ variable "github_repo" {
   }
 }
 
+variable "github_oidc_repo" {
+  description = "GitHub 不可变 OIDC 仓库段，格式 <owner>@<owner-id>/<repo>@<repo-id>"
+  type        = string
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+@[0-9]+/[A-Za-z0-9._-]+@[0-9]+$", var.github_oidc_repo))
+    error_message = "github_oidc_repo 必须是 <owner>@<owner-id>/<repo>@<repo-id> 形式。"
+  }
+}
+
 variable "github_environment" {
   description = <<-EOT
     允许假设写入类角色的 GitHub Environment 名称。发布流水线必须声明

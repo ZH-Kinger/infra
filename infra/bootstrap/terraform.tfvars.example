@@ -9,6 +9,8 @@ lock_instance_name = "tf-state-lock"
 lock_table_name    = "terraform_state_lock"
 
 github_repo = "your-org/infra-ci-cd"
+# GitHub Settings → Actions → OpenID Connect 中的不可变 subject 仓库段。
+github_oidc_repo = "your-org@123456789/infra-ci-cd@987654321"
 
 platform_github_environments = ["development", "production"]
 access_github_environments   = ["development", "production-access"]

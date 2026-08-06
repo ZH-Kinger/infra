@@ -37,12 +37,21 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
     def test_plan_role_trusts_manual_main_but_remains_readonly(self):
         bootstrap = Path("infra/bootstrap/oidc.tf").read_text(encoding="utf-8")
         variables = Path("infra/bootstrap/variables.tf").read_text(encoding="utf-8")
-        self.assertIn("repo:${var.github_repo}:ref:refs/heads/main", bootstrap)
+        self.assertIn("repo:${var.github_oidc_repo}:ref:refs/heads/main", bootstrap)
         self.assertIn("platform_apply_subjects", bootstrap)
         self.assertIn("access_apply_subjects", bootstrap)
         self.assertIn('default     = ["development", "production"]', variables)
         self.assertIn('default     = ["development", "production-access"]', variables)
         self.assertIn("DenyAllMutations", bootstrap)
+
+    def test_oidc_subject_uses_immutable_github_ids(self):
+        bootstrap = Path("infra/bootstrap/variables.tf").read_text(encoding="utf-8")
+        roles = Path("infra/modules/dataset-sink-roles/roles.tf").read_text(encoding="utf-8")
+        workflow = self._read("terraform.yml")
+        self.assertIn('variable "github_oidc_repo"', bootstrap)
+        self.assertIn("repo:${var.github_oidc_repo}:environment:", roles)
+        self.assertIn("claims.repository_owner_id", workflow)
+        self.assertIn("claims.repository_id", workflow)
 
     def test_oidc_role_uses_ram_trust_policy_action(self):
         module = Path("infra/modules/ci-oidc-role/main.tf").read_text(encoding="utf-8")

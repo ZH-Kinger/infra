@@ -134,6 +134,7 @@ oidc_provider_arn = "acs:ram::$account_id:oidc-provider/GitHubActions"
 oidc_audience     = "github-actions"
 
 github_repo        = "REPLACE-ME-org/repo"
+github_oidc_repo   = "REPLACE-ME-owner@OWNER-ID/repo@REPO-ID"
 github_environment = "production"
 
 lakefs_backend_bucket = "REPLACE-ME"

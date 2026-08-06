@@ -22,8 +22,8 @@ locals {
   #
   # 注意：这里刻意不包含 `repo:<org>/<repo>:pull_request`——fork 的 PR 也会
   # 产生该 sub，等于把写权限交给任何能开 PR 的人。
-  write_subjects = ["repo:${var.github_repo}:environment:${var.github_environment}"]
-  audit_subjects = ["repo:${var.github_repo}:ref:refs/heads/main"]
+  write_subjects = ["repo:${var.github_oidc_repo}:environment:${var.github_environment}"]
+  audit_subjects = ["repo:${var.github_oidc_repo}:ref:refs/heads/main"]
 }
 
 module "materializer_role" {

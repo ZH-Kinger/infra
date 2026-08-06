@@ -20,11 +20,11 @@ locals {
 
   platform_apply_subjects = [
     for environment in var.platform_github_environments :
-    "repo:${var.github_repo}:environment:${environment}"
+    "repo:${var.github_oidc_repo}:environment:${environment}"
   ]
   access_apply_subjects = [
     for environment in var.access_github_environments :
-    "repo:${var.github_repo}:environment:${environment}"
+    "repo:${var.github_oidc_repo}:environment:${environment}"
   ]
 
   state_bucket_arn = "acs:oss:*:${local.account_id}:${var.state_bucket}"
@@ -388,8 +388,8 @@ module "plan_role" {
   # PR（包括 fork PR）与 main 上的手动 plan 都只能拿只读权限。
   # main ref 是 workflow_dispatch 的身份，不能给任何写 Action。
   subjects = [
-    "repo:${var.github_repo}:pull_request",
-    "repo:${var.github_repo}:ref:refs/heads/main",
+    "repo:${var.github_oidc_repo}:pull_request",
+    "repo:${var.github_oidc_repo}:ref:refs/heads/main",
   ]
 
   policy_documents = {

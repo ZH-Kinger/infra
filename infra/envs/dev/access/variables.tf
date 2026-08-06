@@ -30,6 +30,11 @@ variable "github_repo" {
   type        = string
 }
 
+variable "github_oidc_repo" {
+  description = "GitHub 不可变 OIDC 仓库段，格式 <owner>@<owner-id>/<repo>@<repo-id>"
+  type        = string
+}
+
 variable "github_environment" {
   description = "该环境对应的 GitHub Environment 名称"
   type        = string
