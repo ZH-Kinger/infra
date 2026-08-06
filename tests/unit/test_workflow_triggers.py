@@ -27,12 +27,20 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertNotIn("  push:\n", workflow)
 
     def test_cloud_data_workflows_are_manual(self):
-        for name in ("dataset-release.yml", "pai-mount-audit.yml"):
+        for name in ("dataset-release.yml", "pai-mount-audit.yml", "oidc-role-smoke.yml"):
             workflow = self._read(name)
             with self.subTest(workflow=name):
                 self.assertIn("  workflow_dispatch:\n", workflow)
                 self.assertNotIn("  push:\n", workflow)
                 self.assertNotIn("  schedule:\n", workflow)
+
+    def test_oidc_smoke_only_checks_temporary_credentials(self):
+        workflow = self._read("oidc-role-smoke.yml")
+        self.assertIn("environment: development", workflow)
+        self.assertIn("ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN", workflow)
+        self.assertIn("ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN", workflow)
+        self.assertNotIn("terraform apply", workflow)
+        self.assertNotIn("--execute", workflow)
 
     def test_plan_role_trusts_manual_main_but_remains_readonly(self):
         bootstrap = Path("infra/bootstrap/oidc.tf").read_text(encoding="utf-8")

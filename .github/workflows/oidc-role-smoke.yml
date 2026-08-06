@@ -1,0 +1,46 @@
+name: OIDC Role Smoke Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  apply-role-smoke:
+    name: Assume ${{ matrix.role }}
+    runs-on: ubuntu-latest
+    environment: development
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - role: platform-apply
+            role_var: ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN
+          - role: access-apply
+            role_var: ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN
+
+    steps:
+      # 只交换 STS 临时凭证，不调用任何资源写 API。development Environment
+      # 让 token 的 sub 与两个 Apply Role 的精确白名单匹配。
+      - name: 假设 ${{ matrix.role }} 角色
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ vars[matrix.role_var] }}
+          oidc-provider-arn: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
+          audience: github-actions
+          role-session-name: oidc-smoke-${{ matrix.role }}-${{ github.run_id }}
+
+      - name: 校验临时凭证
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${ALIBABA_CLOUD_ACCESS_KEY_ID:-}"
+          test -n "${ALIBABA_CLOUD_ACCESS_KEY_SECRET:-}"
+          test -n "${ALIBABA_CLOUD_SECURITY_TOKEN:-}"
+          case "$ALIBABA_CLOUD_ACCESS_KEY_ID" in
+            STS.*) ;;
+            *) echo "::error::OIDC 未返回 STS 临时身份"; exit 1 ;;
+          esac
+          echo "OIDC STS exchange passed for ${{ matrix.role }}"
