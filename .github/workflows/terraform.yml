@@ -100,6 +100,7 @@ jobs:
       - name: Plan
         id: plan
         run: |
+          set -euo pipefail
           terraform -chdir=${{ matrix.dir }} plan -input=false -lock-timeout=5m \
             -out=tfplan -no-color | tee /tmp/plan-${{ matrix.layer }}.txt
 

@@ -26,6 +26,15 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn("claims.sub !== expectedSub", workflow)
         self.assertNotIn("  push:\n", workflow)
 
+    def test_terraform_plan_pipeline_propagates_failures(self):
+        workflow = self._read("terraform.yml")
+        plan_step = workflow.split("      - name: Plan\n", 1)[1].split(
+            "      - name: 上传 plan 产物\n", 1
+        )[0]
+        self.assertIn("set -euo pipefail", plan_step)
+        self.assertIn("terraform -chdir=${{ matrix.dir }} plan", plan_step)
+        self.assertIn("| tee /tmp/plan-${{ matrix.layer }}.txt", plan_step)
+
     def test_cloud_data_workflows_are_manual(self):
         for name in (
             "dataset-release.yml",
