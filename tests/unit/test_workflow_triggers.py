@@ -27,7 +27,12 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertNotIn("  push:\n", workflow)
 
     def test_cloud_data_workflows_are_manual(self):
-        for name in ("dataset-release.yml", "pai-mount-audit.yml", "oidc-role-smoke.yml"):
+        for name in (
+            "dataset-release.yml",
+            "pai-mount-audit.yml",
+            "oidc-role-smoke.yml",
+            "cloud-preflight.yml",
+        ):
             workflow = self._read(name)
             with self.subTest(workflow=name):
                 self.assertIn("  workflow_dispatch:\n", workflow)
@@ -41,6 +46,15 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn("ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN", workflow)
         self.assertNotIn("terraform apply", workflow)
         self.assertNotIn("--execute", workflow)
+
+    def test_cloud_preflight_is_readonly_and_pins_cli_checksum(self):
+        workflow = self._read("cloud-preflight.yml")
+        self.assertIn("ALIBABA_CLOUD_PLAN_ROLE_ARN", workflow)
+        self.assertIn("ALIYUN_CLI_LINUX_AMD64_SHA256", workflow)
+        self.assertIn("sha256sum --check --strict", workflow)
+        self.assertIn("./scripts/preflight.sh", workflow)
+        for mutation in ("Create", "Update", "Modify", "Delete", "terraform apply", "--execute"):
+            self.assertNotIn(mutation, workflow)
 
     def test_plan_role_trusts_manual_main_but_remains_readonly(self):
         bootstrap = Path("infra/bootstrap/oidc.tf").read_text(encoding="utf-8")

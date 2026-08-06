@@ -1,0 +1,62 @@
+name: Alibaba Cloud Read-only Preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  ALIYUN_CLI_VERSION: "3.3.18"
+  ALIYUN_CLI_LINUX_AMD64_SHA256: "0823286604dbd8beb8d65dd0694d23c913e7c5d5a02b20a3593a4f8a6517f1d4"
+
+jobs:
+  preflight:
+    name: CPFS and PAI inventory
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 假设 TerraformPlanRole
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ vars.ALIBABA_CLOUD_PLAN_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
+          audience: github-actions
+          role-session-name: cloud-preflight-${{ github.run_id }}
+
+      - name: 安装并校验阿里云 CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/aliyun-cli.tgz"
+          bin_dir="$RUNNER_TEMP/aliyun-cli-bin"
+          mkdir -p "$bin_dir"
+          curl --fail --silent --show-error --location \
+            --output "$archive" \
+            "https://aliyuncli.alicdn.com/aliyun-cli-linux-${ALIYUN_CLI_VERSION}-amd64.tgz"
+          printf '%s  %s\n' "$ALIYUN_CLI_LINUX_AMD64_SHA256" "$archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$bin_dir"
+          printf '%s\n' "$bin_dir" >> "$GITHUB_PATH"
+
+      - name: 只读云资源体检
+        shell: bash
+        env:
+          REGION: ${{ vars.ALIBABA_CLOUD_REGION }}
+          ALIBABA_CLOUD_IGNORE_PROFILE: "TRUE"
+        run: |
+          set -euo pipefail
+          aliyun version
+          aliyun sts GetCallerIdentity --region "$REGION"
+          ./scripts/preflight.sh | tee "$RUNNER_TEMP/cloud-preflight.txt"
+
+      - name: 上传体检结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-preflight-${{ github.sha }}
+          path: ${{ runner.temp }}/cloud-preflight.txt
+          if-no-files-found: warn
+          retention-days: 14
