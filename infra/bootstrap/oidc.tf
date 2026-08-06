@@ -97,6 +97,10 @@ locals {
     Effect = "Allow"
     Action = [
       "oss:ListBuckets",
+      # alicloud_oss_bucket 创建后会立即读取 CORS、日志、网站、Referer、加密、
+      # 标签等完整配置。只列 GetBucketInfo/Acl 会在 Create 已成功后 refresh 403，
+      # 导致资源已存在但 Apply 报失败并留下部分 state。
+      "oss:GetBucket*",
       "oss:GetBucketInfo",
       "oss:GetBucketAcl",
       "oss:GetBucketVersioning",

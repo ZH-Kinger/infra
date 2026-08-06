@@ -109,6 +109,7 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn('"ots:DeleteRow"', bootstrap)
         self.assertIn('"ots:Delete*"', plan_policy)
         self.assertNotIn("local.state_lock_statement", plan_policy)
+        self.assertIn('"oss:GetBucket*"', bootstrap)
 
     def test_oidc_subject_uses_immutable_github_ids(self):
         bootstrap = Path("infra/bootstrap/variables.tf").read_text(encoding="utf-8")
