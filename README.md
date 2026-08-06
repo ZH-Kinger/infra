@@ -44,6 +44,7 @@ The primary rule is:
 
 | Goal | Document |
 |---|---|
+| Let a user Agent operate the platform safely | [Dataset platform user Skill](skills/dataset-platform-user/SKILL.md) |
 | Use the platform as an engineer or data consumer | [User guide](docs/user-guide.md) |
 | Configure, approve, audit, and troubleshoot the platform | [Administrator guide](docs/admin-guide.md) |
 | Operate datasets, runtimes, lifecycle, and audits | [Operations portal](portal/README.md) |

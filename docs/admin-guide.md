@@ -15,6 +15,19 @@
 门户不保存阿里云 AccessKey，用户不能提交任意 Role ARN、PAI Dataset ID、VPC、镜像地址
 或挂载路径。所有写操作默认 plan-only。
 
+### 用户 Agent Skill 的管理
+
+仓库内的 [`dataset-platform-user`](../skills/dataset-platform-user/SKILL.md) 是用户侧统一
+入口。管理员应把它与平台代码一起评审和发布，不要在个人提示词里维护另一套规则。
+
+Skill 只生成计划和升级请求，不能创建 RAM/PAI/CPFS 资源。变更下列契约时必须同步更新
+Skill 及其引用：Workflow 输入、运行时 Profile、数据源目录、挂载路径、DataFlow 默认值、
+权限申请流程和常见错误。合并前运行 Skill 校验：
+
+```bash
+python3 /path/to/skill-creator/scripts/quick_validate.py skills/dataset-platform-user
+```
+
 ## 2. 控制台页面与运维责任
 
 | 页面 | 管理员关注点 |

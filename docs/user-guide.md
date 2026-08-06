@@ -18,6 +18,23 @@ Terraform、RAM 策略或 CPFS API。管理员配置、审批和排错见[管理
 
 页面上的资产数字如果标注为演示数据，不代表真实云资源；操作记录来自平台数据库。
 
+### 让自己的 Agent 帮忙
+
+仓库提供 [`dataset-platform-user`](../skills/dataset-platform-user/SKILL.md) Skill。它会
+先判断“使用现有版本、纳管 OSS/CPFS、启动 DSW/DLC、还是排错”，只向用户收集必要
+参数，并默认生成计划。
+
+Codex 用户可以把 `skills/dataset-platform-user/` 复制到自己的 Codex Skills 目录，
+重新打开任务后这样调用：
+
+```text
+Use $dataset-platform-user to adopt oss://legacy-data/robotics as robotics-legacy.
+Use $dataset-platform-user to prepare a DSW request for robotics commit 9b5d3e6c12.
+```
+
+支持 `SKILL.md` 的其他 Agent 也可以加载同一目录。Skill 不授予权限、不保存凭证，
+也不会替用户绕过审批；它的作用是生成正确、最小且可审阅的请求。
+
 ## 2. 普通用户的标准流程
 
 ### 使用已有数据训练
@@ -87,4 +104,3 @@ GitHub OIDC 换取短期 RAM Role。
 | DataFlow 提示路径未覆盖 | 联系管理员补 Fileset/DataFlow，不要改用裸 OSS 训练 |
 | 只能生成计划 | 当前账号不在执行白名单，属于正常权限隔离 |
 | CPFS 数据读不到 | 检查 PAI 挂载、Fileset/POSIX 权限和版本状态 |
-

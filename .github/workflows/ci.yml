@@ -8,6 +8,7 @@ on:
       - "scripts/**"
       - "deploy/**"
       - "infra/**"
+      - "skills/**"
       - "pyproject.toml"
       - "Makefile"
       - ".github/workflows/**"
