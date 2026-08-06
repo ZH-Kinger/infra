@@ -44,6 +44,7 @@ The primary rule is:
 
 | Goal | Document |
 |---|---|
+| Operate datasets, runtimes, lifecycle, and audits | [Operations portal](portal/README.md) |
 | Train with a published dataset | [User onboarding](docs/onboarding.md) |
 | Start a governed DSW or DLC runtime | [DSW/DLC self-service](docs/pai-runtime.md) |
 | Understand the architecture and tradeoffs | [Architecture](docs/architecture.md) |
