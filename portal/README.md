@@ -11,6 +11,16 @@
 - D1 持久化操作审计；
 - 默认 plan-only，真实执行要求站点身份、管理员白名单和 GitHub Environment 审批。
 
+## 使用角色
+
+- 普通用户从顶部导航进入数据资产、存量纳管和 DSW/DLC，只提交数据集、Commit、
+  Profile 等少量参数，默认生成计划。完整流程见[用户手册](../docs/user-guide.md)。
+- 管理员负责 DataFlow、RAM/PAI 权限、执行白名单、GitHub 审批和故障处理，见
+  [管理员手册](../docs/admin-guide.md)。
+
+顶部六个页面分别覆盖运营总览、数据资产、存量纳管、容量与生命周期、DSW/DLC、
+权限与审计；导航副标题就是每个页面的责任范围。
+
 ## 运行配置
 
 复制 `.env.example` 到本地环境配置。`GITHUB_TOKEN` 只由服务端读取，至少需要目标仓库

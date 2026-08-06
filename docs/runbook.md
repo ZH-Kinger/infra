@@ -5,7 +5,8 @@
 
 面向维护这套系统的人：怎么初始化、怎么日常运维、出事怎么办。
 
-相关：[架构](architecture.md)｜[权限](permissions.md)｜[CI/CD](cicd.md)｜[使用入门](onboarding.md)
+管理员阅读入口见[管理员手册](admin-guide.md)。相关：[架构](architecture.md)｜
+[权限](permissions.md)｜[CI/CD](cicd.md)｜[用户手册](user-guide.md)｜[使用入门](onboarding.md)
 
 ---
 

@@ -44,6 +44,8 @@ The primary rule is:
 
 | Goal | Document |
 |---|---|
+| Use the platform as an engineer or data consumer | [User guide](docs/user-guide.md) |
+| Configure, approve, audit, and troubleshoot the platform | [Administrator guide](docs/admin-guide.md) |
 | Operate datasets, runtimes, lifecycle, and audits | [Operations portal](portal/README.md) |
 | Train with a published dataset | [User onboarding](docs/onboarding.md) |
 | Start a governed DSW or DLC runtime | [DSW/DLC self-service](docs/pai-runtime.md) |

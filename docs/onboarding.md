@@ -2,7 +2,9 @@
 
 这篇讲**怎么用已经发布好的数据集**。你不需要懂 Terraform，也不需要碰阿里云控制台。
 
-相关：[架构](architecture.md)｜[存储生命周期](storage-lifecycle.md)｜[权限](permissions.md)｜[CI/CD](cicd.md)｜[运维](runbook.md)
+用户完整操作入口见[用户手册](user-guide.md)。相关：[架构](architecture.md)｜
+[存储生命周期](storage-lifecycle.md)｜[权限](permissions.md)｜[CI/CD](cicd.md)｜
+[管理员手册](admin-guide.md)
 
 ---
 
