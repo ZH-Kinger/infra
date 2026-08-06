@@ -66,6 +66,12 @@ variable "runtime_github_environment" {
   default     = "pai-runtime"
 }
 
+variable "lifecycle_github_environment" {
+  description = "CPFS 生命周期 Evict 的 GitHub Environment；必须配置人工审批"
+  type        = string
+  default     = "dataset-lifecycle"
+}
+
 variable "lakefs_backend_bucket" {
   description = "lakeFS 的 OSS 后端桶名。沉降角色只读这里，其他角色一律禁止读"
   type        = string

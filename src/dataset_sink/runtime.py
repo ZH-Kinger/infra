@@ -67,7 +67,21 @@ def load_runtime_config(
         raise RuntimeRequestError(f"cannot load runtime profile {path}: {exc}") from exc
     if not isinstance(document, dict):
         raise RuntimeRequestError("runtime profile root must be a JSON object")
-    return _expand_environment(document, environment or os.environ)
+    expanded = _expand_environment(document, environment or os.environ)
+    datasets = expanded.get("datasets")
+    if isinstance(datasets, str):
+        try:
+            dataset_ids = json.loads(datasets)
+        except json.JSONDecodeError as exc:
+            raise RuntimeRequestError(f"PAI dataset catalogue is not valid JSON: {exc}") from exc
+        if not isinstance(dataset_ids, dict):
+            raise RuntimeRequestError("PAI dataset catalogue must be a JSON object")
+        expanded["datasets"] = {
+            str(name): {"dataset_id": dataset_id, "mount_path": "/mnt/dataset"}
+            for name, dataset_id in dataset_ids.items()
+            if isinstance(dataset_id, str) and dataset_id.strip()
+        }
+    return expanded
 
 
 def _mapping(parent: Mapping[str, Any], key: str) -> Mapping[str, Any]:

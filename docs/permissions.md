@@ -81,7 +81,7 @@
 
 ## 3. 身份清单
 
-### 数据面（7 个）
+### 数据面（8 个）
 
 | 身份 | 能做 | 明确不能做 | 谁能扮演 |
 |---|---|---|---|
@@ -90,6 +90,7 @@
 | `dataset-sink-<env>-dsw-submit` | 按受控 Profile 为映射 RAM 用户创建/观察 DSW | 改写数据版本、提交 DLC、读 lakeFS 后端 | GitHub OIDC，仅 `pai-runtime` Environment |
 | `dataset-sink-<env>-dlc-submit` | 提交/观察 DLC Job、解析 Dataset 版本 | 改写数据版本、读 lakeFS 后端 | GitHub OIDC，数据发布或 `pai-runtime` Environment |
 | `dataset-sink-<env>-pai-mount-audit` | 只读列举 DLC/DSW 挂载并解析 Dataset Version | 提交作业、修改数据集、读写 OSS/CPFS 数据面 | GitHub OIDC，仅 `main` 分支 |
+| `dataset-sink-<env>-lifecycle` | 重查活动作业并提交 CPFS DataFlow Evict | 删除目录、删除 PAI Version、读写 OSS 对象 | GitHub OIDC，仅 `dataset-lifecycle` 审批环境 |
 | `dataset-sink-<env>-training-runtime` | 只读已发布归档、写 output 前缀 | 读 lakeFS 后端与 staging、注册版本、提交作业 | **PAI 服务**（`pai-dlc` / `pai-dsw`），不是 CI |
 | `pai-<env>-developers`（用户组） | 浏览 Workspace、数据集、作业日志 | 取长期密钥、改写数据版本、读原始数据 | RAM 用户加组 |
 

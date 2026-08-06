@@ -71,6 +71,25 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn("if: ${{ inputs.execute }}", workflow)
         self.assertNotIn("ForwardInfos", workflow)
 
+    def test_existing_cpfs_adoption_preserves_the_source_directory(self):
+        workflow = self._read("dataset-release.yml")
+        self.assertIn("cpfs-adopt", workflow)
+        self.assertIn("inputs.mode == 'cpfs-adopt'", workflow)
+        self.assertIn("--commit-prefix 'datasets/${{ inputs.dataset }}'", workflow)
+        self.assertIn("PAI_DATASET_IDS_JSON", workflow)
+        self.assertIn("needs.preflight.outputs.pai_dataset_id", workflow)
+
+    def test_lifecycle_schedule_is_dry_run_and_execution_is_approved(self):
+        workflow = self._read("dataset-lifecycle.yml")
+        plan, execute = workflow.split("\n  execute:\n", 1)
+        self.assertIn("  schedule:\n", plan)
+        self.assertNotIn("--execute", plan)
+        self.assertIn("environment: dataset-lifecycle", execute)
+        self.assertIn("DATASET_LIFECYCLE_ROLE_ARN", execute)
+        self.assertIn("--execute", execute)
+        self.assertIn("重新检查并执行", execute)
+        self.assertNotIn("hard-delete", workflow)
+
     def test_force_unlock_is_manual_confirmed_and_uses_apply_role(self):
         workflow = self._read("terraform-force-unlock.yml")
         self.assertIn("confirm_unlock:", workflow)

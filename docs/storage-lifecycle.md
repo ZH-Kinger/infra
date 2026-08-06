@@ -138,7 +138,7 @@ Fileset 必须在目录为空时预先创建。已有文件的目录无法原地
 
 ---
 
-## 5. 三条数据入口
+## 5. 三类数据入口
 
 ### 5.1 存量数据已经在 OSS
 
@@ -155,20 +155,22 @@ Fileset 必须在目录为空时预先创建。已有文件的目录无法原地
 建 Commit 不搬字节；沉降到 CPFS 时才搬一次。前缀必须已登记为 `readonly` 或
 `archive`，完成 import 后不得恢复写入。
 
-### 5.2 新数据在 CPFS 工作区或 staging
+### 5.2 数据在 CPFS 工作区或 staging
 
 ```text
 CPFS 可写目录
 → scan：生成 Manifest
 → archive / DataFlow Export 到 OSS
 → lakeFS zero-copy import + Commit
-→ certify：校验后同文件系统 rename
+→ 新 staging 用 certify；存量目录用 materialize
 → _READY
 → 注册 PAI Dataset Version
 ```
 
 不能让 Commit 直接指向可写工作区；必须先归档到稳定 OSS 位置。`certify` 的 rename
-只负责发布 CPFS 热副本，OSS 归档才负责长期可恢复性。
+只适合允许被移动的新 staging。纳管已有 CPFS 或已有 PAI Version 背后的目录时使用
+`cpfs-adopt`：扫描与归档后从 lakeFS 重新物化 release，原目录保持不动。原 PAI Version
+只是历史元数据，不能替代 Commit、Manifest 和 `_READY` 校验。
 
 ### 5.3 已经存在 lakeFS Commit
 
@@ -236,6 +238,10 @@ CPFS release 是可重建热副本，也是整个体系中唯一被设计成可�
 6. lakeFS Commit 和 OSS 字节是否仍可恢复。
 
 任何检查不确定都保留。`reclaim` 默认 dry-run，`--execute` 才执行。
+
+`dataset-lifecycle.yml` 每周自动生成 dry-run 报告；不会定时删除数据。真实 Evict 只能
+人工触发并经过 `dataset-lifecycle` Environment 审批。审批后流水线不会直接使用旧计划，
+而是重新检查保护期、最近版本、活动 DSW/DLC 与 lakeFS 可恢复性，避免执行过期结论。
 
 | 策略 | 结果 | 再次训练 |
 |---|---|---|

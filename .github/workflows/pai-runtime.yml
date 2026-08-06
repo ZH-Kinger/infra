@@ -67,6 +67,7 @@ jobs:
         env:
           PAI_WORKSPACE_ID: ${{ vars.PAI_WORKSPACE_ID }}
           PAI_DATASET_ID: ${{ vars.PAI_DATASET_ID }}
+          PAI_DATASET_IDS_JSON: ${{ vars.PAI_DATASET_IDS_JSON }}
           PAI_ACR_REGISTRY: ${{ vars.PAI_ACR_REGISTRY }}
           TRAINING_IMAGE: ${{ vars.TRAINING_IMAGE }}
           DSW_ECS_SPEC: ${{ vars.DSW_ECS_SPEC }}
@@ -90,6 +91,17 @@ jobs:
           USER_COMMAND: ${{ inputs.command }}
         run: |
           set -euo pipefail
+          if [ -z "$PAI_DATASET_IDS_JSON" ]; then
+            [ -n "$PAI_DATASET_ID" ] || { echo "::error::缺少 PAI_DATASET_IDS_JSON 或 PAI_DATASET_ID"; exit 1; }
+            PAI_DATASET_IDS_JSON=$(python - <<'PY'
+          import json
+          import os
+
+          print(json.dumps({os.environ["REQUEST_DATASET"]: os.environ["PAI_DATASET_ID"]}))
+          PY
+            )
+            export PAI_DATASET_IDS_JSON
+          fi
           args=(
             runtime-request
             --config deploy/pai/runtime-profiles.json

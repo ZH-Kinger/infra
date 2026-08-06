@@ -23,6 +23,11 @@ output "pai_mount_audit_role_arn" {
   value       = module.roles.pai_mount_audit_role_arn
 }
 
+output "dataset_lifecycle_role_arn" {
+  description = "审批后执行 CPFS Evict 的生命周期角色 ARN"
+  value       = module.roles.dataset_lifecycle_role_arn
+}
+
 output "training_runtime_role_arn" {
   description = "训练运行角色 ARN，填入 DLC CreateJob 的运行身份。不要配给 CI"
   value       = module.roles.training_runtime_role_arn

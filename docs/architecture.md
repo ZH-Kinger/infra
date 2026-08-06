@@ -216,6 +216,7 @@ CPFS staging/ → 全量校验（文件集合 + size + SHA-256）→ 同文件�
 | mode | 数据现在在哪 | 链路 | 搬字节吗 |
 |---|---|---|---|
 | `cpfs-ingest` | CPFS staging，还没有 Commit | scan → archive → commit → certify | 归档搬一次 |
+| `cpfs-adopt` | 已有 CPFS/PAI 目录，必须保留原路径 | scan → archive → commit → materialize | 归档和新 release 各搬一次 |
 | `oss-ingest` | **本来就在对象存储上** | scan-oss → commit → materialize | **一次读取，零次搬运** |
 | `certify` | CPFS staging，Commit 已存在 | certify | 不搬 |
 | `materialize` | lakeFS，Commit 已存在 | materialize | 拷到 CPFS |
@@ -572,6 +573,7 @@ flowchart TD
 | `DatasetRegisterRole` | `ListDatasetVersions`、`CreateDatasetVersion` | 读裸 OSS、写 CPFS、提交 DLC |
 | `DswSubmitRole` | 按受控 Profile 为映射用户创建私有 DSW | 改写数据版本、提交 DLC、读 lakeFS 后端 |
 | `DlcSubmitRole` | 提交绑定已审批 Dataset Version 的 DLC Job | 改写数据版本、读 lakeFS/OSS |
+| `DatasetLifecycleRole` | 审批后对安全候选提交 CPFS Evict | 删除目录、删除 PAI Version、读写 OSS |
 | `TrainingRuntimeRole` | 只读挂载某个 CPFS release；写独立 output/checkpoint | 访问 landing/lakeFS 后端桶、写训练集 |
 | 研发 RAM 用户 | 在 Workspace 内使用已发布版本 | 取长期 lakeFS/OSS 密钥、直接改生产 release |
 
@@ -623,7 +625,7 @@ infra/
 - `TerraformAccessApplyRole` 管 RAM，**不能**改自己的信任策略和 Policy。
 - 两者的信任策略都由 `bootstrap` 层管理，而 `bootstrap` 只有管理员能跑。
 
-### 三条交付与运行流水线
+### 四条交付与运行流水线
 
 **基础设施流水线**（`infra/**` 变更触发）：
 
@@ -669,6 +671,9 @@ main 手动运行（confirm_apply=true）→ 生成并上传本次 tfplan
 
 用户不能填写原始 OSS/CPFS URI、RAM User ID、VPC、安全组或挂载权限。完整合同见
 [DSW/DLC 自助运行](pai-runtime.md)与[存储生命周期 §7](storage-lifecycle.md#7-pai-挂载合同)。
+
+**数据生命周期流水线**每周只读扫描并保存回收报告；人工选择执行后进入独立审批环境，
+重新检查 PAI 占用与 lakeFS 可恢复性，再用专用最小权限角色提交 CPFS Evict。
 
 ### 多地区
 

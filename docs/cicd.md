@@ -4,13 +4,14 @@
 
 ---
 
-## 五条流水线
+## 六条流水线
 
 | 流水线 | 触发 | 用途 | 是否需要云凭证 |
 |---|---|---|---|
 | [`ci.yml`](../.github/workflows/ci.yml) | 相关代码 PR / 手动 | 代码校验；README/docs 不触发 | **否** |
 | [`terraform.yml`](../.github/workflows/terraform.yml) | `infra/**` PR 做 plan；main 手动 apply | 基础设施与权限交付 | 是（OIDC） |
 | [`dataset-release.yml`](../.github/workflows/dataset-release.yml) | 手动触发 | 数据集发布 | 是（OIDC，每步换角色） |
+| [`dataset-lifecycle.yml`](../.github/workflows/dataset-lifecycle.yml) | 每周 dry-run / 手动执行 | 规划并审批 CPFS Evict | 是（OIDC，计划与执行分角色） |
 | [`pai-mount-audit.yml`](../.github/workflows/pai-mount-audit.yml) | 手动 | 检查 DLC/DSW 是否绕过不可变 release | 是（只读 OIDC 角色） |
 | [`pai-runtime.yml`](../.github/workflows/pai-runtime.yml) | 手动 | 用受控 Profile 创建 DSW/DLC；默认只生成请求 | execute 后是 |
 
@@ -124,11 +125,12 @@ state 锁，还可能让 state 和实际资源不一致。宁可排队。
 
 ## 3. dataset-release.yml —— 每步换身份
 
-手动触发（数据集发布是有意为之的动作，不该由代码推送触发）。四种模式：
+手动触发（数据集发布是有意为之的动作，不该由代码推送触发）。五种模式：
 
 | mode | 适用场景 | 前置条件 |
 |---|---|---|
 | `cpfs-ingest` | CPFS 上处理完的**新数据**，还没有 Commit | staging 目录已按 release 布局组织好 |
+| `cpfs-adopt` | 已有 CPFS 目录，纳管时不能移动原目录 | 原目录保持只读稳定，流水线归档后重新物化 release |
 | `oss-ingest` | **数据本来就在对象存储上**（存量数据的主路径） | 该前缀已在数据源注册表里，且 mode 不是 workspace |
 | `certify` | CPFS staging 已就绪，且 Commit **已存在** | 有 Commit 和 manifest |
 | `materialize` | 从 lakeFS 拷贝到 CPFS | 有 Commit/Tag 和 manifest |
@@ -137,7 +139,7 @@ state 锁，还可能让 state 和实际资源不一致。宁可排队。
 preflight        ← 校验配置齐全、按模式校验必填参数、拦截 latest/main 这类可变 ref
   │                oss-ingest 还会校验数据源已注册且能作为 Commit 来源
   │
-  ├─ [仅 cpfs-ingest]
+  ├─ [cpfs-ingest / cpfs-adopt]
   │  ingest-archive   ← DatasetMaterializerRole，CPFS runner
   │  │                  scan（无云权限）→ archive 到对象存储（幂等可续传）
   │  │
@@ -150,7 +152,7 @@ preflight        ← 校验配置齐全、按模式校验必填参数、拦截 l
   │                     两条 ingest 路径共用，只有「import 的源在哪」不同
   ↓
 publish          ← DatasetMaterializerRole，CPFS runner
-                   四种模式在这里汇合：certify 或 materialize
+                   五种模式在这里汇合：certify 或 materialize
   ↓ verify --deep
 build-request    ← 无云权限，产出可人工审阅的 JSON
   ↓
@@ -186,7 +188,7 @@ ingest-commit:
 `scan` 纯本地计算，不需要云权限。放在假设角色之前，"staging 不干净"
 这类错误就不会白白消耗一次 STS 凭证，也让最常见的失败最早发生。
 
-### 四种模式怎么汇合
+### 五种模式怎么汇合
 
 `publish` 用 `needs: [preflight, ingest-commit]`。`certify` / `materialize` 模式下
 `ingest-commit` 是 skipped，而 GitHub 默认会连带跳过下游 job，所以要显式接受：
@@ -206,14 +208,14 @@ Commit 的来源也按模式解析——两条 ingest 路径都来自 import：
 
 ```yaml
 RESOLVED_COMMIT: >-
-  ${{ (inputs.mode == 'cpfs-ingest' || inputs.mode == 'oss-ingest')
+  ${{ (inputs.mode == 'cpfs-ingest' || inputs.mode == 'cpfs-adopt' || inputs.mode == 'oss-ingest')
   && needs.ingest-commit.outputs.commit_id || inputs.ref }}
 ```
 
 ### oss-ingest 为什么没有 archive 步骤
 
 那正是它的价值。字节已经在持久位置上，而 lakeFS import 是零拷贝的——
-**整条路径不把任何字节搬到新位置**。`cpfs-ingest` 必须先归档，只是因为
+**整条路径不把任何字节搬到新位置**。`cpfs-ingest` 与 `cpfs-adopt` 必须先归档，只是因为
 CPFS staging 不是持久位置。
 
 但它仍要把每个对象**读**一遍算 SHA-256（对象存储不提供）。这是全链路唯一的
@@ -245,7 +247,7 @@ blockstore adapter 类型**，不是云厂商的名字——OSS 是通过 lakeFS
 `preflight` 查一次，`ingest-commit` 里 `commit --registry` 再查一次。
 两者之间隔着一次 scan（可能跑很久），注册表有可能在中间被改。
 
-`cpfs-ingest` 的 `commit` **刻意不传 `--registry`**：它的来源是上一步刚写进去的
+两种 CPFS 接入的 `commit` **刻意不传 `--registry`**：来源是上一步刚写进去的
 staging 前缀（如 `staging/batch-...`），而注册表登记的是归档前缀（如 `releases/`）。
 传了会因为「staging 没注册」误报失败。那个位置的内容稳定性由「刚归档完、
 只有本流水线写过」保证，不需要注册表判断。

@@ -1,0 +1,128 @@
+name: Dataset lifecycle
+
+# 定时任务只生成回收计划；真正 Evict 只能由人工触发并经过 Environment 审批。
+on:
+  schedule:
+    - cron: "17 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      min_age_days:
+        description: 未满多少天的 release 一律保留
+        required: true
+        default: "14"
+      keep_last:
+        description: 每个数据集至少保留最近几个版本
+        required: true
+        default: "2"
+      execute:
+        description: 审批后执行 CPFS Evict；关闭时只生成计划
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: dataset-lifecycle
+  cancel-in-progress: false
+
+env:
+  ALIBABA_CLOUD_OIDC_AUDIENCE: github-actions
+
+jobs:
+  plan:
+    name: 生成生命周期计划
+    runs-on: ${{ vars.CPFS_RUNNER_LABEL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e '.[lakefs]'
+
+      - name: 假设只读 PAI 审计角色
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ vars.PAI_MOUNT_AUDIT_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
+          audience: ${{ env.ALIBABA_CLOUD_OIDC_AUDIENCE }}
+          role-session-name: lifecycle-plan-${{ github.run_id }}
+
+      - name: 扫描可回收版本（永远 dry-run）
+        env:
+          LAKEFS_API_ENDPOINT: ${{ vars.LAKEFS_API_ENDPOINT }}
+          LAKEFS_ACCESS_KEY_ID: ${{ secrets.LAKEFS_ACCESS_KEY_ID }}
+          LAKEFS_SECRET_ACCESS_KEY: ${{ secrets.LAKEFS_SECRET_ACCESS_KEY }}
+          MIN_AGE_DAYS: ${{ inputs.min_age_days || '14' }}
+          KEEP_LAST: ${{ inputs.keep_last || '2' }}
+        run: |
+          set -euo pipefail
+          dataset-sink reclaim '${{ vars.CPFS_TARGET_ROOT }}' \
+            --min-age-days "$MIN_AGE_DAYS" \
+            --keep-last "$KEEP_LAST" \
+            --strategy cpfs-evict \
+            --cpfs-filesystem-id '${{ vars.CPFS_FILESYSTEM_ID }}' \
+            --cpfs-mount-prefix '${{ vars.CPFS_MOUNT_PREFIX }}' \
+            --region '${{ vars.ALIBABA_CLOUD_REGION }}' \
+            --pai-usage-workspace-id '${{ vars.PAI_WORKSPACE_ID }}' \
+            --pai-usage-region '${{ vars.ALIBABA_CLOUD_REGION }}' \
+            > "$RUNNER_TEMP/lifecycle-plan.json"
+          python -m json.tool "$RUNNER_TEMP/lifecycle-plan.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lifecycle-plan-${{ github.run_id }}
+          path: ${{ runner.temp }}/lifecycle-plan.json
+          retention-days: 90
+
+  execute:
+    name: 审批后执行 CPFS Evict
+    needs: plan
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.execute }}
+    environment: dataset-lifecycle
+    runs-on: ${{ vars.CPFS_RUNNER_LABEL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e '.[lakefs]'
+
+      - name: 假设生命周期最小权限角色
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ vars.DATASET_LIFECYCLE_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
+          audience: ${{ env.ALIBABA_CLOUD_OIDC_AUDIENCE }}
+          role-session-name: lifecycle-execute-${{ github.run_id }}
+
+      # 不直接执行 plan artifact：审批等待期间活动作业可能变化。这里重新扫描，
+      # 再次检查保护期、keep-last、PAI 占用和 lakeFS 可恢复性后才 Evict。
+      - name: 重新检查并执行
+        env:
+          LAKEFS_API_ENDPOINT: ${{ vars.LAKEFS_API_ENDPOINT }}
+          LAKEFS_ACCESS_KEY_ID: ${{ secrets.LAKEFS_ACCESS_KEY_ID }}
+          LAKEFS_SECRET_ACCESS_KEY: ${{ secrets.LAKEFS_SECRET_ACCESS_KEY }}
+          MIN_AGE_DAYS: ${{ inputs.min_age_days }}
+          KEEP_LAST: ${{ inputs.keep_last }}
+        run: |
+          set -euo pipefail
+          dataset-sink reclaim '${{ vars.CPFS_TARGET_ROOT }}' \
+            --min-age-days "$MIN_AGE_DAYS" \
+            --keep-last "$KEEP_LAST" \
+            --strategy cpfs-evict \
+            --cpfs-filesystem-id '${{ vars.CPFS_FILESYSTEM_ID }}' \
+            --cpfs-mount-prefix '${{ vars.CPFS_MOUNT_PREFIX }}' \
+            --region '${{ vars.ALIBABA_CLOUD_REGION }}' \
+            --pai-usage-workspace-id '${{ vars.PAI_WORKSPACE_ID }}' \
+            --pai-usage-region '${{ vars.ALIBABA_CLOUD_REGION }}' \
+            --execute > "$RUNNER_TEMP/lifecycle-result.json"
+          python -m json.tool "$RUNNER_TEMP/lifecycle-result.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lifecycle-result-${{ github.run_id }}
+          path: ${{ runner.temp }}/lifecycle-result.json
+          retention-days: 365

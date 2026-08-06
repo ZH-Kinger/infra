@@ -8,13 +8,14 @@ on:
         description: |
           发布方式。
           cpfs-ingest：CPFS 上处理完的新数据，还没有 Commit（scan→archive→commit→certify）
+          cpfs-adopt：纳管已有 CPFS 目录，保留原目录（scan→archive→commit→materialize）
           oss-ingest：数据本来就在对象存储上（scan-oss→commit→materialize，全程不搬字节）
           certify：CPFS staging 已就绪且 Commit 已存在，零拷贝发布
           materialize：从 lakeFS 拷贝到 CPFS
         required: true
         default: cpfs-ingest
         type: choice
-        options: [cpfs-ingest, oss-ingest, certify, materialize]
+        options: [cpfs-ingest, cpfs-adopt, oss-ingest, certify, materialize]
       dataset:
         description: 数据集名（如 robotics）
         required: true
@@ -81,6 +82,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       cpfs_runner: ${{ steps.check.outputs.cpfs_runner }}
+      pai_dataset_id: ${{ steps.check.outputs.pai_dataset_id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -100,9 +102,9 @@ jobs:
           set -euo pipefail
           mode='${{ inputs.mode }}'
           case "$mode" in
-            cpfs-ingest)
-              [ -n '${{ inputs.prepared_dir }}' ]   || { echo "::error::cpfs-ingest 需要 prepared_dir"; exit 1; }
-              [ -n '${{ inputs.archive_prefix }}' ] || { echo "::error::cpfs-ingest 需要 archive_prefix"; exit 1; }
+            cpfs-ingest|cpfs-adopt)
+              [ -n '${{ inputs.prepared_dir }}' ]   || { echo "::error::${mode} 需要 prepared_dir"; exit 1; }
+              [ -n '${{ inputs.archive_prefix }}' ] || { echo "::error::${mode} 需要 archive_prefix"; exit 1; }
               ;;
             oss-ingest)
               [ -n '${{ inputs.source_bucket }}' ] || { echo "::error::oss-ingest 需要 source_bucket"; exit 1; }
@@ -153,11 +155,13 @@ jobs:
         id: check
         env:
           MODE: ${{ inputs.mode }}
+          INPUT_DATASET: ${{ inputs.dataset }}
           ALIBABA_CLOUD_OIDC_PROVIDER_ARN: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
           ALIBABA_CLOUD_REGION: ${{ vars.ALIBABA_CLOUD_REGION }}
           MATERIALIZER_ROLE_ARN: ${{ vars.MATERIALIZER_ROLE_ARN }}
           REGISTER_ROLE_ARN: ${{ vars.REGISTER_ROLE_ARN }}
           PAI_DATASET_ID: ${{ vars.PAI_DATASET_ID }}
+          PAI_DATASET_IDS_JSON: ${{ vars.PAI_DATASET_IDS_JSON }}
           CPFS_FILESYSTEM_ID: ${{ vars.CPFS_FILESYSTEM_ID }}
           CPFS_TARGET_ROOT: ${{ vars.CPFS_TARGET_ROOT }}
           ARCHIVE_BUCKET: ${{ vars.ARCHIVE_BUCKET }}
@@ -173,17 +177,36 @@ jobs:
           missing=""
           for v in ALIBABA_CLOUD_OIDC_PROVIDER_ARN ALIBABA_CLOUD_REGION \
                    MATERIALIZER_ROLE_ARN REGISTER_ROLE_ARN \
-                   PAI_DATASET_ID CPFS_FILESYSTEM_ID CPFS_TARGET_ROOT; do
+                   CPFS_FILESYSTEM_ID CPFS_TARGET_ROOT; do
             eval "value=\${$v:-}"
             [ -n "$value" ] || missing="$missing $v"
           done
-          # cpfs-ingest 还要归档到对象存储、再 import 进 lakeFS
-          if [ "$MODE" = "cpfs-ingest" ]; then
+          # 两种 CPFS 接入都要先归档，再 import 进 lakeFS。cpfs-adopt 还要从
+          # lakeFS 重新物化，以保留原目录不被 certify 的 rename 移走。
+          if [ "$MODE" = "cpfs-ingest" ] || [ "$MODE" = "cpfs-adopt" ]; then
             for v in ARCHIVE_BUCKET ARCHIVE_ENDPOINT_URL ARCHIVE_OBJECT_STORE_URI LAKEFS_API_ENDPOINT; do
               eval "value=\${$v:-}"
               [ -n "$value" ] || missing="$missing $v"
             done
           fi
+          if [ "$MODE" = "cpfs-adopt" ] && [ -z "$LAKEFS_S3_ENDPOINT" ]; then
+            missing="$missing LAKEFS_S3_ENDPOINT"
+          fi
+
+          # 多数据集优先使用 JSON 映射；未配置时兼容原来的单一 PAI_DATASET_ID。
+          # 用户只能提交 dataset 短名称，不能从表单注入任意 Dataset ID。
+          pai_dataset_id=$(PYTHONPATH=src python3 - <<'PY'
+          import os
+
+          from dataset_sink.catalog import resolve_pai_dataset_id
+
+          print(resolve_pai_dataset_id(
+              os.environ["INPUT_DATASET"],
+              os.environ.get("PAI_DATASET_IDS_JSON", ""),
+              fallback=os.environ.get("PAI_DATASET_ID"),
+          ))
+          PY
+          )
           # oss-ingest 不归档，所以不要 ARCHIVE_*；但要读源桶、要 import、
           # 之后还要从 lakeFS 的 S3 Gateway 取数落到 CPFS。
           if [ "$MODE" = "oss-ingest" ]; then
@@ -204,6 +227,7 @@ jobs:
             exit 1
           fi
           echo "cpfs_runner=$runner" >> "$GITHUB_OUTPUT"
+          echo "pai_dataset_id=$pai_dataset_id" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
   # cpfs-ingest ①②：扫描 + 归档。
@@ -212,7 +236,7 @@ jobs:
   # ---------------------------------------------------------------------------
   ingest-archive:
     name: 扫描并归档到对象存储
-    if: inputs.mode == 'cpfs-ingest'
+    if: inputs.mode == 'cpfs-ingest' || inputs.mode == 'cpfs-adopt'
     needs: preflight
     runs-on: ${{ needs.preflight.outputs.cpfs_runner }}
     outputs:
@@ -357,7 +381,7 @@ jobs:
     # 每次只会有一条 ingest 前置真正跑，另一条是 skipped，必须显式接受。
     if: >-
       ${{ !cancelled()
-      && (inputs.mode == 'cpfs-ingest' || inputs.mode == 'oss-ingest')
+      && (inputs.mode == 'cpfs-ingest' || inputs.mode == 'cpfs-adopt' || inputs.mode == 'oss-ingest')
       && needs.preflight.result == 'success'
       && (needs.ingest-archive.result == 'success' || needs.ingest-archive.result == 'skipped')
       && (needs.oss-scan.result == 'success' || needs.oss-scan.result == 'skipped') }}
@@ -447,7 +471,7 @@ jobs:
     env:
       # 两条 ingest 路径的 Commit 都来自 import，其余模式来自调用者输入。
       RESOLVED_COMMIT: >-
-        ${{ (inputs.mode == 'cpfs-ingest' || inputs.mode == 'oss-ingest')
+        ${{ (inputs.mode == 'cpfs-ingest' || inputs.mode == 'cpfs-adopt' || inputs.mode == 'oss-ingest')
         && needs.ingest-commit.outputs.commit_id || inputs.ref }}
     steps:
       - uses: actions/checkout@v4
@@ -457,7 +481,7 @@ jobs:
       - run: python -m pip install -e '.[all]'
 
       - name: 取回 scan 生成的 manifest
-        if: inputs.mode == 'cpfs-ingest' || inputs.mode == 'oss-ingest'
+        if: inputs.mode == 'cpfs-ingest' || inputs.mode == 'cpfs-adopt' || inputs.mode == 'oss-ingest'
         uses: actions/download-artifact@v4
         with:
           name: ${{ env.MANIFEST_ARTIFACT }}
@@ -486,17 +510,15 @@ jobs:
           # 每个分支各自组一整份参数数组。这样数组永不为空——空数组在
           # set -u 下展开会报错（bash 4.4 之前），而自托管 runner 的 bash
           # 版本是我们控制不了的。
-          if [ '${{ inputs.mode }}' = 'oss-ingest' ]; then
+          if [ '${{ inputs.mode }}' = 'oss-ingest' ] || [ '${{ inputs.mode }}' = 'cpfs-adopt' ]; then
             # 从 lakeFS 的 S3 Gateway 按 Commit 内路径取数落到 CPFS。
             #
             # 用 --commit 而不是 --ref：Commit 是上一步 import 刚产生的，
             # 已经是不可变标识，不需要再解析一次。
             #
-            # **不传 --commit-prefix**：scan-oss 产出的 manifest 里 source_key
-            # 已经是「Commit 内路径」（= destination + 相对路径），差值为空。
-            # 照抄 scan 那条路径补上前缀，会变成 datasets/<ds>/datasets/<ds>/...，
-            # 而 lakeFS 上没有那个路径，表现为全量 NoSuchKey——而那时 Commit
-            # 和 Tag 都已经建好了，只能换个 Tag 名重来。
+            # oss-ingest 不传 --commit-prefix：scan-oss 的 source_key 已经是
+            # Commit 内路径。cpfs-adopt 的 scan source_key 是源目录内相对路径，
+            # 所以下面只为它补 datasets/<dataset>。
             args=(materialize
               --dataset '${{ inputs.dataset }}'
               --repository '${{ inputs.repository }}'
@@ -507,6 +529,11 @@ jobs:
               --target-root "$target_root"
               --workers 32
             )
+            if [ '${{ inputs.mode }}' = 'cpfs-adopt' ]; then
+              # scan(CPFS) 的 source_key 是源目录内相对路径，而 Commit import
+              # 把它们放在 datasets/<dataset>/ 下；物化时必须补上这个差值。
+              args+=(--commit-prefix 'datasets/${{ inputs.dataset }}')
+            fi
           elif [ '${{ inputs.mode }}' = 'materialize' ]; then
             args=(materialize
               --dataset '${{ inputs.dataset }}'
@@ -593,7 +620,7 @@ jobs:
           [ -n "$PROTOCOL_SERVICE_ID" ] && svc="/$PROTOCOL_SERVICE_ID"
 
           dataset-sink pai-request "$release_dir" \
-            --dataset-id '${{ vars.PAI_DATASET_ID }}' \
+            --dataset-id '${{ needs.preflight.outputs.pai_dataset_id }}' \
             --region '${{ vars.ALIBABA_CLOUD_REGION }}' \
             --filesystem-id '${{ vars.CPFS_FILESYSTEM_ID }}' \
             --filesystem-path "$fs_path" \
@@ -690,7 +717,7 @@ jobs:
   # ---------------------------------------------------------------------------
   smoke-test:
     name: 冒烟训练作业
-    needs: [publish, register]
+    needs: [preflight, publish, register]
     if: ${{ vars.SMOKE_TEST_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     steps:
@@ -708,7 +735,7 @@ jobs:
         env:
           PAI_WORKSPACE_ID: ${{ vars.PAI_WORKSPACE_ID }}
           PAI_RESOURCE_ID: ${{ vars.PAI_RESOURCE_ID }}
-          PAI_DATASET_ID: ${{ vars.PAI_DATASET_ID }}
+          PAI_DATASET_ID: ${{ needs.preflight.outputs.pai_dataset_id }}
           PAI_DATASET_VERSION: ${{ needs.publish.outputs.commit }}
           TRAINING_IMAGE: ${{ vars.TRAINING_IMAGE }}
           DLC_ECS_SPEC: ${{ vars.DLC_ECS_SPEC }}

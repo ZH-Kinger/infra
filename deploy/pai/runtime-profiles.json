@@ -19,12 +19,7 @@
       "ram_user_id": "${PAI_DSW_OWNER_USER_ID}"
     }
   },
-  "datasets": {
-    "robotics": {
-      "dataset_id": "${PAI_DATASET_ID}",
-      "mount_path": "/mnt/dataset"
-    }
-  },
+  "datasets": "${PAI_DATASET_IDS_JSON}",
   "image_profiles": {
     "pytorch-2.6": {
       "image": "${TRAINING_IMAGE}",

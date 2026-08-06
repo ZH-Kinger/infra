@@ -209,11 +209,30 @@ Actions → Dataset release → Run workflow，填参数。流水线会在 dry-r
 | 情况 | mode | 额外要填 |
 |---|---|---|
 | CPFS 上刚处理完一批新数据，还没有 Commit | `cpfs-ingest` | `prepared_dir`、`archive_prefix`；`ref` 填**要创建的** Tag 名 |
+| 已有 CPFS 或已有 PAI Version 背后的目录，原路径不能移动 | `cpfs-adopt` | `prepared_dir` 填现有挂载路径、`archive_prefix` 填新归档前缀 |
 | **数据本来就在 OSS 上**（存量数据，最常见） | `oss-ingest` | `source_bucket`、`source_prefix`；`ref` 填**要创建的** Tag 名 |
 | CPFS staging 已就绪，Commit 已存在 | `certify` | `prepared_dir`、`manifest_path` |
 | 数据在 lakeFS，要拷到 CPFS | `materialize` | `manifest_path` |
 
-### 2.4.1 存量数据已经在 OSS 上
+已有 PAI Dataset 只需要把短名称映射到它的 ID，不要让用户从表单提交 ID：
+
+```json
+{"robotics":"d-existing-robotics","vision":"d-existing-vision"}
+```
+
+把这段配置成 Repository Variable `PAI_DATASET_IDS_JSON`。流水线按 `dataset` 名称选择
+目标容器；未知名称会在 preflight 失败。单数据集环境仍可暂时使用旧变量
+`PAI_DATASET_ID`。既有 PAI Version 如果没有 lakeFS Commit 和 `_READY`，不能直接视为
+已纳管，仍要根据底层位置走 `oss-ingest` 或 `cpfs-adopt`。
+
+### 2.4.1 已有 CPFS / PAI 数据集
+
+选择 `cpfs-adopt`。它会扫描现有目录、归档 OSS、创建 lakeFS Commit，再物化到新的
+`/datasets/<dataset>/<commit>/`。它不会像 `cpfs-ingest` 的 `certify` 那样 rename
+原目录，因此旧作业和旧 PAI Version 不会突然失去路径。纳管成功并完成使用方切换后，
+再单独决定旧目录何时下线。
+
+### 2.4.2 存量数据已经在 OSS 上
 
 这是最省事的一条：**不需要迁移，不需要归档**。
 
@@ -271,7 +290,7 @@ dataset-sink materialize --dataset robotics --repository robotics-data \
 （`verify --deep` 和 `training-guard --deep` 退化成只比大小），因为 manifest 随发布
 固化、事后补不上。只用它来先摸清前缀里有什么。
 
-`cpfs-ingest` 模式额外需要这几个仓库变量：
+`cpfs-ingest` 和 `cpfs-adopt` 模式额外需要这几个仓库变量：
 
 | 变量 | 说明 |
 |---|---|
@@ -279,6 +298,9 @@ dataset-sink materialize --dataset robotics --repository robotics-data \
 | `ARCHIVE_ENDPOINT_URL` | OSS 的 S3 兼容端点 |
 | `ARCHIVE_OBJECT_STORE_URI` | 桶级 URI，如 `s3://dataset-sink-archive`，供 lakeFS import 使用 |
 | `LAKEFS_API_ENDPOINT` | lakeFS API 地址 |
+
+`cpfs-adopt` 还需要 `LAKEFS_S3_ENDPOINT`，因为它归档建 Commit 后会重新物化，而不是
+移动原目录。
 
 `oss-ingest` 模式**不需要** `ARCHIVE_*`（它不归档），需要的是：
 
@@ -296,7 +318,7 @@ dataset-sink materialize --dataset robotics --repository robotics-data \
 `release.json` 之类的残留，`scan` 会在第一步就失败并给出清理命令——这是有意的，
 否则要到归档完一整轮之后才在 `certify` 撞上报错。
 
-### 2.4.2 用 CPFS 数据流动搬字节
+### 2.4.3 用 CPFS 数据流动搬字节
 
 `archive` 和 `materialize` 默认 `--via client`（本进程逐个文件搬）。如果 CPFS
 上已经配好数据流动，改用 `--via dataflow` 交给平台搬：
@@ -328,6 +350,19 @@ dataset-sink materialize --dataset robotics --repository robotics-data \
 
 CPFS release 只增不减，写满之后 `materialize` 会直接失败。**这是必须定期做的事**，
 不是可选优化。
+
+正常入口是 Actions → **Dataset lifecycle**：每周定时任务只上传 dry-run Artifact；
+需要腾空间时手动运行并打开 `execute`，随后在 `dataset-lifecycle` Environment 审批。
+配置以下 Repository Variables：
+
+| 变量 | 说明 |
+|---|---|
+| `DATASET_LIFECYCLE_ROLE_ARN` | Terraform 输出的生命周期 Evict 角色 |
+| `PAI_MOUNT_AUDIT_ROLE_ARN` | 定时计划使用的只读 PAI 审计角色 |
+| `CPFS_TARGET_ROOT`、`CPFS_MOUNT_PREFIX` | runner 挂载视角的数据集根和 CPFS 根 |
+| `CPFS_FILESYSTEM_ID`、`PAI_WORKSPACE_ID` | 占用和 DataFlow 检查坐标 |
+
+执行 Job 会重新计算计划，不会直接执行审批前的 Artifact。下面的 CLI 主要用于排错：
 
 ```bash
 # ① 先看计划（默认就是 dry-run，什么都不删）

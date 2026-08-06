@@ -147,6 +147,21 @@ class RuntimeRequestTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeRequestError, "REQUIRED_VALUE"):
                 load_runtime_config(path, environment={})
 
+    def test_dataset_id_catalog_expands_into_runtime_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            document = config()
+            document["datasets"] = "${PAI_DATASET_IDS_JSON}"
+            path = Path(tmp) / "profiles.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            loaded = load_runtime_config(
+                path,
+                environment={"PAI_DATASET_IDS_JSON": '{"robotics":"d-existing"}'},
+            )
+            self.assertEqual(
+                loaded["datasets"]["robotics"],
+                {"dataset_id": "d-existing", "mount_path": "/mnt/dataset"},
+            )
+
     def test_cli_command_option_does_not_overwrite_subcommand_dispatch(self):
         args = build_parser().parse_args(
             [

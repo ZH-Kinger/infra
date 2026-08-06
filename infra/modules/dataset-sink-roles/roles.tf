@@ -126,6 +126,27 @@ module "pai_mount_audit_role" {
   depends_on = [alicloud_ram_policy.this]
 }
 
+module "dataset_lifecycle_role" {
+  source = "../ci-oidc-role"
+
+  role_name   = "${local.name_prefix}-lifecycle"
+  description = "生命周期角色：审批后对可恢复且未被使用的 CPFS release 执行 Evict。"
+
+  oidc_provider_arn = var.oidc_provider_arn
+  audience          = var.oidc_audience
+  subjects = [
+    "repo:${var.github_oidc_repo}:environment:${var.lifecycle_github_environment}",
+  ]
+  max_session_duration = var.max_session_duration
+
+  attach_custom_policy_names = concat(
+    ["${local.name_prefix}-lifecycle"],
+    local.guardrail_policy_names,
+  )
+
+  depends_on = [alicloud_ram_policy.this]
+}
+
 # ---------------------------------------------------------------------------
 # 训练运行角色：由 PAI 服务扮演，不是 CI 身份，所以不走 OIDC 模块。
 #

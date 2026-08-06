@@ -23,6 +23,11 @@ output "pai_mount_audit_role_arn" {
   value       = module.pai_mount_audit_role.role_arn
 }
 
+output "dataset_lifecycle_role_arn" {
+  description = "CPFS 生命周期 Evict 角色 ARN，仅供 dataset-lifecycle 审批环境使用"
+  value       = module.dataset_lifecycle_role.role_arn
+}
+
 output "training_runtime_role_arn" {
   description = "训练运行角色 ARN，填入 DLC CreateJob 的运行身份，不要给 CI"
   value       = alicloud_ram_role.training_runtime.arn
@@ -55,6 +60,7 @@ output "assume_role_policies" {
     dlc_submit       = module.dlc_submit_role.assume_role_policy
     dsw_submit       = module.dsw_submit_role.assume_role_policy
     pai_mount_audit  = module.pai_mount_audit_role.assume_role_policy
+    lifecycle        = module.dataset_lifecycle_role.assume_role_policy
     training_runtime = local.training_runtime_trust
   }
 }

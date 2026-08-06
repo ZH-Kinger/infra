@@ -55,7 +55,7 @@ StopInstance，同时也写入控制面的 `expires_at` Label；当前版本尚�
 
 | Variable | 用途 |
 |---|---|
-| `PAI_WORKSPACE_ID`, `PAI_DATASET_ID` | 工作空间与已发布 Dataset |
+| `PAI_WORKSPACE_ID`, `PAI_DATASET_IDS_JSON` | 工作空间与“数据集短名称 → 已有 PAI Dataset ID”映射；单数据集可暂用 `PAI_DATASET_ID` |
 | `PAI_ACR_REGISTRY`, `TRAINING_IMAGE` | ACR 白名单前缀与 Digest 镜像地址 |
 | `DSW_ECS_SPEC`, `DSW_RESOURCE_ID` | `gpu-dev` Profile |
 | `DLC_ECS_SPEC`, `PAI_RESOURCE_ID` | `gpu-training` Profile |

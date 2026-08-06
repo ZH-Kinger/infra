@@ -486,6 +486,48 @@ locals {
   })
 
   # ---------------------------------------------------------------------------
+  # 4b. 生命周期执行角色：只允许在审批后提交 CPFS Evict，并在执行前重查
+  #     PAI 活动作业。不能删除目录、PAI Version 或 OSS 对象。
+  # ---------------------------------------------------------------------------
+  dataset_lifecycle_policy = jsonencode({
+    Version = "1"
+    Statement = [
+      {
+        Sid    = "ReadPaiUsageAndCpfsDataFlow"
+        Effect = "Allow"
+        Action = concat(
+          local.pai_job_read_actions,
+          local.pai_dsw_audit_actions,
+          local.pai_dataset_read_actions,
+          [
+            "nas:DescribeDataFlows",
+            "nas:DescribeDataFlowTasks",
+            "nas:CreateDataFlowTask",
+          ],
+        )
+        Resource = ["*"]
+      },
+      {
+        Sid      = "DenyDatasetAndJobMutation"
+        Effect   = "Deny"
+        Action   = concat(local.pai_dataset_mutation_actions, local.pai_job_submit_actions)
+        Resource = ["*"]
+      },
+      {
+        Sid    = "DenyObjectDataPlane"
+        Effect = "Deny"
+        Action = [
+          "oss:GetObject",
+          "oss:PutObject",
+          "oss:DeleteObject",
+          "oss:ListObjects",
+        ]
+        Resource = ["*"]
+      },
+    ]
+  })
+
+  # ---------------------------------------------------------------------------
   # 5. 训练运行角色：容器内实际使用的身份。
   #    只读已发布归档 + 写自己的输出目录；绝不给 landing/lakeFS 后端。
   # ---------------------------------------------------------------------------
@@ -684,6 +726,7 @@ locals {
       "${local.name_prefix}-dlc-submit"       = local.dlc_submit_policy
       "${local.name_prefix}-dsw-submit"       = local.dsw_submit_policy
       "${local.name_prefix}-pai-mount-audit"  = local.pai_mount_audit_policy
+      "${local.name_prefix}-lifecycle"        = local.dataset_lifecycle_policy
       "${local.name_prefix}-training-runtime" = local.training_runtime_policy
     },
     var.developer_group_name == "" ? {} : {
