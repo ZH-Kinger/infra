@@ -5,6 +5,17 @@ on:
     paths: ["infra/**", ".github/workflows/terraform.yml"]
   workflow_dispatch:
     inputs:
+      target:
+        description: "Environment layer to plan/apply"
+        required: true
+        default: dev-platform
+        type: choice
+        options:
+          - dev-platform
+          - dev-access
+          - prod-platform
+          - prod-access
+          - all
       confirm_apply:
         description: "Apply the generated plans after Environment approval"
         required: true
@@ -29,21 +40,36 @@ env:
   ALIBABA_CLOUD_OIDC_AUDIENCE: github-actions
 
 jobs:
+  select:
+    name: Select environment layers
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - id: matrix
+        env:
+          TARGET: ${{ inputs.target || 'all' }}
+        run: |
+          set -euo pipefail
+          all='[{"dir":"infra/envs/dev/platform","layer":"dev-platform","tfvars_var":"TFVARS_DEV_PLATFORM_JSON","environment":"development","role_var":"ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN"},{"dir":"infra/envs/dev/access","layer":"dev-access","tfvars_var":"TFVARS_DEV_ACCESS_JSON","environment":"development","role_var":"ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN"},{"dir":"infra/envs/prod/platform","layer":"prod-platform","tfvars_var":"TFVARS_PROD_PLATFORM_JSON","environment":"production","role_var":"ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN"},{"dir":"infra/envs/prod/access","layer":"prod-access","tfvars_var":"TFVARS_PROD_ACCESS_JSON","environment":"production-access","role_var":"ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN"}]'
+          if [ "$TARGET" = "all" ]; then
+            selected=$all
+          else
+            selected=$(printf '%s' "$all" | python3 -c 'import json,os,sys; print(json.dumps([x for x in json.load(sys.stdin) if x["layer"] == os.environ["TARGET"]], separators=(",", ":")))')
+          fi
+          if [ "$selected" = "[]" ]; then
+            echo "::error::未知 target: $TARGET"
+            exit 1
+          fi
+          echo "matrix={\"include\":$selected}" >> "$GITHUB_OUTPUT"
+
   plan:
     name: Plan ${{ matrix.layer }}
+    needs: select
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - dir: infra/envs/dev/platform
-            layer: dev-platform
-          - dir: infra/envs/dev/access
-            layer: dev-access
-          - dir: infra/envs/prod/platform
-            layer: prod-platform
-          - dir: infra/envs/prod/access
-            layer: prod-access
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -97,11 +123,24 @@ jobs:
       - name: Init
         run: terraform -chdir=${{ matrix.dir }} init -input=false -backend-config=/tmp/backend.hcl
 
+      - name: 写入环境变量文件
+        env:
+          TFVARS_JSON: ${{ vars[matrix.tfvars_var] }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TFVARS_JSON" ]; then
+            echo "::error::缺少 Repository Variable ${{ matrix.tfvars_var }}"
+            exit 1
+          fi
+          printf '%s' "$TFVARS_JSON" > /tmp/${{ matrix.layer }}.tfvars.json
+          python3 -m json.tool /tmp/${{ matrix.layer }}.tfvars.json >/dev/null
+
       - name: Plan
         id: plan
         run: |
           set -euo pipefail
           terraform -chdir=${{ matrix.dir }} plan -input=false -lock=false \
+            -var-file=/tmp/${{ matrix.layer }}.tfvars.json \
             -out=tfplan -no-color | tee /tmp/plan-${{ matrix.layer }}.txt
 
       # apply 必须消费**这个** tfplan，而不是重新 plan：
@@ -148,32 +187,13 @@ jobs:
       ${{ github.event_name == 'workflow_dispatch'
       && github.ref == 'refs/heads/main'
       && inputs.confirm_apply }}
-    needs: plan
+    needs: [select, plan]
     runs-on: ubuntu-latest
     strategy:
       # 权限层和基础设施层不并行：两者都要写 state，且审批人不同。
       max-parallel: 1
       fail-fast: true
-      matrix:
-        include:
-          - dir: infra/envs/dev/platform
-            layer: dev-platform
-            environment: development
-            role_var: ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN
-          - dir: infra/envs/dev/access
-            layer: dev-access
-            environment: development
-            role_var: ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN
-          - dir: infra/envs/prod/platform
-            layer: prod-platform
-            environment: production
-            role_var: ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN
-          - dir: infra/envs/prod/access
-            layer: prod-access
-            # 权限层单独用一个 Environment，可以配置不同的审批人
-            # （见 .github/CODEOWNERS：权限面需要安全团队评审）。
-            environment: production-access
-            role_var: ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
 
     # 人工审批在这里生效：Environment 的 required reviewers 会阻塞该 Job，
     # 同时 OIDC token 的 sub 会变成 repo:<org>/<repo>:environment:<name>，
