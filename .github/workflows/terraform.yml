@@ -145,13 +145,18 @@ jobs:
 
       # apply 必须消费**这个** tfplan，而不是重新 plan：
       # 否则审批时看到的变更和实际执行的变更可能不一致，审批就只是仪式。
+      - name: 规范化 plan 产物目录
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/tfplan-artifact
+          cp "${{ matrix.dir }}/tfplan" /tmp/tfplan-artifact/tfplan
+          cp "/tmp/plan-${{ matrix.layer }}.txt" /tmp/tfplan-artifact/plan.txt
+
       - name: 上传 plan 产物
         uses: actions/upload-artifact@v4
         with:
           name: tfplan-${{ matrix.layer }}-${{ github.sha }}
-          path: |
-            ${{ matrix.dir }}/tfplan
-            /tmp/plan-${{ matrix.layer }}.txt
+          path: /tmp/tfplan-artifact/
           retention-days: 5
 
       - name: 检测危险变更
@@ -238,5 +243,5 @@ jobs:
       - name: Apply（执行审批过的那一份 plan）
         run: |
           set -euo pipefail
-          cp "/tmp/artifact/${{ matrix.dir }}/tfplan" "${{ matrix.dir }}/tfplan"
+          cp "/tmp/artifact/tfplan" "${{ matrix.dir }}/tfplan"
           terraform -chdir=${{ matrix.dir }} apply -input=false -lock-timeout=5m -no-color tfplan
