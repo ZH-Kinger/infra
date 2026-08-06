@@ -11,7 +11,7 @@ test("builds the dataset operations control plane instead of the starter", async
   ]);
   const product = `${page}\n${consoleSource}\n${layout}`;
   assert.match(product, /Dataset Ops/i);
-  assert.match(product, /DATASET OPS/);
+  assert.match(product, /训练数据平台/);
   assert.match(product, /训练数据运维控制台/);
   assert.match(product, /存量纳管/);
   assert.match(product, /CPFS/);
@@ -33,7 +33,7 @@ test("keeps write operations behind server-side workflow dispatch", async () => 
   assert.match(route, /dataset-lifecycle\.yml/);
   assert.match(route, /pai-runtime\.yml/);
   assert.match(route, /if \(execute\)/);
-  assert.match(page, /PLAN ONLY/);
+  assert.match(page, /仅生成计划/);
   assert.match(hosting, /"d1": "DB"/);
   assert.match(schema, /idx_operations_dataset_created_at/);
 });
