@@ -36,8 +36,8 @@ jobs:
     name: 生成生命周期计划
     runs-on: ${{ vars.CPFS_RUNNER_LABEL }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - run: python -m pip install -e '.[lakefs]'
@@ -71,7 +71,7 @@ jobs:
             > "$RUNNER_TEMP/lifecycle-plan.json"
           python -m json.tool "$RUNNER_TEMP/lifecycle-plan.json"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lifecycle-plan-${{ github.run_id }}
           path: ${{ runner.temp }}/lifecycle-plan.json
@@ -84,8 +84,8 @@ jobs:
     environment: dataset-lifecycle
     runs-on: ${{ vars.CPFS_RUNNER_LABEL }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - run: python -m pip install -e '.[lakefs]'
@@ -121,7 +121,7 @@ jobs:
             --execute > "$RUNNER_TEMP/lifecycle-result.json"
           python -m json.tool "$RUNNER_TEMP/lifecycle-result.json"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lifecycle-result-${{ github.run_id }}
           path: ${{ runner.temp }}/lifecycle-result.json
