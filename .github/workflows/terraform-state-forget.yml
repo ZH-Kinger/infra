@@ -1,0 +1,91 @@
+name: Terraform State Binding Recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Environment layer containing the invalid binding"
+        required: true
+        type: choice
+        options: [dev-platform, dev-access, prod-platform, prod-access]
+      resource_address:
+        description: "Exact Terraform resource address to forget"
+        required: true
+        type: string
+      confirm_forget:
+        description: "I verified the state binding is invalid; this does not delete cloud resources"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.15.8"
+  ALIBABA_CLOUD_OIDC_AUDIENCE: github-actions
+
+jobs:
+  select:
+    if: ${{ inputs.confirm_forget }}
+    runs-on: ubuntu-latest
+    outputs:
+      dir: ${{ steps.target.outputs.dir }}
+      environment: ${{ steps.target.outputs.environment }}
+      role_var: ${{ steps.target.outputs.role_var }}
+    steps:
+      - id: target
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            dev-platform) dir=infra/envs/dev/platform; environment=development; role_var=ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN ;;
+            dev-access) dir=infra/envs/dev/access; environment=development; role_var=ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN ;;
+            prod-platform) dir=infra/envs/prod/platform; environment=production; role_var=ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN ;;
+            prod-access) dir=infra/envs/prod/access; environment=production-access; role_var=ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN ;;
+          esac
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "environment=$environment" >> "$GITHUB_OUTPUT"
+          echo "role_var=$role_var" >> "$GITHUB_OUTPUT"
+
+  forget:
+    name: Forget invalid ${{ inputs.target }} binding
+    needs: select
+    runs-on: ubuntu-latest
+    environment: ${{ needs.select.outputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - name: 假设对应 Apply 角色
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ vars[needs.select.outputs.role_var] }}
+          oidc-provider-arn: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
+          audience: ${{ env.ALIBABA_CLOUD_OIDC_AUDIENCE }}
+          role-session-name: tf-state-repair-${{ github.run_id }}
+      - name: 写入 backend 配置
+        run: |
+          cat > /tmp/backend.hcl <<EOF
+          bucket              = "${{ vars.TF_STATE_BUCKET }}"
+          region              = "${{ vars.ALIBABA_CLOUD_REGION }}"
+          tablestore_endpoint = "${{ vars.TF_STATE_LOCK_ENDPOINT }}"
+          tablestore_table    = "${{ vars.TF_STATE_LOCK_TABLE }}"
+          encrypt             = true
+          EOF
+      - name: Init
+        run: terraform -chdir=${{ needs.select.outputs.dir }} init -input=false -backend-config=/tmp/backend.hcl
+      - name: 忘记已核实的错误绑定
+        env:
+          RESOURCE_ADDRESS: ${{ inputs.resource_address }}
+        run: |
+          set -euo pipefail
+          terraform -chdir=${{ needs.select.outputs.dir }} state rm -lock-timeout=5m "$RESOURCE_ADDRESS"

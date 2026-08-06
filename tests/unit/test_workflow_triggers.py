@@ -51,6 +51,7 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
             "oidc-role-smoke.yml",
             "cloud-preflight.yml",
             "terraform-force-unlock.yml",
+            "terraform-state-forget.yml",
         ):
             workflow = self._read(name)
             with self.subTest(workflow=name):
@@ -67,6 +68,14 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn("ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN", workflow)
         self.assertIn('force-unlock -force "$LOCK_ID"', workflow)
         self.assertNotIn("-lock=false", workflow)
+
+    def test_state_forget_is_manual_confirmed_and_never_deletes_cloud_resources(self):
+        workflow = self._read("terraform-state-forget.yml")
+        self.assertIn("confirm_forget:", workflow)
+        self.assertIn("if: ${{ inputs.confirm_forget }}", workflow)
+        self.assertIn('state rm -lock-timeout=5m "$RESOURCE_ADDRESS"', workflow)
+        self.assertNotIn("terraform destroy", workflow)
+        self.assertNotIn("DeleteBucket", workflow)
 
     def test_oidc_smoke_only_checks_temporary_credentials(self):
         workflow = self._read("oidc-role-smoke.yml")
