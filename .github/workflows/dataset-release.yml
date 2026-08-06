@@ -92,7 +92,7 @@ jobs:
       cpfs_runner: ${{ steps.check.outputs.cpfs_runner }}
       pai_dataset_id: ${{ steps.check.outputs.pai_dataset_id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 校验 ref 不是可变引用
         run: |
@@ -256,7 +256,7 @@ jobs:
       object_store_uri: ${{ steps.archive.outputs.object_store_uri }}
       object_store_prefix: ${{ steps.archive.outputs.object_store_prefix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -357,7 +357,7 @@ jobs:
       manifest_sha256: ${{ steps.scan.outputs.manifest_sha256 }}
       file_count: ${{ steps.scan.outputs.file_count }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -440,7 +440,7 @@ jobs:
     outputs:
       commit_id: ${{ steps.commit.outputs.commit_id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -525,7 +525,7 @@ jobs:
         ${{ (inputs.mode == 'cpfs-ingest' || inputs.mode == 'cpfs-adopt' || inputs.mode == 'oss-ingest')
         && needs.ingest-commit.outputs.commit_id || inputs.ref }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -650,7 +650,7 @@ jobs:
     needs: [preflight, publish]
     runs-on: ${{ needs.preflight.outputs.cpfs_runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -705,7 +705,7 @@ jobs:
     needs: [publish, build-request]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -739,7 +739,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: dataset-release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -782,7 +782,7 @@ jobs:
     if: ${{ vars.SMOKE_TEST_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 假设 DlcSubmitRole
         uses: aliyun/configure-aliyun-credentials-action@v1
