@@ -15,14 +15,22 @@ type Operation = {
   createdAt: string;
 };
 
-const nav: Array<{ key: NavKey; label: string; mark: string }> = [
-  { key: "overview", label: "运营总览", mark: "01" },
-  { key: "datasets", label: "数据资产", mark: "02" },
-  { key: "adopt", label: "存量纳管", mark: "03" },
-  { key: "lifecycle", label: "容量与生命周期", mark: "04" },
-  { key: "runtime", label: "DSW / DLC", mark: "05" },
-  { key: "access", label: "权限与审计", mark: "06" },
+const navGroups: Array<{ label: string; items: Array<{ key: NavKey; label: string; description: string; mark: string }> }> = [
+  { label: "工作台", items: [
+    { key: "overview", label: "运营总览", description: "资源与运行状态", mark: "总" },
+  ] },
+  { label: "数据管理", items: [
+    { key: "datasets", label: "数据资产", description: "数据集与版本", mark: "数" },
+    { key: "adopt", label: "存量纳管", description: "OSS / CPFS 接入", mark: "纳" },
+    { key: "lifecycle", label: "容量与生命周期", description: "预热、沉淀与回收", mark: "容" },
+  ] },
+  { label: "计算与安全", items: [
+    { key: "runtime", label: "DSW / DLC", description: "开发与训练实例", mark: "算" },
+    { key: "access", label: "权限与审计", description: "RAM、挂载与操作记录", mark: "审" },
+  ] },
 ];
+
+const nav = navGroups.flatMap((group) => group.items);
 
 const datasets = [
   { name: "robotics", commit: "9b5d3e6c12", size: "86.4 TB", versions: 18, state: "HEALTHY", hot: 72 },
@@ -89,11 +97,15 @@ export function OpsConsole({ user }: { user: User }) {
           <div><strong>训练数据平台</strong><small>运维控制台</small></div>
         </div>
         <nav aria-label="主导航">
-          {nav.map((item) => (
-            <button key={item.key} className={active === item.key ? "active" : ""} onClick={() => setActive(item.key)}>
-              <span>{item.mark}</span>{item.label}
-            </button>
-          ))}
+          {navGroups.map((group) => <div className="nav-group" key={group.label}>
+            <p>{group.label}</p>
+            {group.items.map((item) => (
+              <button key={item.key} aria-current={active === item.key ? "page" : undefined} className={active === item.key ? "active" : ""} onClick={() => setActive(item.key)}>
+                <span className="nav-icon">{item.mark}</span>
+                <span className="nav-copy"><strong>{item.label}</strong><small>{item.description}</small></span>
+              </button>
+            ))}
+          </div>)}
         </nav>
         <div className="environment-card">
           <span className="status-dot" />
@@ -111,7 +123,7 @@ export function OpsConsole({ user }: { user: User }) {
           <div className="top-actions"><span className="health"><i />服务正常</span><button onClick={() => setActive("adopt")}>纳管数据集</button></div>
         </header>
 
-        <div className="notice"><span>POLICY</span>{notice}</div>
+        <div className="notice"><span>执行策略</span>{notice}</div>
 
         {active === "overview" && <Overview operations={operations} onNavigate={setActive} />}
         {active === "datasets" && <DatasetInventory />}

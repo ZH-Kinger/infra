@@ -320,8 +320,9 @@ dataset-sink materialize --dataset robotics --repository robotics-data \
 
 ### 2.4.3 用 CPFS 数据流动搬字节
 
-`archive` 和 `materialize` 默认 `--via client`（本进程逐个文件搬）。如果 CPFS
-上已经配好数据流动，改用 `--via dataflow` 交给平台搬：
+CLI 单独运行时，`archive` 和 `materialize` 默认 `--via client`，方便离线演练；
+`dataset-release.yml` 的生产默认则是 `transfer_mode=dataflow`，由 CPFS 服务端搬运。
+只有尚未完成 DataFlow 绑定的迁移环境才显式选择 `client`：
 
 ```bash
 # 沉淀：CPFS staging → OSS
@@ -342,6 +343,8 @@ dataset-sink materialize --dataset robotics --repository robotics-data \
 
 这条路要求环境先满足六条前提，见[架构](architecture.md)。其中三条是 Terraform
 该管的：数据集根目录是 Fileset、归档桶打 `cpfs-dataflow` 标签、归档桶开版本控制。
+流水线不会在找不到覆盖路径时自动回退到客户端，否则一次配置错误会悄悄变成 runner
+上的 TB 级复制；必须先补齐 Fileset/DataFlow，或由运维人员明确选择兼容模式。
 
 **沉淀不释放 CPFS 空间**——它只是在 OSS 多存一份。要腾容量得再跑
 `reclaim --strategy cpfs-evict`。

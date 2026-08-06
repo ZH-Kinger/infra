@@ -16,6 +16,14 @@ on:
         default: cpfs-ingest
         type: choice
         options: [cpfs-ingest, cpfs-adopt, oss-ingest, certify, materialize]
+      transfer_mode:
+        description: |
+          字节搬运方式。dataflow 调用 CPFS Import/Export；client 仅用于未完成
+          DataFlow 绑定的兼容环境。生产默认使用 dataflow，找不到覆盖路径时直接失败。
+        required: true
+        default: dataflow
+        type: choice
+        options: [dataflow, client]
       dataset:
         description: 数据集名（如 robotics）
         required: true
@@ -164,6 +172,7 @@ jobs:
           PAI_DATASET_IDS_JSON: ${{ vars.PAI_DATASET_IDS_JSON }}
           CPFS_FILESYSTEM_ID: ${{ vars.CPFS_FILESYSTEM_ID }}
           CPFS_TARGET_ROOT: ${{ vars.CPFS_TARGET_ROOT }}
+          CPFS_MOUNT_PREFIX: ${{ vars.CPFS_MOUNT_PREFIX }}
           ARCHIVE_BUCKET: ${{ vars.ARCHIVE_BUCKET }}
           ARCHIVE_ENDPOINT_URL: ${{ vars.ARCHIVE_ENDPOINT_URL }}
           ARCHIVE_OBJECT_STORE_URI: ${{ vars.ARCHIVE_OBJECT_STORE_URI }}
@@ -181,6 +190,9 @@ jobs:
             eval "value=\${$v:-}"
             [ -n "$value" ] || missing="$missing $v"
           done
+          if [ '${{ inputs.transfer_mode }}' = 'dataflow' ] && [ -z "$CPFS_MOUNT_PREFIX" ]; then
+            missing="$missing CPFS_MOUNT_PREFIX"
+          fi
           # 两种 CPFS 接入都要先归档，再 import 进 lakeFS。cpfs-adopt 还要从
           # lakeFS 重新物化，以保留原目录不被 certify 的 rename 移走。
           if [ "$MODE" = "cpfs-ingest" ] || [ "$MODE" = "cpfs-adopt" ]; then
@@ -241,6 +253,8 @@ jobs:
     runs-on: ${{ needs.preflight.outputs.cpfs_runner }}
     outputs:
       manifest_sha256: ${{ steps.scan.outputs.manifest_sha256 }}
+      object_store_uri: ${{ steps.archive.outputs.object_store_uri }}
+      object_store_prefix: ${{ steps.archive.outputs.object_store_prefix }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -271,15 +285,50 @@ jobs:
           audience: ${{ env.ALIBABA_CLOUD_OIDC_AUDIENCE }}
           role-session-name: archive-${{ github.run_id }}
 
-      # 幂等且可续传：已存在且大小一致的对象会跳过，中断重跑只补缺口。
+      # dataflow 是生产默认：由 CPFS 服务端执行 Export；如果 prepared_dir 没有被
+      # DataFlow 覆盖则立即失败，不静默回退到 runner 搬运。client 只用于迁移期兼容。
       - name: 归档到对象存储
+        id: archive
+        env:
+          ARCHIVE_OBJECT_STORE_URI: ${{ vars.ARCHIVE_OBJECT_STORE_URI }}
+          INPUT_ARCHIVE_PREFIX: ${{ inputs.archive_prefix }}
         run: |
-          dataset-sink archive '${{ inputs.prepared_dir }}' \
+          set -euo pipefail
+          args=(archive '${{ inputs.prepared_dir }}' \
             --manifest "$RUNNER_TEMP/manifest.jsonl" \
-            --prefix '${{ inputs.archive_prefix }}' \
-            --target oss \
-            --bucket '${{ vars.ARCHIVE_BUCKET }}' \
-            --endpoint-url '${{ vars.ARCHIVE_ENDPOINT_URL }}'
+            --prefix '${{ inputs.archive_prefix }}')
+
+          if [ '${{ inputs.transfer_mode }}' = 'dataflow' ]; then
+            args+=(--via dataflow
+              --cpfs-filesystem-id '${{ vars.CPFS_FILESYSTEM_ID }}'
+              --cpfs-mount-prefix '${{ vars.CPFS_MOUNT_PREFIX }}'
+              --region '${{ vars.ALIBABA_CLOUD_REGION }}')
+          else
+            args+=(--via client
+              --target oss
+              --bucket '${{ vars.ARCHIVE_BUCKET }}'
+              --endpoint-url '${{ vars.ARCHIVE_ENDPOINT_URL }}')
+          fi
+
+          dataset-sink "${args[@]}" | tee "$RUNNER_TEMP/archive.json"
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          result = json.load(open(os.environ["RUNNER_TEMP"] + "/archive.json"))
+          physical = str(result.get("object_store_uri") or "").strip()
+          if physical:
+              # DataFlow 回报 oss://，lakeFS 的 OSS adapter 要求 s3://。
+              if physical.startswith("oss://"):
+                  physical = "s3://" + physical[len("oss://"):]
+              scheme, rest = physical.split("://", 1)
+              bucket, _, prefix = rest.strip("/").partition("/")
+              print(f"object_store_uri={scheme}://{bucket}")
+              print(f"object_store_prefix={prefix}")
+          else:
+              print(f"object_store_uri={os.environ['ARCHIVE_OBJECT_STORE_URI'].rstrip('/')}")
+              print(f"object_store_prefix={os.environ['INPUT_ARCHIVE_PREFIX'].strip('/')}")
+          PY
 
       - uses: actions/upload-artifact@v4
         with:
@@ -429,8 +478,10 @@ jobs:
             # 是因为两者之间隔着一次 scan，注册表有可能在中间被改。
             args+=(--registry deploy/data-sources.json)
           else
-            args+=(--object-store-uri '${{ vars.ARCHIVE_OBJECT_STORE_URI }}')
-            args+=(--prefix '${{ inputs.archive_prefix }}')
+            # 不能重新用用户输入的 archive_prefix：DataFlow 的真实 OSS 落点由
+            # FileSystemPath ↔ SourceStorage 绑定决定，以上一步回报为准。
+            args+=(--object-store-uri '${{ needs.ingest-archive.outputs.object_store_uri }}')
+            args+=(--prefix '${{ needs.ingest-archive.outputs.object_store_prefix }}')
             # cpfs-ingest **刻意不传 --registry**：它的来源是本流水线上一步刚写进去的
             # staging 前缀（如 staging/batch-20260802-001），而注册表登记的是
             # 归档前缀（如 releases/）。传了会因为「staging 没注册」误报失败，
@@ -561,6 +612,16 @@ jobs:
               --lakefs-tag '${{ inputs.ref }}'
               --manifest "$manifest"
             )
+          fi
+
+          # materialize 的生产路径通过 CPFS DataFlow Import 预热；Import 完成后
+          # CLI 仍执行 Manifest/SHA-256 校验和原子 rename。找不到匹配的 DataFlow
+          # 会 fail-closed，不会偷偷回退到客户端逐文件复制。
+          if [ "${args[0]}" = 'materialize' ] && [ '${{ inputs.transfer_mode }}' = 'dataflow' ]; then
+            args+=(--via dataflow
+              --cpfs-filesystem-id '${{ vars.CPFS_FILESYSTEM_ID }}'
+              --cpfs-mount-prefix '${{ vars.CPFS_MOUNT_PREFIX }}'
+              --region '${{ vars.ALIBABA_CLOUD_REGION }}')
           fi
 
           [ -n "$snapshot" ] && args+=(--paimon-snapshot-id "$snapshot")

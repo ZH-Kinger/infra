@@ -32,6 +32,7 @@ test("keeps write operations behind server-side workflow dispatch", async () => 
   assert.match(route, /dataset-release\.yml/);
   assert.match(route, /dataset-lifecycle\.yml/);
   assert.match(route, /pai-runtime\.yml/);
+  assert.match(route, /transfer_mode: "dataflow"/);
   assert.match(route, /if \(execute\)/);
   assert.match(page, /仅生成计划/);
   assert.match(hosting, /"d1": "DB"/);

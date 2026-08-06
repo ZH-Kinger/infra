@@ -25,12 +25,18 @@ button { cursor: pointer; }
 .brand strong { font-size: 15px; display: block; }
 .brand small { display: block; margin-top: 4px; color: #8f959e; font-size: 10px; }
 .brand-signal { width: 30px; height: 30px; border-radius: 6px; display: grid; place-items: center; background: var(--blue); color: #fff; font-size: 14px; font-weight: 700; }
-.sidebar nav { display: grid; gap: 5px; margin-top: 28px; }
-.sidebar nav button { border: 0; background: transparent; color: #4e5969; border-radius: 6px; padding: 12px; text-align: left; font-size: 13px; font-weight: 500; transition: .15s ease; }
-.sidebar nav button span { font: 9px ui-monospace, monospace; color: #a6abb4; margin-right: 14px; }
+.sidebar nav { display: grid; gap: 18px; margin-top: 22px; }
+.nav-group { display: grid; gap: 4px; }
+.nav-group > p { margin: 0 10px 5px; color: #8f959e; font-size: 10px; font-weight: 600; }
+.sidebar nav button { width: 100%; display: flex; align-items: center; gap: 10px; border: 0; background: transparent; color: #4e5969; border-radius: 6px; padding: 9px 10px; text-align: left; transition: .15s ease; }
+.nav-icon { flex: 0 0 28px; width: 28px; height: 28px; border: 1px solid #dee0e3; border-radius: 6px; background: #f8f9fa; display: grid; place-items: center; color: #646a73; font-size: 11px; font-weight: 700; }
+.nav-copy { min-width: 0; display: grid; gap: 3px; }
+.nav-copy strong { font-size: 12px; font-weight: 600; }
+.nav-copy small { overflow: hidden; color: #8f959e; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar nav button:hover { background: #f2f3f5; color: var(--ink); }
 .sidebar nav button.active { background: #e8f0ff; color: var(--blue); font-weight: 650; }
-.sidebar nav button.active span { color: #7ea4fb; }
+.sidebar nav button.active .nav-icon { border-color: #8fb1fc; background: var(--blue); color: #fff; }
+.sidebar nav button.active .nav-copy small { color: #6f8bc8; }
 .environment-card { margin-top: auto; border: 1px solid var(--line); background: #f8f9fa; border-radius: 6px; padding: 13px; display: flex; gap: 10px; align-items: center; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #24d094; box-shadow: 0 0 0 4px #24d09418; }
 .environment-card small { display: block; font-size: 9px; color: #8f959e; }
@@ -103,9 +109,9 @@ h1 { margin: 7px 0 0; font-size: 24px; letter-spacing: -.02em; }
 .role-matrix { padding-top: 7px; }.role-matrix p { display: grid; grid-template-columns: 1fr 1.5fr 1.1fr; gap: 10px; margin: 0; padding: 16px 4px; border-bottom: 1px solid #edf0f4; font-size: 10px; }.role-matrix span { font: 8px ui-monospace, monospace; color: var(--blue); }.role-matrix i { font: 8px ui-monospace, monospace; color: #8b95a3; font-style: normal; }.score { display: flex; align-items: baseline; padding: 24px 8px; }.score strong { font-size: 52px; color: var(--green); letter-spacing: -.07em; }.score > span { font-size: 13px; color: #85909e; margin-left: 4px; }.score p { margin: 0 0 0 auto; font-size: 10px; color: #798493; line-height: 1.8; }.wide-button { width: 100%; border: 1px solid #c8d7f5; background: #eff4ff; color: var(--blue-dark); font-weight: 750; padding: 12px; font-size: 10px; }
 
 @media (max-width: 1120px) {
-  .console-shell { grid-template-columns: 76px 1fr; }.sidebar { width: 76px; padding: 28px 12px; }.brand div, .sidebar nav button:not(.active)::after, .sidebar nav button { font-size: 0; }.brand { padding: 0 10px 25px; }.sidebar nav button { text-align: center; padding: 13px 3px; }.sidebar nav button span { margin: 0; font-size: 9px; }.environment-card div, .identity > div:not(.avatar) { display: none; }.environment-card { justify-content: center; }.identity { justify-content: center; }.workspace { padding: 24px; }.fabric-map { display: none; }.span-8, .span-7, .span-5, .span-4 { grid-column: span 12; }
+  .console-shell { grid-template-columns: 76px 1fr; }.sidebar { width: 76px; padding: 28px 12px; }.brand div, .nav-copy, .nav-group > p { display: none; }.brand { padding: 0 10px 25px; }.sidebar nav { gap: 8px; }.sidebar nav button { justify-content: center; padding: 7px 3px; }.nav-icon { flex-basis: 30px; width: 30px; height: 30px; }.environment-card div, .identity > div:not(.avatar) { display: none; }.environment-card { justify-content: center; }.identity { justify-content: center; }.workspace { padding: 24px; }.fabric-map { display: none; }.span-8, .span-7, .span-5, .span-4 { grid-column: span 12; }
 }
 
 @media (max-width: 720px) {
-  .console-shell { display: block; }.sidebar { position: static; width: 100%; height: auto; display: flex; padding: 14px; }.brand { border: 0; padding: 0; }.sidebar nav { display: flex; overflow-x: auto; margin: 13px 0 0; }.sidebar nav button { min-width: 48px; }.environment-card, .identity { display: none; }.workspace { padding: 18px 14px 40px; }.topbar { align-items: start; }.top-actions .health { display: none; }.top-actions button { padding: 10px; }.hero-panel { padding: 26px 22px; }.hero-panel h2 { font-size: 24px; }.metric-row { grid-template-columns: 1fr 1fr; }.form-grid { grid-template-columns: 1fr; }.form-grid label.wide { grid-column: auto; }.form-footer, .lifecycle-action { align-items: stretch; flex-direction: column; gap: 15px; }.capacity-hero { padding: 25px; }.capacity-ring { display: none; }.operations { overflow-x: auto; }
+  .console-shell { display: block; }.sidebar { position: static; width: 100%; height: auto; display: flex; padding: 14px; }.brand { border: 0; padding: 0; }.sidebar nav { display: flex; gap: 4px; overflow-x: auto; margin: 13px 0 0; }.nav-group { display: flex; gap: 4px; }.sidebar nav button { min-width: 42px; }.environment-card, .identity { display: none; }.workspace { padding: 18px 14px 40px; }.topbar { align-items: start; }.top-actions .health { display: none; }.top-actions button { padding: 10px; }.hero-panel { padding: 26px 22px; }.hero-panel h2 { font-size: 24px; }.metric-row { grid-template-columns: 1fr 1fr; }.form-grid { grid-template-columns: 1fr; }.form-grid label.wide { grid-column: auto; }.form-footer, .lifecycle-action { align-items: stretch; flex-direction: column; gap: 15px; }.capacity-hero { padding: 25px; }.capacity-ring { display: none; }.operations { overflow-x: auto; }
 }

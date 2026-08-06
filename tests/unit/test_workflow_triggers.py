@@ -79,6 +79,16 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn("PAI_DATASET_IDS_JSON", workflow)
         self.assertIn("needs.preflight.outputs.pai_dataset_id", workflow)
 
+    def test_dataset_release_uses_cpfs_dataflow_by_default(self):
+        workflow = self._read("dataset-release.yml")
+        self.assertIn("transfer_mode:", workflow)
+        self.assertIn("default: dataflow", workflow)
+        self.assertIn("--via dataflow", workflow)
+        self.assertIn("--cpfs-filesystem-id '${{ vars.CPFS_FILESYSTEM_ID }}'", workflow)
+        self.assertIn("--cpfs-mount-prefix '${{ vars.CPFS_MOUNT_PREFIX }}'", workflow)
+        self.assertIn("needs.ingest-archive.outputs.object_store_uri", workflow)
+        self.assertIn("needs.ingest-archive.outputs.object_store_prefix", workflow)
+
     def test_lifecycle_schedule_is_dry_run_and_execution_is_approved(self):
         workflow = self._read("dataset-lifecycle.yml")
         plan, execute = workflow.split("\n  execute:\n", 1)

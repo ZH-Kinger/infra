@@ -126,6 +126,8 @@ state 锁，还可能让 state 和实际资源不一致。宁可排队。
 ## 3. dataset-release.yml —— 每步换身份
 
 手动触发（数据集发布是有意为之的动作，不该由代码推送触发）。五种模式：
+字节搬运默认 `transfer_mode=dataflow`：沉淀调用 CPFS `Export`，预热调用 `Import`；
+`client` 只作为未完成 DataFlow 绑定时的显式兼容选项，不自动降级。
 
 | mode | 适用场景 | 前置条件 |
 |---|---|---|
@@ -141,7 +143,7 @@ preflight        ← 校验配置齐全、按模式校验必填参数、拦截 l
   │
   ├─ [cpfs-ingest / cpfs-adopt]
   │  ingest-archive   ← DatasetMaterializerRole，CPFS runner
-  │  │                  scan（无云权限）→ archive 到对象存储（幂等可续传）
+  │  │                  scan（无云权限）→ DataFlow Export 沉淀到对象存储
   │  │
   ├─ [仅 oss-ingest]
   │  oss-scan         ← DatasetMaterializerRole，CPFS runner（走 OSS 内网端点）
@@ -152,7 +154,7 @@ preflight        ← 校验配置齐全、按模式校验必填参数、拦截 l
   │                     两条 ingest 路径共用，只有「import 的源在哪」不同
   ↓
 publish          ← DatasetMaterializerRole，CPFS runner
-                   五种模式在这里汇合：certify 或 materialize
+                   五种模式在这里汇合：certify 或 DataFlow Import → certify
   ↓ verify --deep
 build-request    ← 无云权限，产出可人工审阅的 JSON
   ↓
