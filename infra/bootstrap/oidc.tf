@@ -66,7 +66,8 @@ locals {
     for p in var.managed_name_prefixes : "acs:ram:*:${local.account_id}:group/${p}*"
   ]
 
-  # state 读 + 锁。plan 也会加锁，所以 plan 角色同样需要锁表的行读写权限。
+  # state 读取与锁表写入拆开。Plan 用 -lock=false 保持真正只读；只有 Apply
+  # 才能在锁表上加锁和解锁。
   state_read_statements = [
     {
       Sid      = "ReadState"
@@ -74,13 +75,14 @@ locals {
       Action   = ["oss:GetObject", "oss:GetObjectMeta", "oss:ListObjects", "oss:GetBucketInfo"]
       Resource = [local.state_bucket_arn, local.state_object_arn]
     },
-    {
-      Sid      = "AcquireAndReleaseStateLock"
-      Effect   = "Allow"
-      Action   = ["ots:GetRow", "ots:PutRow", "ots:DeleteRow", "ots:DescribeTable", "ots:ListTable"]
-      Resource = [local.lock_table_arn]
-    },
   ]
+
+  state_lock_statement = {
+    Sid      = "AcquireAndReleaseStateLock"
+    Effect   = "Allow"
+    Action   = ["ots:GetRow", "ots:PutRow", "ots:DeleteRow", "ots:DescribeTable", "ots:ListTable"]
+    Resource = [local.lock_table_arn]
+  }
 
   state_write_statement = {
     Sid      = "WriteState"
@@ -193,6 +195,7 @@ locals {
     Statement = concat(
       local.state_read_statements,
       [
+        local.state_lock_statement,
         local.state_write_statement,
         local.read_only_statement,
         {
@@ -264,6 +267,7 @@ locals {
     Statement = concat(
       local.state_read_statements,
       [
+        local.state_lock_statement,
         local.state_write_statement,
         local.read_only_statement,
         {
@@ -364,7 +368,13 @@ locals {
             "nas:Modify*",
             "nas:Delete*",
             "ots:Create*",
-            "ots:Delete*",
+            # 不能 Deny ots:Delete*，否则会同时否决上面的 DeleteRow，Apply
+            # 成功后无法释放 state 锁。这里只显式禁止 OTS 控制面删除；其他
+            # 删除动作没有 Allow，仍由 RAM 的隐式 Deny 拒绝。
+            "ots:DeleteInstance",
+            "ots:DeleteTable",
+            "ots:DeleteIndex",
+            "ots:DeleteSearchIndex",
             "paidlc:CreateJob",
             "paidataset:CreateDatasetVersion",
             "paidataset:DeleteDataset",
@@ -380,7 +390,7 @@ module "plan_role" {
   source = "../modules/ci-oidc-role"
 
   role_name   = "TerraformPlanRole"
-  description = "Terraform plan（PR 或 main 手动触发）：只读 + 读 state + 加锁，无写权限"
+  description = "Terraform plan（PR 或 main 手动触发）：只读 state、禁用锁，无写权限"
 
   oidc_provider_arn = alicloud_ims_oidc_provider.github.arn
   audience          = var.oidc_audience

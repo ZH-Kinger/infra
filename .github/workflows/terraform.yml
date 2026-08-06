@@ -101,7 +101,7 @@ jobs:
         id: plan
         run: |
           set -euo pipefail
-          terraform -chdir=${{ matrix.dir }} plan -input=false -lock-timeout=5m \
+          terraform -chdir=${{ matrix.dir }} plan -input=false -lock=false \
             -out=tfplan -no-color | tee /tmp/plan-${{ matrix.layer }}.txt
 
       # apply 必须消费**这个** tfplan，而不是重新 plan：

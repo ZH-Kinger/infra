@@ -33,6 +33,7 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         )[0]
         self.assertIn("set -euo pipefail", plan_step)
         self.assertIn("terraform -chdir=${{ matrix.dir }} plan", plan_step)
+        self.assertIn("-lock=false", plan_step)
         self.assertIn("| tee /tmp/plan-${{ matrix.layer }}.txt", plan_step)
 
     def test_cloud_data_workflows_are_manual(self):
@@ -74,6 +75,12 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn('default     = ["development", "production"]', variables)
         self.assertIn('default     = ["development", "production-access"]', variables)
         self.assertIn("DenyAllMutations", bootstrap)
+        plan_policy = bootstrap.split("  plan_policy = jsonencode({", 1)[1].split(
+            "  platform_apply_policy = jsonencode({", 1
+        )[0]
+        self.assertIn('"ots:DeleteRow"', bootstrap)
+        self.assertIn('"ots:Delete*"', plan_policy)
+        self.assertNotIn("local.state_lock_statement", plan_policy)
 
     def test_oidc_subject_uses_immutable_github_ids(self):
         bootstrap = Path("infra/bootstrap/variables.tf").read_text(encoding="utf-8")
