@@ -47,6 +47,7 @@ The primary rule is:
 | Train with a published dataset | [User onboarding](docs/onboarding.md) |
 | Start a governed DSW or DLC runtime | [DSW/DLC self-service](docs/pai-runtime.md) |
 | Understand the architecture and tradeoffs | [Architecture](docs/architecture.md) |
+| Manage OSS/CPFS data, mounts, and retention | [Storage lifecycle](docs/storage-lifecycle.md) |
 | Understand permission isolation and privilege escalation controls | [Permission model](docs/permissions.md) |
 | Understand pipelines and approvals | [CI/CD](docs/cicd.md) |
 | Initialize or troubleshoot an environment | [Operations runbook](docs/runbook.md) |

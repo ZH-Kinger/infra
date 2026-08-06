@@ -2,7 +2,7 @@
 
 这篇讲**怎么用已经发布好的数据集**。你不需要懂 Terraform，也不需要碰阿里云控制台。
 
-相关：[架构](architecture.md)｜[权限](permissions.md)｜[CI/CD](cicd.md)｜[运维](runbook.md)
+相关：[架构](architecture.md)｜[存储生命周期](storage-lifecycle.md)｜[权限](permissions.md)｜[CI/CD](cicd.md)｜[运维](runbook.md)
 
 ---
 
@@ -31,8 +31,12 @@ aliyun aiworkspace GET /api/v1/datasets/<DatasetId>/versions \
 
 ### 2. 在 DSW 里用
 
-创建 DSW 实例时，数据集挂载选择该 Dataset 的**具体版本**，挂载路径 `/mnt/dataset`，
-权限选**只读**。进去先确认：
+优先从 GitHub Actions 手动运行 **PAI runtime**，选择 `dsw`、数据集、Commit、镜像
+Profile 和 `gpu-dev`。第一次保持 `execute=false` 核对挂载计划，确认后再执行并审批。
+流水线会把数据集具体版本只读挂载到 `/mnt/dataset`，个人工作区读写挂载到
+`/mnt/workspace`；不要在控制台另填裸 OSS/CPFS URI。
+
+进入 DSW 后先确认：
 
 ```bash
 cat /mnt/dataset/release.json
@@ -56,8 +60,9 @@ ls /mnt/dataset/_READY   # 不存在就说明这个目录不可用，不要读
 
 ### 3. 在 DLC 里跑训练
 
-用 [`deploy/pai/dlc-create-job.template.json`](../deploy/pai/dlc-create-job.template.json)
-做骨架。三个地方不能改：
+从 GitHub Actions 手动运行 **PAI runtime**，选择 `dlc`、数据集、Commit、镜像 Profile、
+`gpu-training` 和训练命令。流水线依据
+[`runtime-profiles.json`](../deploy/pai/runtime-profiles.json) 生成请求。三个地方不能改：
 
 ```json
 "DataSources": [{
@@ -83,6 +88,18 @@ exec python /workspace/train.py --dataset /mnt/dataset --output /mnt/output
 
 **输出写到另一个可写挂载**（如 `/mnt/output`），不要试图写 `/mnt/dataset`——它是只读的，
 而且已发布目录不可改写。
+
+### 4. 你实际需要记住的三个路径
+
+| 路径 | 用途 | 权限 |
+|---|---|---|
+| `/mnt/dataset` | 指定 Commit 的正式训练数据 | RO |
+| `/mnt/workspace` | DSW 个人工作区 | RW |
+| `/mnt/output` | DLC Checkpoint 和结果 | RW |
+
+OSS Bucket、CPFS URI、PAI Dataset ID、RAM User ID、VPC 和安全组由平台补齐，不是用户
+参数。可选 `/mnt/oss-workspace` 尚未实现；即使以后提供，也只能作为临时区，不能替代
+`/mnt/dataset`。
 
 ---
 
@@ -123,6 +140,19 @@ dataset-sink verify /mnt/dataset --deep   # 彻底：重算所有文件的 SHA-2
 5. 审批通过，版本注册完成，你就能在 PAI 里挑到它。
 
 详见 [CI/CD](cicd.md)。
+
+### 数据已经在 OSS，但没有 PAI Dataset 怎么办
+
+不需要先把裸 OSS 注册为 PAI Dataset。请管理员先把 Bucket/Prefix 登记进 Terraform
+`data_sources`，再用 Dataset release 的 `oss-ingest`：
+
+```text
+注册 OSS 数据源 → scan-oss → lakeFS Commit → CPFS release
+→ 注册 CPFS release 为 PAI Dataset Version
+```
+
+“OSS 数据源注册”和“PAI Dataset Version 注册”是两件事，完整说明见
+[存储生命周期 §2](storage-lifecycle.md#2-两种注册不要混淆)。
 
 ---
 

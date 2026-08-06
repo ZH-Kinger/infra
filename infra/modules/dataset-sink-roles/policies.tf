@@ -1,4 +1,4 @@
-# 五个身份的最小权限策略。
+# 数据发布、运行、审计与研发用户的最小权限策略。
 #
 # 这里用 jsonencode 而不是 data "alicloud_ram_policy_document"，原因有两个：
 #   1. 渲染结果就是 deploy/ram/*.json 需要的内容，scripts/render-ram-policies.sh

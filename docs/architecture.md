@@ -2,7 +2,7 @@
 
 本文描述 **lakeFS → CPFS Dataset Sink** 的完整架构：它在数据平台里占据的位置、数据如何流动、发布协议如何保证不可变、四套授权面如何叠加、以及 CI/CD 与 Terraform 如何交付这一切。
 
-相关文档：[权限模型](permissions.md)｜[CI/CD](cicd.md)｜[运维手册](runbook.md)｜[使用入门](onboarding.md)
+相关文档：[存储生命周期](storage-lifecycle.md)｜[权限模型](permissions.md)｜[CI/CD](cicd.md)｜[运维手册](runbook.md)｜[使用入门](onboarding.md)
 
 当前落地范围是单区域 `cn-hangzhou`；多区域需要拆分区域 state、PAI/CPFS 运行时与
 对象复制，不能靠把 `region` 变量改成列表实现。边界见[多区域方案](multi-region.md)。
@@ -167,7 +167,7 @@ CPFS release
 字节仍然只有原处那一份。删掉或覆盖其中的对象，等于让已发布的 Commit 悬空——版本
 记录还在，数据没了，而且**当时不会有任何东西报错**，要等到下一次 materialize 或
 `verify --deep` 才暴露。所以这些前缀要登记进 `imported_data_prefixes`，Terraform
-会对五个身份统一 Deny 写入与删除。RAM 只能约束本项目管理的身份，真正的兜底是桶级
+会对本模块管理的身份统一 Deny 写入与删除。RAM 只能约束本项目管理的身份，真正的兜底是桶级
 Policy + 版本控制 + 合规保留策略。
 
 **二、SHA-256 只能靠读一遍算出来。** 对象存储只提供 size 和 ETag（ETag 是 MD5，
@@ -329,7 +329,10 @@ Export 只增不减，单独 Evict 则要求数据本来就在源存储里。
 顺带一个实际收益：字节搬运不再需要执行者挂载 CPFS，只需要能调 `nas` API——
 自托管 runner 的需求从「搬 TB 级数据」缩到「改几个文件名」。
 
-### CPFS 上的三类区域
+### CPFS 上的五类区域
+
+完整的 OSS/CPFS 分区、数据源 mode、挂载合同与回收规则以
+[存储生命周期](storage-lifecycle.md)为准。本节解释这些边界在总体架构中的原因。
 
 发布协议只管「已发布的不可变 release」，但用户总得有地方干活——预处理、做实验、
 存中间结果。这部分之前完全没写，是个空白。
@@ -338,11 +341,14 @@ Export 只增不减，单独 Evict 则要求数据本来就在源存储里。
 |---|---|---|---|---|
 | `/users/<name>/` 个人区 | 各人自己的数据、**跑出来的产出**（后续要沉淀） | 本人 | **Fileset + POSIX UID + 配额** | ❌ |
 | `/shared/` 公共区 | **共享的数据集合** | 全体 | **Fileset + POSIX 组权限** | ❌ |
+| `/staging/<dataset>/` 临时区 | 发布前待校验数据 | Materializer | Fileset + 发布锁 | ❌ |
 | `/datasets/<ds>/<commit>/` 已发布 | 不可变 release | **没有人** | Fileset 只读挂载 + `_READY` 协议 | ✅ 唯一能训练的 |
+| `/output/<user>/<run>/` 输出区 | Checkpoint 与训练结果 | 对应任务 | Fileset/POSIX + 配额 | ❌，发布后才可作为新输入 |
 
-两个工作区在**注册表里都是 `mode = workspace`**，含义一致：可写、可被
-`scan-oss` 扫描、**但不能直接作为 lakeFS Commit 的物理位置**。要进版本体系必须
-先沉淀出去——见下面「从工作区到发布」。
+CPFS 个人区和公共区由 Fileset、POSIX 权限与配额管理，不进入只描述 OSS 的
+`data_sources` 注册表；提交运行时由允许的 workspace URI 前缀约束挂载范围。若团队
+另设 OSS 工作区，则在注册表中使用 `mode = workspace`：允许写入和扫描，但不能直接
+作为 lakeFS Commit 的物理位置。要进版本体系必须先沉淀出去——见下面「从工作区到发布」。
 
 个人区放产出这一点值得单独说：产出（checkpoint、中间特征、清洗结果）**往往
 就是下一轮的输入**。所以「个人区 → 沉淀 → 发布 → 别人拿去训练」是常规路径，
@@ -564,6 +570,7 @@ flowchart TD
 |---|---|---|
 | `DatasetMaterializerRole` | 读 lakeFS Gateway 固定 Commit；写 CPFS staging/release | 注册 PAI 版本、提交 GPU 训练、覆盖已发布目录 |
 | `DatasetRegisterRole` | `ListDatasetVersions`、`CreateDatasetVersion` | 读裸 OSS、写 CPFS、提交 DLC |
+| `DswSubmitRole` | 按受控 Profile 为映射用户创建私有 DSW | 改写数据版本、提交 DLC、读 lakeFS 后端 |
 | `DlcSubmitRole` | 提交绑定已审批 Dataset Version 的 DLC Job | 改写数据版本、读 lakeFS/OSS |
 | `TrainingRuntimeRole` | 只读挂载某个 CPFS release；写独立 output/checkpoint | 访问 landing/lakeFS 后端桶、写训练集 |
 | 研发 RAM 用户 | 在 Workspace 内使用已发布版本 | 取长期 lakeFS/OSS 密钥、直接改生产 release |
@@ -588,7 +595,7 @@ infra/
 │
 ├── modules/            可复用模块
 │   ├── ci-oidc-role/           参数化 OIDC 信任角色
-│   ├── dataset-sink-roles/     5 个业务身份
+│   ├── dataset-sink-roles/     业务角色、运行身份与研发用户组
 │   └── pai-workspace-access/   Workspace 成员与角色
 │
 └── envs/
@@ -616,7 +623,7 @@ infra/
 - `TerraformAccessApplyRole` 管 RAM，**不能**改自己的信任策略和 Policy。
 - 两者的信任策略都由 `bootstrap` 层管理，而 `bootstrap` 只有管理员能跑。
 
-### 两条流水线
+### 三条交付与运行流水线
 
 **基础设施流水线**（`infra/**` 变更触发）：
 
@@ -648,6 +655,20 @@ main 手动运行（confirm_apply=true）→ 生成并上传本次 tfplan
 ```
 
 每一步换一个 RAM 角色，对应身份矩阵。这不是形式主义：流水线本身成为权限边界的执行者，单个步骤被攻破也无法横向移动到下一步。
+
+**PAI 运行时流水线**（人工触发，默认只生成请求）：
+
+```text
+用户选择 dataset / Commit / image profile / compute profile
+  → 无云身份生成完整 DSW/DLC 请求与挂载计划
+  → execute=false：仅输出 Artifact 供核对
+  → execute=true：进入 pai-runtime Environment 审批
+  → GitHub OIDC 假设 DswSubmitRole 或 DlcSubmitRole
+  → 创建私有 DSW 或提交 DLC
+```
+
+用户不能填写原始 OSS/CPFS URI、RAM User ID、VPC、安全组或挂载权限。完整合同见
+[DSW/DLC 自助运行](pai-runtime.md)与[存储生命周期 §7](storage-lifecycle.md#7-pai-挂载合同)。
 
 ### 多地区
 
@@ -707,24 +728,17 @@ Terraform 管低频稳定资源（Workspace、网络、存储、角色、成员�
 
 ## 8. 环境实况与差距
 
-2026-08-02 对账号 `1339279783371949`（`wuji-ens-test@rd-cbawja.aliyunid.com`）的探测结果：
+本节只保留真实环境验证结论；会变化的资源状态统一维护在
+[运维手册 §0](runbook.md#0-当前状态与前置阻塞)，不要复制旧快照。
 
-| 项目 | 实际 | 目标 | 差距 |
-|---|---|---|---|
-| 当前登录身份 | 主账号 root | 专用 RAM 用户 / OIDC 角色 | **必须整改**，root 不应用于日常和 Terraform |
-| PAI Workspace | **两个地区各 1 个**：`617398` @ cn-hangzhou、`316328` @ ap-southeast-1，均 ENABLED | dev / prod 双 Workspace | 现有的 import；`platform` 层需按地区拆 state |
-| Workspace 成员 | 1 条：root 自己，挂 Owner+Admin+AlgoDeveloper | 按角色分配的多成员 | import 后逐步收敛 |
-| PAI Dataset API | **可用**（建/删/列版本已实测通过） | — | 无 |
-| PAI Dataset | 0 个 | 每个数据集一个 | 需新建（`register-pai` 的前提） |
-| 项目 RAM 角色 | 0 个 | 5 个业务 + 3 个 CI | 全部新建 |
-| RAM OIDC Provider | 0 个 | 1 个（GitHub Actions） | 新建 |
-| NAS / CPFS 服务 | **已开通**（不再 `User.Disabled`） | — | 无 |
-| CPFS 文件系统 | **0 个** | 至少一个 | **最大阻塞点** |
-| OSS | 3 个桶（cn-hangzhou / cn-shenzhen / ap-southeast-1），共 7 个对象，均为测试文件 | state 桶 + 数据集桶 | 真实数据在另一个账号 |
-| VPC | cn-hangzhou 1 个；ap-southeast-1 **0 个** | 每个要跑 CPFS 的地区各一个 | CPFS 必须绑 VPC，新加坡侧要先建 |
-| lakeFS | 未部署 | 内网 API + S3 Gateway | 待部署 |
+2026-08-04 的只读体检确认：cn-hangzhou 的 CPFS 文件系统已经 Running 且存在
+Fileset，PAI Workspace 与 GitHub OIDC Provider 也存在。当前主要数据面阻塞不是
+“没有 CPFS”，而是该可用区曾出现挂载点库存不足：文件系统存在不代表 runner、DSW
+或 DLC 能成功挂载。正式验收前必须同时验证同可用区挂载点和训练算力库存。
 
-**当前最大阻塞：没有 CPFS 文件系统。** 服务本身已开通，但一个文件系统都没建，所以沉降目标不存在。Terraform 里 CPFS 相关资源用 `var.enable_cpfs`（默认 `false`）gate 住——保证在文件系统就绪前 `plan` 仍然可用，就绪后单点切换。
+代码中新增的 RAM 角色、PAI Dataset、Fileset 和 Workflow Variables 是否已经在线生效，
+必须以对应 Terraform state、只读 preflight 和 GitHub 配置为准；代码合并不等于云端
+apply。所有日常操作必须使用 RAM/OIDC 身份，主账号只用于账号级应急。
 
 ### PAI Dataset 的实测结论
 

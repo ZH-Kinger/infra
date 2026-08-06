@@ -160,7 +160,7 @@ variable "imported_data_prefixes" {
     数据没了，且没有任何东西会在当时报错。
 
     在这里列出的前缀会：给沉降角色只读权限（scan-oss 需要列举和读取），
-    并对全部五个身份 Deny 写入与删除。
+    并对本模块管理的全部身份 Deny 写入与删除。
 
     注意这只约束本模块管理的身份。持有 AliyunOSSFullAccess 的既有 RAM 用户
     仍然能删——真正的兜底是桶级 Policy + 版本控制 + 合规保留策略，

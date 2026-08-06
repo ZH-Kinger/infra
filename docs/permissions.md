@@ -1,6 +1,6 @@
 # 权限模型
 
-相关：[架构](architecture.md)｜[CI/CD](cicd.md)｜[运维](runbook.md)｜[使用入门](onboarding.md)
+相关：[架构](architecture.md)｜[存储生命周期](storage-lifecycle.md)｜[CI/CD](cicd.md)｜[运维](runbook.md)｜[使用入门](onboarding.md)
 
 ---
 
@@ -81,13 +81,14 @@
 
 ## 3. 身份清单
 
-### 数据面（6 个）
+### 数据面（7 个）
 
 | 身份 | 能做 | 明确不能做 | 谁能扮演 |
 |---|---|---|---|
 | `dataset-sink-<env>-materializer` | 读 lakeFS 后端固定 Commit、写 CPFS release、读写 staging 前缀 | 注册 PAI 版本、提交训练 | GitHub OIDC，且 sub 必须是 `environment:<审批环境>` |
 | `dataset-sink-<env>-register` | `CreateDatasetVersion`、`ListDatasetVersions` | 读 lakeFS 后端桶、提交训练 | 同上 |
-| `dataset-sink-<env>-dlc-submit` | 提交/观察 DLC Job、解析 Dataset 版本 | 改写数据版本、读 lakeFS 后端 | 同上 |
+| `dataset-sink-<env>-dsw-submit` | 按受控 Profile 为映射 RAM 用户创建/观察 DSW | 改写数据版本、提交 DLC、读 lakeFS 后端 | GitHub OIDC，仅 `pai-runtime` Environment |
+| `dataset-sink-<env>-dlc-submit` | 提交/观察 DLC Job、解析 Dataset 版本 | 改写数据版本、读 lakeFS 后端 | GitHub OIDC，数据发布或 `pai-runtime` Environment |
 | `dataset-sink-<env>-pai-mount-audit` | 只读列举 DLC/DSW 挂载并解析 Dataset Version | 提交作业、修改数据集、读写 OSS/CPFS 数据面 | GitHub OIDC，仅 `main` 分支 |
 | `dataset-sink-<env>-training-runtime` | 只读已发布归档、写 output 前缀 | 读 lakeFS 后端与 staging、注册版本、提交作业 | **PAI 服务**（`pai-dlc` / `pai-dsw`），不是 CI |
 | `pai-<env>-developers`（用户组） | 浏览 Workspace、数据集、作业日志 | 取长期密钥、改写数据版本、读原始数据 | RAM 用户加组 |
@@ -355,6 +356,10 @@ managed_group_arns  = ["acs:ram:*:<账号>:group/pai-*", ...]
 
 ### 数据源注册表
 
+这里管理的是“OSS 位置是否被平台接受”，不是“PAI 是否已经有一个 Dataset
+Version”。两种注册的边界和完整存储布局见
+[存储生命周期 §2](storage-lifecycle.md#2-两种注册不要混淆)。
+
 管理员在 `infra/envs/<env>/access/terraform.tfvars` 里声明：
 
 ```hcl
@@ -456,11 +461,11 @@ Terraform 会据此生成两组语句：
 | 语句 | 作用于 | 效果 |
 |---|---|---|
 | `ReadImportedLegacyObjects` / `ListImportedLegacyBuckets` | 沉降角色 | 允许 `scan-oss` 列举和读取 |
-| `DenyMutatingImportedLegacyObjects` | **全部五个身份** | Deny `PutObject` / `DeleteObject` / `DeleteObjects` / `AbortMultipartUpload` 等 |
+| `DenyMutatingImportedLegacyObjects` | **本模块管理的全部身份** | Deny `PutObject` / `DeleteObject` / `DeleteObjects` / `AbortMultipartUpload` 等 |
 
 显式 Deny 优先于任何 Allow，所以即使某个角色另有整桶写权限，也过不去。
 
-**这层防护有明确的边界，不要高估它。** RAM 身份策略只约束本模块管理的那五个身份。
+**这层防护有明确的边界，不要高估它。** RAM 身份策略只约束本模块管理的身份。
 账号里任何持有 `AliyunOSSFullAccess` 的既有 RAM 用户——比如 [§5](#5-已有-ram-用户怎么接入继承)
 提到的那些——仍然能删掉这些对象。真正的兜底是三样东西，都在 OSS 侧而不是 RAM 侧：
 

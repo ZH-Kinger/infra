@@ -1,5 +1,8 @@
 # 运维手册
 
+存储分区、两种注册、DataFlow 语义、PAI 挂载合同和回收硬规则统一见
+[OSS / CPFS 数据管理与生命周期](storage-lifecycle.md)。本手册只写具体操作与排错。
+
 面向维护这套系统的人：怎么初始化、怎么日常运维、出事怎么办。
 
 相关：[架构](architecture.md)｜[权限](permissions.md)｜[CI/CD](cicd.md)｜[使用入门](onboarding.md)
@@ -194,6 +197,10 @@ git add -A && git commit
 
 ### 2.4 发布数据集
 
+先区分两件事：`data_sources` 登记 OSS 前缀是否允许接入；PAI Dataset Version 则在
+CPFS release 校验完成后创建。裸 OSS 不需要先注册成 PAI Dataset。完整边界见
+[存储生命周期 §2](storage-lifecycle.md#2-两种注册不要混淆)。
+
 Actions → Dataset release → Run workflow，填参数。流水线会在 dry-run 后停下等审批，
 此时在日志里能看到将要发出的**确切请求体**。确认无误再批。
 
@@ -249,7 +256,7 @@ dataset-sink materialize --dataset robotics --repository robotics-data \
    字节数，对不上直接失败——但那已经是事后发现。正确做法是先停掉写入方。
 3. **import 之后原前缀就是只读区。** 删除或覆盖其中的对象会让 Commit 悬空，
    且当时不会报错。把这些前缀登记进 `infra/envs/*/access/terraform.tfvars` 的
-   `imported_data_prefixes`，Terraform 会对五个身份统一 Deny 写删。
+   `imported_data_prefixes`，Terraform 会对本模块管理的身份统一 Deny 写删。
 
    ```hcl
    imported_data_prefixes = [

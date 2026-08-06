@@ -1,10 +1,10 @@
 # CI/CD
 
-相关：[架构](architecture.md)｜[权限](permissions.md)｜[运维](runbook.md)｜[使用入门](onboarding.md)
+相关：[架构](architecture.md)｜[存储生命周期](storage-lifecycle.md)｜[权限](permissions.md)｜[运维](runbook.md)｜[使用入门](onboarding.md)
 
 ---
 
-## 四条流水线
+## 五条流水线
 
 | 流水线 | 触发 | 用途 | 是否需要云凭证 |
 |---|---|---|---|

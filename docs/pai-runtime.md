@@ -1,5 +1,8 @@
 # DSW/DLC 自助运行
 
+运行时只负责消费已发布版本。OSS/CPFS 分区、数据进入训练的路径和回收规则见
+[存储生命周期](storage-lifecycle.md)。
+
 用户不需要填写阿里云 `CreateInstance` / `CreateJob` 的全部字段。在 GitHub Actions
 手动运行 **PAI runtime**，只选择：
 
@@ -25,6 +28,19 @@ Environment 审批，通过后才使用 OIDC 临时角色创建资源。
 - 不生成 `ForwardInfos`，因此默认不开 SSH 端口转发；
 - DLC 用户命令不能绕过 `training-entrypoint.sh`，必须先通过 `training-guard`；
 - Profile 固定实例规格、Pod 数量和 TTL；DLC TTL 由 API 的最大运行时间强制执行。
+
+### 标准挂载
+
+| 路径 | 来源 | 权限 | 状态 |
+|---|---|---|---|
+| `/mnt/dataset` | 已注册的 CPFS Dataset Version | RO | 已实现 |
+| `/mnt/workspace` | 用户 CPFS/NAS 工作区 | RW | DSW 已实现 |
+| `/mnt/output` | 任务独立 CPFS/NAS/OSS 输出前缀 | RW | DLC 已实现 |
+| `/mnt/oss-workspace` | 受控 OSS 用户前缀 | RW/RO | 尚未实现 |
+
+未注册为 PAI Dataset 的 OSS 可以作为未来的附加工作区，但不能替代 `/mnt/dataset`。
+正式训练数据必须先完成 lakeFS Commit、CPFS release 和 PAI Version 注册。用户永远不能
+从运行表单提交任意 OSS URI。
 
 DSW 的 `RUNTIME_EXPIRES_AT` 会写入实例环境变量供回收审计使用；当前版本尚未实现定时
 StopInstance，同时也写入控制面的 `expires_at` Label；当前版本尚未实现定时回收，因此
