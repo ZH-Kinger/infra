@@ -54,7 +54,7 @@ jobs:
 
       - name: 上传体检结果
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cloud-preflight-${{ github.sha }}
           path: ${{ runner.temp }}/cloud-preflight.txt

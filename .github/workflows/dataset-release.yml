@@ -330,7 +330,7 @@ jobs:
               print(f"object_store_prefix={os.environ['INPUT_ARCHIVE_PREFIX'].strip('/')}")
           PY
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.MANIFEST_ARTIFACT }}
           path: ${{ runner.temp }}/manifest.jsonl
@@ -406,7 +406,7 @@ jobs:
           print(f"file_count={d['file_count']}")
           PY
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.MANIFEST_ARTIFACT }}
           path: ${{ runner.temp }}/manifest.jsonl
@@ -691,7 +691,7 @@ jobs:
             --output "$RUNNER_TEMP/pai-request.json"
           cat "$RUNNER_TEMP/pai-request.json"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: pai-request-${{ needs.publish.outputs.commit }}
           path: ${{ runner.temp }}/pai-request.json
@@ -766,7 +766,7 @@ jobs:
             --region '${{ vars.ALIBABA_CLOUD_REGION }}' \
             --execute | tee "$RUNNER_TEMP/register-result.json"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: register-result-${{ needs.publish.outputs.commit }}
           path: ${{ runner.temp }}/register-result.json

@@ -71,7 +71,7 @@ jobs:
             > "$RUNNER_TEMP/lifecycle-plan.json"
           python -m json.tool "$RUNNER_TEMP/lifecycle-plan.json"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lifecycle-plan-${{ github.run_id }}
           path: ${{ runner.temp }}/lifecycle-plan.json
@@ -121,7 +121,7 @@ jobs:
             --execute > "$RUNNER_TEMP/lifecycle-result.json"
           python -m json.tool "$RUNNER_TEMP/lifecycle-result.json"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lifecycle-result-${{ github.run_id }}
           path: ${{ runner.temp }}/lifecycle-result.json
