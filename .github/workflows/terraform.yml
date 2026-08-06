@@ -222,7 +222,7 @@ jobs:
           role-session-name: tf-apply-${{ github.run_id }}
 
       - name: 下载已审批的 plan
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: tfplan-${{ matrix.layer }}-${{ github.sha }}
           path: /tmp/artifact
