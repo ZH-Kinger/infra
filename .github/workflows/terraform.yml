@@ -56,7 +56,7 @@ jobs:
       # 只输出不可用于登录的声明，不输出 JWT 本身。这样信任条件不匹配时，
       # 可以直接按实际 iss/aud/sub 排查，而不是通过放宽 RAM 策略来试错。
       - name: 核对 GitHub OIDC 身份声明
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const token = await core.getIDToken(process.env.ALIBABA_CLOUD_OIDC_AUDIENCE);
@@ -126,7 +126,7 @@ jobs:
 
       - name: 评论到 PR
         if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');
