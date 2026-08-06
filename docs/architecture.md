@@ -669,6 +669,15 @@ main 手动运行（confirm_apply=true）→ 生成并上传本次 tfplan
   → 创建私有 DSW 或提交 DLC
 ```
 
+这里的分工是：Terraform 建设长期存在的 Workspace、网络和身份边界，CI/CD 使用这些
+边界按次创建短生命周期的 DSW/DLC。`request` Job 没有 OIDC 权限，只负责把少量用户输入
+与受控 Profile 合并为 `runtime-envelope.json` 和实际 OpenAPI Body；`execute` Job 必须
+经过 `pai-runtime` Environment，下载本次 Run 的同一份 Body 后才取得 STS 临时角色。
+因此用户不持有创建凭证，审批对象也不会在执行前被重新拼装。
+
+`execute=false` 预览与 `execute=true` 执行是不同 Run，执行 Run 会重新生成包含自身 Run ID、
+输出目录和 TTL 的请求。审批必须以执行 Run 的 Artifact 为准。
+
 用户不能填写原始 OSS/CPFS URI、RAM User ID、VPC、安全组或挂载权限。完整合同见
 [DSW/DLC 自助运行](pai-runtime.md)与[存储生命周期 §7](storage-lifecycle.md#7-pai-挂载合同)。
 

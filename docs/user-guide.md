@@ -41,13 +41,22 @@ Use $dataset-platform-user to prepare a DSW request for robotics commit 9b5d3e6c
 
 1. 在“数据资产”选择数据集和固定 Commit。
 2. 进入“DSW / DLC”，选择 DSW 或 DLC、镜像 Profile 和算力 Profile。
-3. 先保持“仅生成计划”，核对数据集版本、只读挂载、网络和资源规格。
-4. 提交执行后等待审批；平台创建实例并把数据只读挂到 `/mnt/dataset`。
-5. 训练输出写 `/mnt/workspace` 或 `/mnt/output`，不要写 `/mnt/dataset`。
+3. 先保持“仅生成计划”。CI 在没有云身份的 Job 中生成完整请求和 Artifact，核对数据集
+   版本、ACR 镜像 Digest、只读挂载、网络、规格和运行时上限。
+4. 确认后用相同业务参数提交“执行”。新的 CI Run 会重新生成请求，并进入
+   `pai-runtime` Environment 等待审批。
+5. 审批通过后，GitHub OIDC 临时换取 DSW 或 DLC Submit Role；流水线使用该 Run 中
+   已审批的 JSON 调用 `CreateInstance` 或 `CreateJob`。
+6. 平台把数据只读挂到 `/mnt/dataset`；DSW 输出写 `/mnt/workspace`，DLC Checkpoint
+   和结果写 `/mnt/output`，不要写 `/mnt/dataset`。
 
-训练启动前会运行 `training-guard`。Commit、Manifest 或 Paimon Snapshot 不一致时，
-任务会直接停止，不能由用户绕过。完整示例见[使用入门](onboarding.md)和
-[DSW/DLC 自助使用](pai-runtime.md)。
+用户的 RAM 账号用于登录 PAI 和使用属于自己的资源，不需要保存 AccessKey，也不需要
+直接拥有创建任意 DSW/DLC 的权限。创建权限只在审批后的 CI Job 中以短期 STS 身份出现。
+
+DLC 通过受控入口启动时会先运行 `training-guard`。Commit、Manifest 或 Paimon Snapshot
+不一致时任务直接停止，用户命令不能绕过。DSW 是交互式环境，不声称由入口脚本强制
+覆盖；平台通过只读 Dataset Version、挂载审计和产出登记约束它。完整示例见
+[使用入门](onboarding.md)和[DSW/DLC 自助使用](pai-runtime.md)。
 
 ### 纳管已有 OSS 数据
 

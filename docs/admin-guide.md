@@ -64,6 +64,28 @@ D1 保存操作类型、请求参数、操作人、Workflow、状态和链接。
 
 发布流水线不会接受 Branch、`latest` 或日期作为训练版本，只接受不可变 Commit/Tag。
 
+### DSW/DLC 的 CI/CD 创建链路
+
+管理员应把 DSW/DLC 当作流水线按次创建的运行时，而不是让用户在控制台自由组合参数：
+
+```text
+workflow_dispatch / 门户请求
+  → request Job 无云身份渲染并校验完整 OpenAPI Body
+  → Artifact 固化审批对象
+  → pai-runtime Environment required reviewers
+  → OIDC 按 runtime 选择 DswSubmitRole 或 DlcSubmitRole
+  → 同一 Artifact 调用 CreateInstance / CreateJob
+```
+
+审批时至少核对 Commit、PAI Dataset Version、镜像 Digest、算力规格、网络、RO/RW 挂载、
+DSW 所有者或 DLC 命令，以及 TTL。不要只看用户表单；最终审批对象是当前执行 Run 的
+`runtime-envelope.json` 和 `runtime-request.json`。`execute=false` 的历史预览不能代替
+当前执行 Run 的审批，因为 Run ID、输出路径和过期时间会变化。
+
+DSW 与 DLC 使用不同 Submit Role。两个 Role 都不能修改 Dataset Version、RAM Policy、
+网络或镜像白名单；Profile 与 Repository Variables 的变更必须走代码评审。创建响应和
+后续状态应关联 GitHub Run ID，供门户审计和资源回收使用。
+
 ## 5. DataFlow 自动化
 
 生产发布默认调用 CPFS 数据流动：

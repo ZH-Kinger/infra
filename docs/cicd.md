@@ -30,6 +30,45 @@
 开发仓库默认不设 schedule，避免未配置云变量时每天产生失败任务。生产接管后如需定时
 审计，应在受控分支恢复 schedule，并先确认只读 Role 与 Repository Variables 已部署。
 
+## DSW/DLC 创建是 CI/CD 的一部分
+
+DSW 和 DLC 不由用户在 PAI 控制台手工创建，也不由 Terraform 为每次训练长期维护实例。
+Terraform 负责一次性建设 Workspace、网络、RAM/OIDC 角色、PAI 成员关系和 GitHub
+Environment；[`pai-runtime.yml`](../.github/workflows/pai-runtime.yml) 负责按次创建运行时：
+
+```text
+用户或门户触发 workflow_dispatch
+  → 只提交 runtime、dataset、Commit、image_profile、compute_profile
+  → request Job（无 OIDC、无云写权限）
+  → runtime-request 校验用户映射、Commit 格式与 Profile 组合，并绑定 Dataset Version
+  → 平台补齐 ACR Digest、规格、VPC/vSwitch、安全组、挂载、TTL 和私有访问策略
+  → 生成 runtime-envelope.json（供人阅读）
+     与 runtime-request.json（实际 OpenAPI Body）
+  → execute=false：上传 Artifact 后结束，不创建资源
+  → execute=true：pai-runtime Environment 阻塞等待审批
+  → GitHub OIDC 换取 DswSubmitRole 或 DlcSubmitRole 的 STS 临时凭证
+  → 下载本次 Run 生成的同一份 runtime-request.json
+  → pai-dsw CreateInstance 或 pai-dlc CreateJob
+```
+
+预览和真实执行是两个独立的 Workflow Run。预览 Run 帮用户检查默认值；真实执行 Run
+会重新生成请求，但在这个 Run 内，审批看到的 Artifact 与最终发给阿里云的 JSON 是同一份。
+执行阶段不接受用户重新填写 Role ARN、OpenAPI Body、VPC、挂载 URI 或镜像地址。
+
+### DSW 与 DLC 的分支
+
+| 项目 | DSW | DLC |
+|---|---|---|
+| 创建 API | `pai-dsw CreateInstance` | `pai-dlc CreateJob` |
+| 临时身份 | `DSW_SUBMIT_ROLE_ARN` | `DLC_SUBMIT_ROLE_ARN` |
+| 数据挂载 | `/mnt/dataset`，只读 Commit Version | `/mnt/dataset`，只读 Commit Version |
+| 可写目录 | 用户 `/mnt/workspace` | Run 独立 `/mnt/output` |
+| 用户命令 | 不接受 | 可选；入口强制经过 `training-entrypoint.sh` |
+| 所有者 | GitHub Login 映射的 RAM User ID | Workflow 提交的训练 Job |
+
+因此 CI/CD 同时承担参数收敛、身份切换、审批和创建四项职责。RAM 用户只有 PAI 日常
+使用权限，不需要获得直接调用 `CreateInstance`/`CreateJob` 的长期凭证。
+
 ---
 
 ## 1. ci.yml —— 六个门禁
