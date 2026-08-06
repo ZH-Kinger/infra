@@ -91,31 +91,31 @@ export function OpsConsole({ user }: { user: User }) {
 
   return (
     <main className="console-shell">
-      <aside className="sidebar">
+      <header className="app-header">
         <div className="brand">
           <span className="brand-signal">数</span>
           <div><strong>训练数据平台</strong><small>运维控制台</small></div>
         </div>
-        <nav aria-label="主导航">
-          {navGroups.map((group) => <div className="nav-group" key={group.label}>
-            <p>{group.label}</p>
-            {group.items.map((item) => (
-              <button key={item.key} aria-current={active === item.key ? "page" : undefined} className={active === item.key ? "active" : ""} onClick={() => setActive(item.key)}>
-                <span className="nav-icon">{item.mark}</span>
-                <span className="nav-copy"><strong>{item.label}</strong><small>{item.description}</small></span>
-              </button>
-            ))}
-          </div>)}
-        </nav>
-        <div className="environment-card">
-          <span className="status-dot" />
-          <div><small>当前环境</small><strong>杭州生产环境 · 演示数据</strong></div>
+        <div className="header-account">
+          <div className="environment-card">
+            <span className="status-dot" />
+            <div><small>当前环境</small><strong>杭州生产环境 · 演示数据</strong></div>
+          </div>
+          <div className="identity">
+            <div className="avatar">{(user?.name || "OP").slice(0, 2).toUpperCase()}</div>
+            <div><strong>{user?.name || "本地预览"}</strong><small>{user?.email || "只读计划模式"}</small></div>
+          </div>
         </div>
-        <div className="identity">
-          <div className="avatar">{(user?.name || "OP").slice(0, 2).toUpperCase()}</div>
-          <div><strong>{user?.name || "本地预览"}</strong><small>{user?.email || "只读计划模式"}</small></div>
-        </div>
-      </aside>
+      </header>
+
+      <nav className="page-navigation" aria-label="页面导航">
+        {nav.map((item) => (
+          <button key={item.key} aria-current={active === item.key ? "page" : undefined} className={active === item.key ? "active" : ""} onClick={() => setActive(item.key)}>
+            <span className="nav-icon">{item.mark}</span>
+            <span className="nav-copy"><strong>{item.label}</strong><small>{item.description}</small></span>
+          </button>
+        ))}
+      </nav>
 
       <section className="workspace">
         <header className="topbar">

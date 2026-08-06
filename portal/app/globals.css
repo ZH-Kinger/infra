@@ -19,7 +19,18 @@ body { font-family: Inter, "SF Pro Display", "PingFang SC", "Microsoft YaHei", A
 button, input { font: inherit; }
 button { cursor: pointer; }
 
-.console-shell { min-height: 100vh; display: grid; grid-template-columns: 244px 1fr; }
+.console-shell { min-height: 100vh; display: block; }
+.app-header { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 32px; border-bottom: 1px solid var(--line); background: #fff; }
+.app-header .brand { min-width: 210px; padding: 0; border: 0; }
+.header-account { display: flex; align-items: center; gap: 14px; }
+.app-header .environment-card { margin: 0; padding: 8px 12px; }
+.app-header .identity { margin: 0; padding-left: 14px; border-left: 1px solid var(--line); }
+.page-navigation { position: sticky; top: 0; z-index: 15; display: grid; grid-template-columns: repeat(6, minmax(138px, 1fr)); gap: 0; padding: 0 32px; border-bottom: 1px solid var(--line); background: #fff; box-shadow: 0 2px 8px #1f232908; }
+.page-navigation button { min-width: 0; display: flex; align-items: center; gap: 10px; border: 0; border-bottom: 3px solid transparent; background: transparent; padding: 13px 14px 11px; color: #4e5969; text-align: left; }
+.page-navigation button:hover { background: #f8f9fa; }
+.page-navigation button.active { border-bottom-color: var(--blue); background: #f5f8ff; color: var(--blue); }
+.page-navigation button.active .nav-icon { border-color: #8fb1fc; background: var(--blue); color: #fff; }
+.page-navigation button.active .nav-copy small { color: #6f8bc8; }
 .sidebar { position: fixed; inset: 0 auto 0 0; width: 244px; background: var(--navy); color: var(--ink); border-right: 1px solid var(--line); padding: 24px 16px 20px; display: flex; flex-direction: column; z-index: 20; }
 .brand { display: flex; gap: 11px; align-items: center; padding: 0 8px 22px; border-bottom: 1px solid var(--line); }
 .brand strong { font-size: 15px; display: block; }
@@ -46,7 +57,7 @@ button { cursor: pointer; }
 .identity strong, .identity small { display: block; max-width: 155px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .identity strong { font-size: 11px; }.identity small { color: #768196; font-size: 9px; margin-top: 3px; }
 
-.workspace { grid-column: 2; min-width: 0; padding: 24px 32px 48px; }
+.workspace { min-width: 0; padding: 24px 32px 48px; }
 .topbar { display: flex; align-items: end; justify-content: space-between; padding-bottom: 22px; border-bottom: 1px solid var(--line); }
 .eyebrow { color: #8f959e; font-size: 11px; font-weight: 400; }
 .section-label { color: #646a73; font-size: 11px; font-weight: 600; }
@@ -109,9 +120,9 @@ h1 { margin: 7px 0 0; font-size: 24px; letter-spacing: -.02em; }
 .role-matrix { padding-top: 7px; }.role-matrix p { display: grid; grid-template-columns: 1fr 1.5fr 1.1fr; gap: 10px; margin: 0; padding: 16px 4px; border-bottom: 1px solid #edf0f4; font-size: 10px; }.role-matrix span { font: 8px ui-monospace, monospace; color: var(--blue); }.role-matrix i { font: 8px ui-monospace, monospace; color: #8b95a3; font-style: normal; }.score { display: flex; align-items: baseline; padding: 24px 8px; }.score strong { font-size: 52px; color: var(--green); letter-spacing: -.07em; }.score > span { font-size: 13px; color: #85909e; margin-left: 4px; }.score p { margin: 0 0 0 auto; font-size: 10px; color: #798493; line-height: 1.8; }.wide-button { width: 100%; border: 1px solid #c8d7f5; background: #eff4ff; color: var(--blue-dark); font-weight: 750; padding: 12px; font-size: 10px; }
 
 @media (max-width: 1120px) {
-  .console-shell { grid-template-columns: 76px 1fr; }.sidebar { width: 76px; padding: 28px 12px; }.brand div, .nav-copy, .nav-group > p { display: none; }.brand { padding: 0 10px 25px; }.sidebar nav { gap: 8px; }.sidebar nav button { justify-content: center; padding: 7px 3px; }.nav-icon { flex-basis: 30px; width: 30px; height: 30px; }.environment-card div, .identity > div:not(.avatar) { display: none; }.environment-card { justify-content: center; }.identity { justify-content: center; }.workspace { padding: 24px; }.fabric-map { display: none; }.span-8, .span-7, .span-5, .span-4 { grid-column: span 12; }
+  .page-navigation { grid-template-columns: repeat(6, 164px); padding: 0 20px; overflow-x: auto; }.workspace { padding: 24px; }.fabric-map { display: none; }.span-8, .span-7, .span-5, .span-4 { grid-column: span 12; }
 }
 
 @media (max-width: 720px) {
-  .console-shell { display: block; }.sidebar { position: static; width: 100%; height: auto; display: flex; padding: 14px; }.brand { border: 0; padding: 0; }.sidebar nav { display: flex; gap: 4px; overflow-x: auto; margin: 13px 0 0; }.nav-group { display: flex; gap: 4px; }.sidebar nav button { min-width: 42px; }.environment-card, .identity { display: none; }.workspace { padding: 18px 14px 40px; }.topbar { align-items: start; }.top-actions .health { display: none; }.top-actions button { padding: 10px; }.hero-panel { padding: 26px 22px; }.hero-panel h2 { font-size: 24px; }.metric-row { grid-template-columns: 1fr 1fr; }.form-grid { grid-template-columns: 1fr; }.form-grid label.wide { grid-column: auto; }.form-footer, .lifecycle-action { align-items: stretch; flex-direction: column; gap: 15px; }.capacity-hero { padding: 25px; }.capacity-ring { display: none; }.operations { overflow-x: auto; }
+  .app-header { height: 58px; padding: 0 14px; }.app-header .environment-card { display: none; }.app-header .identity > div:not(.avatar) { display: none; }.app-header .identity { padding-left: 10px; }.page-navigation { grid-template-columns: repeat(6, 154px); padding: 0 8px; }.workspace { padding: 18px 14px 40px; }.topbar { align-items: start; }.top-actions .health { display: none; }.top-actions button { padding: 10px; }.hero-panel { padding: 26px 22px; }.hero-panel h2 { font-size: 24px; }.metric-row { grid-template-columns: 1fr 1fr; }.form-grid { grid-template-columns: 1fr; }.form-grid label.wide { grid-column: auto; }.form-footer, .lifecycle-action { align-items: stretch; flex-direction: column; gap: 15px; }.capacity-hero { padding: 25px; }.capacity-ring { display: none; }.operations { overflow-x: auto; }
 }
