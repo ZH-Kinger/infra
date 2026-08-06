@@ -22,10 +22,11 @@
 
 Skill 只生成计划和升级请求，不能创建 RAM/PAI/CPFS 资源。变更下列契约时必须同步更新
 Skill 及其引用：Workflow 输入、运行时 Profile、数据源目录、挂载路径、DataFlow 默认值、
-权限申请流程和常见错误。合并前运行 Skill 校验：
+权限申请流程和常见错误。合并前运行仓库内的 Skill 契约测试；CI 的 `make test` 会执行
+同一个测试文件：
 
 ```bash
-python3 /path/to/skill-creator/scripts/quick_validate.py skills/dataset-platform-user
+python3 tests/unit/test_user_skill.py
 ```
 
 ## 2. 控制台页面与运维责任
@@ -82,9 +83,15 @@ DSW 所有者或 DLC 命令，以及 TTL。不要只看用户表单；最终审�
 `runtime-envelope.json` 和 `runtime-request.json`。`execute=false` 的历史预览不能代替
 当前执行 Run 的审批，因为 Run ID、输出路径和过期时间会变化。
 
-DSW 与 DLC 使用不同 Submit Role。两个 Role 都不能修改 Dataset Version、RAM Policy、
-网络或镜像白名单；Profile 与 Repository Variables 的变更必须走代码评审。创建响应和
-后续状态应关联 GitHub Run ID，供门户审计和资源回收使用。
+DSW 与 DLC 使用不同 Submit Role。策略设计要求两个 Role 不能修改 Dataset Version、
+RAM Policy、网络或镜像白名单，Profile 与 Repository Variables 的变更必须走代码评审；
+但在真实账号完成授权对照测试前，不能把 DSW `CreateInstance` 的 Action 收敛描述为已经
+验证的强制隔离。创建响应和后续状态仍应关联 GitHub Run ID，供门户审计和资源回收使用。
+
+发布门禁必须同时包含：CI 对渲染后 RAM 策略的检查，以及真实账号下的成功/拒绝对照。
+受控请求应由对应 Submit Role 创建成功；修改 Dataset Version、RAM Policy、网络、镜像
+白名单或使用错误运行时角色的请求必须得到 `AccessDenied`。对照结果未留档前，不开放
+生产 `pai-runtime` Environment 的执行权限。
 
 ## 5. DataFlow 自动化
 
