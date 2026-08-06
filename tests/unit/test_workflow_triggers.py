@@ -22,6 +22,8 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn("  workflow_dispatch:\n", workflow)
         self.assertIn("confirm_apply:", workflow)
         self.assertIn("inputs.confirm_apply", workflow)
+        self.assertIn("核对 GitHub OIDC 身份声明", workflow)
+        self.assertIn("claims.sub !== expectedSub", workflow)
         self.assertNotIn("  push:\n", workflow)
 
     def test_cloud_data_workflows_are_manual(self):
@@ -41,6 +43,11 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn('default     = ["development", "production"]', variables)
         self.assertIn('default     = ["development", "production-access"]', variables)
         self.assertIn("DenyAllMutations", bootstrap)
+
+    def test_oidc_role_uses_ram_trust_policy_action(self):
+        module = Path("infra/modules/ci-oidc-role/main.tf").read_text(encoding="utf-8")
+        self.assertIn('Action = "sts:AssumeRole"', module)
+        self.assertNotIn('Action = "sts:AssumeRoleWithOIDC"', module)
 
 
 if __name__ == "__main__":  # pragma: no cover

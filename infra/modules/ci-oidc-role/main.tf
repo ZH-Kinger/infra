@@ -13,7 +13,9 @@ locals {
     Statement = [
       {
         Effect = "Allow"
-        Action = "sts:AssumeRoleWithOIDC"
+        # RAM 信任策略的授权 Action 是 sts:AssumeRole；AssumeRoleWithOIDC
+        # 是交换 OIDC Token 的 API 名，不能直接写进信任策略。
+        Action = "sts:AssumeRole"
         Principal = {
           Federated = [var.oidc_provider_arn]
         }
