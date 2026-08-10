@@ -1,9 +1,8 @@
 name: Dataset lifecycle
 
-# 定时任务只生成回收计划；真正 Evict 只能由人工触发并经过 Environment 审批。
+# 环境就绪前仅允许人工触发；默认只生成回收计划。
+# 真正 Evict 必须显式打开 execute，并经过 Environment 审批。
 on:
-  schedule:
-    - cron: "17 2 * * 0"
   workflow_dispatch:
     inputs:
       min_age_days:

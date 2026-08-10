@@ -355,8 +355,8 @@ dataset-sink materialize --dataset robotics --repository robotics-data \
 CPFS release 只增不减，写满之后 `materialize` 会直接失败。**这是必须定期做的事**，
 不是可选优化。
 
-正常入口是 Actions → **Dataset lifecycle**：每周定时任务只上传 dry-run Artifact；
-需要腾空间时手动运行并打开 `execute`，随后在 `dataset-lifecycle` Environment 审批。
+正常入口是 Actions → **Dataset lifecycle**：手动运行时默认只上传 dry-run Artifact；
+需要腾空间时显式打开 `execute`，随后在 `dataset-lifecycle` Environment 审批。
 配置以下 Repository Variables：
 
 | 变量 | 说明 |

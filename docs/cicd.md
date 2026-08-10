@@ -11,7 +11,7 @@
 | [`ci.yml`](../.github/workflows/ci.yml) | 相关代码 PR / 手动 | 代码校验；README/docs 不触发 | **否** |
 | [`terraform.yml`](../.github/workflows/terraform.yml) | `infra/**` PR 做 plan；main 手动 apply | 基础设施与权限交付 | 是（OIDC） |
 | [`dataset-release.yml`](../.github/workflows/dataset-release.yml) | 手动触发 | 数据集发布 | 是（OIDC，每步换角色） |
-| [`dataset-lifecycle.yml`](../.github/workflows/dataset-lifecycle.yml) | 每周 dry-run / 手动执行 | 规划并审批 CPFS Evict | 是（OIDC，计划与执行分角色） |
+| [`dataset-lifecycle.yml`](../.github/workflows/dataset-lifecycle.yml) | 手动 dry-run / 审批后执行 | 规划并审批 CPFS Evict | 是（OIDC，计划与执行分角色） |
 | [`pai-mount-audit.yml`](../.github/workflows/pai-mount-audit.yml) | 手动 | 检查 DLC/DSW 是否绕过不可变 release | 是（只读 OIDC 角色） |
 | [`pai-runtime.yml`](../.github/workflows/pai-runtime.yml) | 手动 | 用受控 Profile 创建 DSW/DLC；默认只生成请求 | execute 后是 |
 

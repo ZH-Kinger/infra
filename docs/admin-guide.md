@@ -60,7 +60,7 @@ D1 保存操作类型、请求参数、操作人、Workflow、状态和链接。
 |---|---|---|
 | OSS/CPFS 纳管与发布 | `dataset-release.yml` | `transfer_mode=dataflow` |
 | DSW/DLC 创建 | `pai-runtime.yml` | 先生成完整请求，执行需审批 |
-| 生命周期 | `dataset-lifecycle.yml` | 定时只生成计划，Evict 需审批 |
+| 生命周期 | `dataset-lifecycle.yml` | 手动触发默认只生成计划，Evict 需审批 |
 | 权限与挂载审计 | `pai-mount-audit.yml` | 只读 |
 
 发布流水线不会接受 Branch、`latest` 或日期作为训练版本，只接受不可变 Commit/Tag。

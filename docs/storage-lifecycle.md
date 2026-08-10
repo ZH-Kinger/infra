@@ -239,8 +239,8 @@ CPFS release 是可重建热副本，也是整个体系中唯一被设计成可�
 
 任何检查不确定都保留。`reclaim` 默认 dry-run，`--execute` 才执行。
 
-`dataset-lifecycle.yml` 每周自动生成 dry-run 报告；不会定时删除数据。真实 Evict 只能
-人工触发并经过 `dataset-lifecycle` Environment 审批。审批后流水线不会直接使用旧计划，
+`dataset-lifecycle.yml` 在 Actions 中人工触发，默认只生成 dry-run 报告。真实 Evict 只能
+显式打开 `execute` 并经过 `dataset-lifecycle` Environment 审批。审批后流水线不会直接使用旧计划，
 而是重新检查保护期、最近版本、活动 DSW/DLC 与 lakeFS 可恢复性，避免执行过期结论。
 
 | 策略 | 结果 | 再次训练 |
