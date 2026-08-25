@@ -471,6 +471,15 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：改为 `kubectl rollout status statefulset/airflow-scheduler`；该检查只验证就绪状态，
   不改变工作负载。
 
+### 8.19 端到端脚本必须使用相同的 Scheduler 资源类型
+
+- 阶段：Airflow 部署通过、准备触发数据湖 DAG 前的脚本审计。
+- 现象：部署脚本已经按 StatefulSet 验证 Scheduler，但端到端脚本仍使用
+  `kubectl exec/logs deployment/airflow-scheduler`。
+- 根因：第 8.18 节只修复了部署阶段的 rollout 检查，遗漏了随后用于触发 DAG 和收集故障日志的命令。
+- 处理：触发和日志命令统一改为 `statefulset/airflow-scheduler`，并增加契约测试，保证部署与运行脚本
+  不再对同一组件使用不同资源类型。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：

@@ -3,7 +3,7 @@ set -eu
 
 started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-kubectl -n airflow exec deployment/airflow-scheduler -- \
+kubectl -n airflow exec statefulset/airflow-scheduler -- \
   airflow dags trigger datalake_spark_iceberg_itest
 
 application=""
@@ -18,7 +18,7 @@ done
 
 if [ -z "$application" ]; then
   printf '%s\n' "Airflow did not create a SparkApplication within five minutes." >&2
-  kubectl -n airflow logs deployment/airflow-scheduler --tail=300 >&2 || true
+  kubectl -n airflow logs statefulset/airflow-scheduler --tail=300 >&2 || true
   exit 1
 fi
 
