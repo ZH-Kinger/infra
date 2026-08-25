@@ -25,10 +25,6 @@ hadoop.set("fs.oss.endpoint", required("OSS_ENDPOINT"))
 hadoop.set("fs.oss.accessKeyId", required("ALIBABA_CLOUD_ACCESS_KEY_ID"))
 hadoop.set("fs.oss.accessKeySecret", required("ALIBABA_CLOUD_ACCESS_KEY_SECRET"))
 hadoop.set("fs.oss.securityToken", required("ALIBABA_CLOUD_SECURITY_TOKEN"))
-hadoop.set(
-    "fs.oss.credentials.provider",
-    "org.apache.hadoop.fs.aliyun.oss.AliyunCredentialsProvider",
-)
 hadoop.set("fs.s3a.access.key", required("MINIO_ROOT_USER"))
 hadoop.set("fs.s3a.secret.key", required("MINIO_ROOT_PASSWORD"))
 hadoop.set("fs.s3a.endpoint", required("MINIO_ENDPOINT"))

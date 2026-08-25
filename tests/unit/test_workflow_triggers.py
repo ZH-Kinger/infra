@@ -212,6 +212,8 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn("docker.m.daocloud.io/apache/spark:3.5.5", spark)
         self.assertIn("iceberg-spark-runtime-3.5_2.12:1.10.2", spark)
         self.assertNotIn("iceberg-spark-runtime-3.5_2.12:1.11.0", spark)
+        spark_job = (root / "jobs" / "iceberg_itest.py").read_text(encoding="utf-8")
+        self.assertNotIn("fs.oss.credentials.provider", spark_job)
         self.assertIn("docker.m.daocloud.io/apache/airflow", airflow)
         self.assertIn("docker.m.daocloud.io\n    repository: bitnamilegacy/postgresql", airflow)
         self.assertIn("storageClass: alicloud-disk-essd", airflow)

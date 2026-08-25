@@ -561,6 +561,15 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：测试矩阵锁定 Spark 3.5.5 + Java 11 + Iceberg 1.10.2。若未来确实需要 Iceberg 1.11，再整体升级
   到经过验证的 Java 17 Spark 镜像，不在同一次实验中同时改变计算引擎与表格式版本。
 
+### 8.29 不应把 Hadoop 内置 OSS 凭据类配置成插件类
+
+- 现象：Iceberg 已在 MinIO 完成写入、批次计数和快照读取，最终写 OSS 报
+  `AliyunCredentialsProvider constructor exception`。
+- 原因：`fs.oss.credentials.provider` 是给外部插件用的，要求默认构造器或 `(URI, Configuration)` 构造器；
+  Hadoop 3.3.4 内置 `AliyunCredentialsProvider` 只有 `(Configuration)` 构造器，由文件系统内部直接创建。
+- 处理：不设置该插件属性，仅提供 `fs.oss.accessKeyId`、`fs.oss.accessKeySecret` 和
+  `fs.oss.securityToken`，让 `AliyunOSSFileSystem` 使用内置 STS 凭据流程。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：
