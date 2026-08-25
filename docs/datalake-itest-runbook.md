@@ -544,6 +544,15 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：设置 `spark.jars.ivy=/tmp/spark-ivy-cache`，使用控制器已挂载的可写临时卷；将配置地址改为
   `file:///etc/spark-operator/ivysettings.xml`，确保 Spark 加载指定解析器。
 
+### 8.27 Driver 会再次解析 Maven 包
+
+- 现象：控制器已成功创建 Driver Pod，但 Driver 立即报
+  `Ivy settings file /etc/spark-operator/ivysettings.xml does not exist`。
+- 原因：`spark.jars.ivySettings` 会随 SparkConf 传给 Driver，而 Driver 会再次处理 `--packages`；控制器
+  命名空间的 ConfigMap 不能直接挂到数据作业命名空间。
+- 处理：从同一份版本化 `ivysettings.xml` 在两个命名空间分别生成 ConfigMap；控制器、Driver 和 Executor
+  均挂载到相同路径，确保提交端与运行端使用同一依赖源。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：
