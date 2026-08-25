@@ -14,11 +14,23 @@ rendered_spark_application=$(mktemp)
 trap 'rm -f "$rendered_spark_application"' EXIT HUP INT TERM
 
 sed \
-  -e "s/__ICEBERG_BUCKET__/$ICEBERG_BUCKET/g" \
   -e "s/__OSS_ENDPOINT__/oss-cn-hangzhou-internal.aliyuncs.com/g" \
   "$root_dir/spark-iceberg-itest.yaml" > "$rendered_spark_application"
 
 kubectl apply -f "$root_dir/namespace-rbac.yaml"
+
+if ! kubectl -n datalake-itest get secret datalake-itest-minio >/dev/null 2>&1; then
+  minio_password=$(openssl rand -hex 24)
+  kubectl -n datalake-itest create secret generic datalake-itest-minio \
+    --from-literal=MINIO_ROOT_USER=itestadmin \
+    --from-literal=MINIO_ROOT_PASSWORD="$minio_password" \
+    --from-literal=MINIO_ENDPOINT=http://minio.datalake-itest.svc.cluster.local:9000
+fi
+
+kubectl -n datalake-itest delete job minio-bootstrap --ignore-not-found
+kubectl apply -f "$root_dir/minio.yaml"
+kubectl -n datalake-itest rollout status statefulset/minio --timeout=20m
+kubectl -n datalake-itest wait --for=condition=complete job/minio-bootstrap --timeout=10m
 
 kubectl -n datalake-itest create configmap datalake-itest-runtime \
   --from-literal=LANDING_BUCKET="$LANDING_BUCKET" \

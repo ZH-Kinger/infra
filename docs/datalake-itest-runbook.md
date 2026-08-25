@@ -2,10 +2,11 @@
 
 本文记录如何在阿里云上复现一条最小但接近生产形态的数据湖链路：
 
-`GitHub Actions → ACK Pro → Airflow → Spark Operator → Spark → Iceberg → OSS`
+`GitHub Actions → ACK Pro → Airflow → 4 CPU 节点 → Spark/Iceberg → 5 存储节点 MinIO → OSS`
 
-目标不是做性能结论，而是先验证控制面、计算面、元数据和对象存储能否完整闭环。物理混闪存储、
-本地 NFS/S3 多协议互通、lakeFS 和专线同步属于下一阶段，不混入本实验，否则失败时无法定位层次。
+目标不是做性能结论，而是先验证控制面、计算面、元数据和五节点对象存储能否完整闭环。MinIO 只模拟
+本地 S3 合约和节点故障，不代表 H3C 混闪的 HDD/NVMe 性能。本地 NFS 多协议互通、lakeFS 和专线同步
+属于下一阶段，不混入本实验，否则失败时无法定位层次。
 
 ## 1. 实验范围
 
@@ -13,9 +14,9 @@
 
 1. Terraform 能以 OIDC 临时身份创建隔离的 VPC、ACK Pro 和四个私有 OSS Bucket。
 2. Airflow 能在 Kubernetes 内提交并跟踪 `SparkApplication`。
-3. Spark 能通过阿里云内网端点访问 OSS，并创建 Iceberg Format V2 表。
+3. Spark 能访问五节点 MinIO，并创建 Iceberg Format V2 表。
 4. 作业能执行幂等写入、当前快照读取和指定 Snapshot ID 的历史读取。
-5. 验证结果能写回独立的 Result Bucket，失败能在 CI 中返回非零退出码。
+5. 验证结果能通过阿里云内网端点写回 OSS Result Bucket，失败能在 CI 中返回非零退出码。
 6. 环境能通过独立的审批式工作流整体销毁，不在控制台逐个删除资源。
 
 不验证以下内容：lakeFS 分支与合并、本地 H3C 混闪、多协议互通、5 Gbps 专线吞吐、真实 MCAP 或
@@ -27,8 +28,9 @@ LeRobot v3 数据处理、训练集群读取。这些项目要在基础链路通
 |---|---|
 | 地域 / 可用区 | `cn-hangzhou` / `cn-hangzhou-k` |
 | ACK | ACK Pro；Kubernetes 版本由 ACK 选择当前可创建版本 |
-| 系统节点池 | 3 节点；优先 `ecs.g8i.xlarge`，按变量中的列表回退 |
-| Spark 节点池 | 3 节点；优先 `ecs.g8i.2xlarge`，按变量中的列表回退 |
+| CPU 节点池 | 4 节点；优先 `ecs.g8i.2xlarge`，按变量中的列表回退 |
+| 存储节点池 | 5 节点；优先 `ecs.g8i.xlarge`，按变量中的列表回退 |
+| 本地 S3 模拟 | MinIO 5 成员；每成员独立 200 GiB ESSD PVC |
 | Airflow Helm Chart | `1.22.0` |
 | Airflow | `3.2.2`，LocalExecutor |
 | Spark Operator | `2.5.2` |
@@ -46,11 +48,11 @@ Terraform 代码位于 `infra/tests/datalake`，创建：
 
 - 1 个专用 VPC 和 1 个 vSwitch；
 - 1 个 ACK Pro 托管集群；
-- 1 个三节点系统池和 1 个三节点 Spark 池；
+- 1 个四节点 CPU 池和 1 个五节点存储池；
 - 4 个启用版本控制、AES-256 服务端加密的私有 Bucket：`landing`、`lakefs`、`iceberg`、`result`。
 
-`lakefs` Bucket 在第一阶段只预留，不部署 lakeFS。测试数据没有业务价值，Bucket 标记为 `Ephemeral=true`。
-不要把生产原始数据上传到这些 Bucket。
+五节点 MinIO 保存本地 Iceberg 表，OSS 在本实验中只承担归档和结果层。`lakefs` Bucket 在第一阶段只预留，
+不部署 lakeFS。测试数据没有业务价值，Bucket 标记为 `Ephemeral=true`。不要上传生产原始数据。
 
 ## 4. 前置条件
 
@@ -159,9 +161,9 @@ kubeconfig、STS Token 或任何密钥。
 
 预期：
 
-- 6 个节点均为 `Ready`；
-- 3 个系统节点带 `workload=platform`；
-- 3 个 Spark 节点带 `workload=spark` 和对应 `NoSchedule` taint；
+- 9 个节点均为 `Ready`；
+- 4 个 CPU 节点带 `workload=cpu`；
+- 5 个存储节点带 `workload=storage` 和对应 `NoSchedule` taint；
 - 不存在持续重启或 `NotReady` 节点。
 
 ### 步骤 5：部署 Airflow 和 Spark Operator
@@ -174,11 +176,13 @@ kubeconfig、STS Token 或任何密钥。
 工作流将执行 `deploy/datalake-itest/deploy.sh`：
 
 1. 创建 `datalake-itest` 命名空间与最小 RBAC；
-2. 将短期 STS 写入 Kubernetes Secret；
-3. 创建 Spark 作业代码和运行参数 ConfigMap；
-4. 安装 Spark Operator；
-5. 安装 Airflow 和内部 PostgreSQL；
-6. 等待 scheduler 就绪。
+2. 为 MinIO 生成一次性随机凭证，并部署 5 成员 StatefulSet；
+3. 为每个存储成员创建独立 200 GiB PVC，等待五个成员就绪并创建 `landing/iceberg` Bucket；
+4. 将短期阿里云 STS 写入 Kubernetes Secret；
+5. 创建 Spark 作业代码和运行参数 ConfigMap；
+6. 安装 Spark Operator；
+7. 安装 Airflow 和内部 PostgreSQL；
+8. 等待 scheduler 就绪。
 
 部署后应保存：Helm release 状态、所有 Pod 状态、异常 Pod 的 `describe` 和日志。
 
@@ -191,7 +195,7 @@ kubeconfig、STS Token 或任何密钥。
 
 Airflow 创建一个带时间戳的 `SparkApplication`。Spark 作业依次执行：
 
-1. 创建 `datalake.robotics.episode_index` Iceberg V2 表；
+1. 在五节点 MinIO 创建 `datalake.robotics.episode_index` Iceberg V2 表；
 2. 删除同 `batch_id` 的旧记录，保证重试幂等；
 3. 生成并追加 100 万行；
 4. 查询当前表并校验行数；
@@ -250,7 +254,8 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 |---|---|
 | IaC 安全 | Plan 无非预期 change/destroy；Apply 使用审批过的 Plan |
 | 身份 | 无长期 AccessKey；仅使用 OIDC、短期 STS 和短期 kubeconfig |
-| Kubernetes | 6 节点 Ready；系统负载与 Spark 负载按节点池隔离 |
+| Kubernetes | 9 节点 Ready；4 个 CPU 节点与 5 个存储节点隔离 |
+| 本地对象存储 | 5 个 MinIO Pod 分布在 5 个不同节点，PVC 全部 Bound |
 | Airflow | DAG 成功创建并跟踪 SparkApplication |
 | Spark | Driver/Executor 正常结束，无 OOM、无限 Pending 或重复重启 |
 | Iceberg | 当前读取与指定 Snapshot ID 读取均等于写入行数 |
@@ -269,8 +274,8 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 | GitHub Test Run |  |
 | 地域 / 可用区 |  |
 | Kubernetes 版本 |  |
-| 系统节点实际型号 × 数量 |  |
-| Spark 节点实际型号 × 数量 |  |
+| CPU 节点实际型号 × 数量 |  |
+| 存储节点实际型号 × 数量 |  |
 | row_count |  |
 | executor 配置 |  |
 | SparkApplication 名称 |  |
@@ -305,7 +310,7 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 过程：`OpenAckService --type propayasgo` 返回成功，但再次查询仍缺角色。
 - 根因：ACK 产品开通与 ACK 默认服务角色快速授权是两步；开通 API 不等于主账号已同意 RAM 授权。
 - 处理：主账号进入 ACK/RAM 快速授权页，确认创建和绑定默认服务角色。角色存在前禁止创建集群。
-- 当前状态：ACK 服务已开通；默认角色授权仍待管理员确认。
+- 当前状态：已完成；`AliyunCSDefaultRole` 于 2026-08-25 创建，ACK 可创建版本接口已正常返回。
 
 ### 8.2 现有 Platform Apply Role 无权创建 ACK/VPC
 
@@ -349,11 +354,11 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 
 截至 2026-08-25：
 
-- 本地 lint、170 个单元测试、离线 E2E、Terraform validate、Shellcheck、Python compile 和 YAML parse 通过；
-- 云端 Terraform Plan 通过：`13 add / 0 change / 0 destroy`；
-- 代码已经合并；
+- 第一版 3+3 拓扑的本地校验和云端 Terraform Plan 已通过：`13 add / 0 change / 0 destroy`；
+- 4 CPU + 5 存储 ECS 拓扑正在独立变更中，必须取得新的 Plan 后才可 Apply；
+- ACK 默认服务角色已完成授权，可创建 Kubernetes 集群；
 - 尚未创建 ACK/ECS，尚未产生真实 Spark/Iceberg 运行结果；
-- 阻塞项是第 8.1 节的 ACK 默认角色授权，以及第 8.2 节的 bootstrap 管理员执行。
+- 当前唯一权限阻塞项是第 8.2 节的 `TerraformITestApplyRole` 管理员 bootstrap。
 
 后续记录必须区分 `PLAN PASSED` 与 `RUNTIME PASSED`，不能把 Terraform Plan 成功写成数据湖链路已经通过。
 
@@ -369,7 +374,7 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 | Plan 结果 | 13 add / 0 change / 0 destroy |
 | 库存检查 | 杭州 K 区六个候选规格均为 Available/WithStock |
 | ACK 服务开通 | `OpenAckService(propayasgo)` 成功 |
-| ACK 默认角色 | 缺失，等待主账号快速授权 |
+| ACK 默认角色 | 已授权；该问题已关闭 |
 | 实际基础设施 | 未创建 |
 | Runtime 结果 | 未执行 |
 | 结论 | BLOCKED（权限自举，不是数据链路失败） |

@@ -1,7 +1,7 @@
 controller:
   replicas: 2
   nodeSelector:
-    workload: platform
+    workload: cpu
   podDisruptionBudget:
     enable: true
     minAvailable: 1
@@ -10,7 +10,7 @@ webhook:
   enable: true
   replicas: 2
   nodeSelector:
-    workload: platform
+    workload: cpu
   podDisruptionBudget:
     enable: true
     minAvailable: 1

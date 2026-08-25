@@ -1,0 +1,136 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-headless
+  namespace: datalake-itest
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: minio
+  ports:
+    - name: api
+      port: 9000
+    - name: console
+      port: 9001
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: datalake-itest
+spec:
+  selector:
+    app: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  namespace: datalake-itest
+spec:
+  serviceName: minio-headless
+  podManagementPolicy: Parallel
+  replicas: 5
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      nodeSelector:
+        workload: storage
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: storage
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: minio
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: minio
+          image: quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+          args:
+            - server
+            - http://minio-{0...4}.minio-headless.datalake-itest.svc.cluster.local/data
+            - --console-address=:9001
+          envFrom:
+            - secretRef:
+                name: datalake-itest-minio
+          ports:
+            - name: api
+              containerPort: 9000
+            - name: console
+              containerPort: 9001
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: api
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: api
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 200Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-bootstrap
+  namespace: datalake-itest
+spec:
+  backoffLimit: 12
+  template:
+    metadata:
+      labels:
+        app: minio-bootstrap
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        workload: cpu
+      containers:
+        - name: mc
+          image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+          envFrom:
+            - secretRef:
+                name: datalake-itest-minio
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              until mc alias set local http://minio.datalake-itest.svc.cluster.local:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do sleep 5; done
+              mc mb --ignore-existing local/landing
+              mc mb --ignore-existing local/iceberg

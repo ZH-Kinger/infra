@@ -22,28 +22,38 @@ variable "kubernetes_version" {
   default     = ""
 }
 
-variable "system_instance_types" {
-  description = "Fallback-ordered ECS instance types for the three platform nodes."
-  type        = list(string)
-  default     = ["ecs.g8i.xlarge", "ecs.g7.xlarge", "ecs.c8i.2xlarge"]
-}
-
-variable "spark_instance_types" {
-  description = "Fallback-ordered ECS instance types for the three Spark worker nodes."
+variable "cpu_instance_types" {
+  description = "Fallback-ordered ECS instance types for the four CPU processing nodes."
   type        = list(string)
   default     = ["ecs.g8i.2xlarge", "ecs.g7.2xlarge", "ecs.c8i.4xlarge"]
 }
 
-variable "system_node_count" {
-  description = "Number of platform nodes. Three keeps Airflow, lakeFS and PostgreSQL available during one-node tests."
-  type        = number
-  default     = 3
+variable "storage_instance_types" {
+  description = "Fallback-ordered ECS instance types for the five distributed object-storage nodes."
+  type        = list(string)
+  default     = ["ecs.g8i.xlarge", "ecs.g7.xlarge", "ecs.c8i.2xlarge"]
 }
 
-variable "spark_node_count" {
-  description = "Initial number of Spark nodes."
+variable "cpu_node_count" {
+  description = "Number of CPU nodes running Airflow, Spark and data-processing workloads."
   type        = number
-  default     = 3
+  default     = 4
+
+  validation {
+    condition     = var.cpu_node_count == 4
+    error_message = "The reproducible topology requires exactly four CPU nodes."
+  }
+}
+
+variable "storage_node_count" {
+  description = "Number of nodes reserved for the distributed S3 storage service."
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.storage_node_count == 5
+    error_message = "The reproducible topology requires exactly five storage nodes."
+  }
 }
 
 variable "bucket_prefix" {

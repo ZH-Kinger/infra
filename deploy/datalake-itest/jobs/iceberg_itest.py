@@ -29,6 +29,15 @@ hadoop.set(
     "fs.oss.credentials.provider",
     "org.apache.hadoop.fs.aliyun.oss.AliyunCredentialsProvider",
 )
+hadoop.set("fs.s3a.access.key", required("MINIO_ROOT_USER"))
+hadoop.set("fs.s3a.secret.key", required("MINIO_ROOT_PASSWORD"))
+hadoop.set("fs.s3a.endpoint", required("MINIO_ENDPOINT"))
+hadoop.set("fs.s3a.path.style.access", "true")
+hadoop.set("fs.s3a.connection.ssl.enabled", "false")
+hadoop.set(
+    "fs.s3a.aws.credentials.provider",
+    "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+)
 
 table = "datalake.robotics.episode_index"
 spark.sql("CREATE NAMESPACE IF NOT EXISTS datalake.robotics")
