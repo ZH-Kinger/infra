@@ -6,7 +6,7 @@ metadata:
 spec:
   type: Python
   mode: cluster
-  image: apache/spark:3.5.5
+  image: docker.m.daocloud.io/apache/spark:3.5.5
   imagePullPolicy: IfNotPresent
   mainApplicationFile: local:///opt/spark/itest/iceberg_itest.py
   sparkVersion: 3.5.5

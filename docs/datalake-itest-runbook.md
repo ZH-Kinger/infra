@@ -421,6 +421,17 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：kubeconfig 命令显式使用 `aliyun --region "$ALIBABA_CLOUD_REGION"`，区域仍来自受控的 GitHub
   Environment 变量；增加工作流契约测试防止参数再次丢失。
 
+### 8.14 ACK 无默认 StorageClass，且 Docker Hub 拉取不稳定
+
+- 阶段：kubeconfig 获取成功后的首轮组件部署。
+- 现象：5 个 MinIO Pod 因 PVC 未绑定保持 Pending；集群提供 `alicloud-disk-essd` 等 CSI 存储类，但
+  没有默认类。同时 Docker Hub 上的 `minio/mc` 多次出现连接超时。
+- 根因：MinIO `volumeClaimTemplates` 未声明 `storageClassName`；国内节点直接访问 Docker Hub 不是稳定
+  的可重复实验依赖。
+- 处理：MinIO PVC 显式使用 `alicloud-disk-essd`；MinIO/MC 使用官方 Quay，Spark、Airflow 与 PostgreSQL
+  使用已在相同 ACK 节点完成拉取探针的国内镜像代理。部署脚本只清理“Pending 且 storageClass 为空”的
+  失败测试 PVC，绝不删除 Bound 数据卷。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：

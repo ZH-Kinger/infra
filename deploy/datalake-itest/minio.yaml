@@ -102,6 +102,7 @@ spec:
     - metadata:
         name: data
       spec:
+        storageClassName: alicloud-disk-essd
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
@@ -124,7 +125,7 @@ spec:
         workload: cpu
       containers:
         - name: mc
-          image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+          image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
           envFrom:
             - secretRef:
                 name: datalake-itest-minio
