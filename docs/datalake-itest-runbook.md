@@ -54,6 +54,11 @@ Terraform 代码位于 `infra/tests/datalake`，创建：
 五节点 MinIO 保存本地 Iceberg 表，OSS 在本实验中只承担归档和结果层。`lakefs` Bucket 在第一阶段只预留，
 不部署 lakeFS。测试数据没有业务价值，Bucket 标记为 `Ephemeral=true`。不要上传生产原始数据。
 
+这里的“5 个存储节点”和“4 个 OSS Bucket”不是同一层概念：5 台存储 ECS 共同组成**一个**分布式 MinIO
+对象存储集群；4 个 OSS Bucket 只是阿里云侧按数据阶段划分的逻辑命名空间，不是 4 台存储服务器。生产环境
+如果不需要分别配置权限、生命周期和故障影响范围，可以收敛为 1 个 OSS Bucket，并使用 `landing/`、
+`lakefs/`、`iceberg/`、`result/` 前缀隔离。本实验保留 4 个 Bucket，是为了独立验证权限和清理边界。
+
 ## 4. 前置条件
 
 ### 4.1 阿里云账号
@@ -572,15 +577,22 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 
 ## 9. 当前实验状态
 
-截至 2026-08-25：
+截至 2026-08-26，基础集成实验已经达到 `RUNTIME PASSED`：
 
-- 第一版 3+3 拓扑的本地校验和云端 Terraform Plan 已通过：`13 add / 0 change / 0 destroy`；
-- 4 CPU + 5 存储 ECS 拓扑已进入云端创建阶段；VPC 与四个 OSS Bucket 已在 Terraform state 中；
-- ACK 默认服务角色已完成授权，可创建 Kubernetes 集群；
-- 尚未创建 ACK/ECS，尚未产生真实 Spark/Iceberg 运行结果；
-- ACK 完整生命周期权限已在第 8.11 节统一审计，策略更新后再继续剩余资源 Apply。
+- ACK Pro、4 台 CPU ECS 和 5 台存储 ECS 已由 Terraform 创建；
+- 5 个 MinIO Pod 分散运行在 5 个存储节点上，共同提供一个本地 S3 入口；
+- Airflow 已成功创建并跟踪 SparkApplication；
+- Spark Driver 和 4 个 Executor 已分散到 4 个 CPU 节点执行；
+- Iceberg 1.10.2 已在五节点 MinIO 上完成建表、幂等写入、当前读取和指定快照读取；
+- 同一 `batch_id` 重跑后没有产生双倍数据，最终当前读取与快照读取均为 1,000,000 行；
+- 验证报告已通过 Hadoop Aliyun Connector 和 STS 临时凭据写入 OSS Result Bucket；
+- GitHub Actions 集成任务成功结束，总耗时 7 分 8 秒。
 
-后续记录必须区分 `PLAN PASSED` 与 `RUNTIME PASSED`，不能把 Terraform Plan 成功写成数据湖链路已经通过。
+这个结果证明控制面和数据链路能够闭环，不代表生产性能已经达标。MinIO 使用的是云盘，无法代替 H3C 混闪
+集群对 NFS/S3 吞吐、尾延迟、磁盘/节点故障重建和多协议互通的现场验收；5 Gbps 专线、真实 MCAP 转
+LeRobot v3、lakeFS 分支发布和训练集群读取仍需分阶段测试。
+
+后续记录必须继续区分 `PLAN PASSED`、`RUNTIME PASSED` 与 `PERFORMANCE PASSED`。
 
 ### DL-ITEST-20260825-01
 
@@ -598,3 +610,24 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 | 实际基础设施 | 未创建 |
 | Runtime 结果 | 未执行 |
 | 结论 | BLOCKED（权限自举，不是数据链路失败） |
+
+### DL-ITEST-20260826-02
+
+| 字段 | 本次记录 |
+|---|---|
+| 目标 | 验证 Airflow、Spark、Iceberg、五节点本地对象存储与阿里云 OSS 的完整闭环 |
+| Git Commit | `5154410` |
+| GitHub Test Run | [32871818281](https://github.com/ZH-Kinger/infra/actions/runs/32871818281) |
+| 地域 / 可用区 | `cn-hangzhou` / `cn-hangzhou-k` |
+| CPU 节点 | 4 × `ecs.g8i.2xlarge` |
+| 存储节点 | 5 × `ecs.g8i.xlarge`；每节点 200 GiB ESSD；组成一个 MinIO 集群 |
+| SparkApplication | `iceberg-itest-7mxag1b5` |
+| Batch ID | `itest-32871818281` |
+| row_count | `1,000,000` |
+| snapshot_count | `1,000,000` |
+| Iceberg Snapshot ID | `6684120327646088810` |
+| Executor | 4 × 2 cores / 6 GiB；分布于 4 个 CPU 节点 |
+| 总耗时 | 7 分 8 秒（包含部署刷新、Airflow 调度、依赖解析和作业执行） |
+| 结果 | Iceberg 写入、指定快照回读、同批次幂等重跑、OSS 报告写入全部成功 |
+| 结论 | **RUNTIME PASSED** |
+| 尚未覆盖 | 性能基准、节点故障、NFS/S3 互通、5 Gbps 专线、真实业务数据、lakeFS |
