@@ -5,6 +5,21 @@ controller:
   replicas: 2
   nodeSelector:
     workload: cpu
+  volumes:
+    - name: tmp
+      emptyDir:
+        sizeLimit: 1Gi
+    - name: ivy-settings
+      configMap:
+        name: spark-operator-ivy-settings
+  volumeMounts:
+    - name: tmp
+      mountPath: /tmp
+      readOnly: false
+    - name: ivy-settings
+      mountPath: /etc/spark-operator/ivysettings.xml
+      subPath: ivysettings.xml
+      readOnly: true
   podDisruptionBudget:
     enable: true
     minAvailable: 1

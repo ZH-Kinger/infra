@@ -526,6 +526,16 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：SparkApplication 使用固定基础名，由 `SparkKubernetesOperator` 默认追加随机后缀；批次号由 CI 的
   `GITHUB_RUN_ID` 写入运行时 ConfigMap，避免把编排器模板变量混入作业身份。
 
+### 8.25 `--repositories` 不会替换 Maven Central
+
+- 现象：Airflow 已创建 SparkApplication，但控制器长时间停在 `Running spark-submit`，Driver Pod 尚未创建。
+- 诊断：控制器内的 Java 进程正在 Maven Central 的 Cloudflare 地址上等待 TLS 握手；同时直接访问阿里云
+  Maven 的相同 Iceberg POM 返回 200。
+- 原因：Spark 的 `--repositories` 只追加仓库，不会移除默认 Maven Central。在当前网络中，默认仓库的连接
+  超时阻塞了依赖解析。
+- 处理：为 Spark Operator 控制器挂载专用 `ivysettings.xml`，并通过 `spark.jars.ivySettings` 指定只使用
+  阿里云公共 Maven 镜像。生产环境仍建议把固定版本依赖预装进 ACR 镜像，消除运行时下载的不确定性。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：

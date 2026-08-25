@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spark-operator-ivy-settings
+  namespace: spark-operator
+data:
+  ivysettings.xml: |
+    <ivysettings>
+      <settings defaultResolver="aliyun-public" />
+      <resolvers>
+        <ibiblio
+          name="aliyun-public"
+          m2compatible="true"
+          root="https://maven.aliyun.com/repository/public"
+        />
+      </resolvers>
+    </ivysettings>
