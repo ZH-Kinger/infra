@@ -16,6 +16,7 @@ spec:
   deps:
     packages:
       - org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.11.0
+      - org.apache.hadoop:hadoop-aws:3.3.4
       - org.apache.hadoop:hadoop-aliyun:3.3.4
     repositories:
       - https://maven.aliyun.com/repository/public
@@ -23,11 +24,15 @@ spec:
     spark.sql.extensions: org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
     spark.sql.catalog.datalake: org.apache.iceberg.spark.SparkCatalog
     spark.sql.catalog.datalake.type: hadoop
-    spark.sql.catalog.datalake.warehouse: "oss://__ICEBERG_BUCKET__/warehouse"
+    spark.sql.catalog.datalake.warehouse: "s3a://iceberg/warehouse"
     spark.sql.defaultCatalog: datalake
     spark.hadoop.fs.oss.impl: org.apache.hadoop.fs.aliyun.oss.AliyunOSSFileSystem
     spark.hadoop.fs.AbstractFileSystem.oss.impl: org.apache.hadoop.fs.aliyun.oss.OSS
     spark.hadoop.fs.oss.endpoint: __OSS_ENDPOINT__
+    spark.hadoop.fs.s3a.endpoint: http://minio.datalake-itest.svc.cluster.local:9000
+    spark.hadoop.fs.s3a.path.style.access: "true"
+    spark.hadoop.fs.s3a.connection.ssl.enabled: "false"
+    spark.hadoop.fs.s3a.aws.credentials.provider: org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider
     spark.serializer: org.apache.spark.serializer.KryoSerializer
     spark.sql.shuffle.partitions: "64"
     spark.dynamicAllocation.enabled: "false"
@@ -40,12 +45,7 @@ spec:
     memory: 2g
     serviceAccount: spark-itest
     nodeSelector:
-      workload: spark
-    tolerations:
-      - key: workload
-        operator: Equal
-        value: spark
-        effect: NoSchedule
+      workload: cpu
     volumeMounts:
       - name: itest-code
         mountPath: /opt/spark/itest
@@ -54,6 +54,8 @@ spec:
           name: datalake-itest-runtime
       - secretRef:
           name: datalake-itest-oss-sts
+      - secretRef:
+          name: datalake-itest-minio
     env:
       - name: BATCH_ID
         value: "itest-{{ ts_nodash | lower }}"
@@ -62,12 +64,7 @@ spec:
     cores: 2
     memory: 6g
     nodeSelector:
-      workload: spark
-    tolerations:
-      - key: workload
-        operator: Equal
-        value: spark
-        effect: NoSchedule
+      workload: cpu
     volumeMounts:
       - name: itest-code
         mountPath: /opt/spark/itest
@@ -76,3 +73,5 @@ spec:
           name: datalake-itest-runtime
       - secretRef:
           name: datalake-itest-oss-sts
+      - secretRef:
+          name: datalake-itest-minio

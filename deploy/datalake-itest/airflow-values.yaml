@@ -4,13 +4,13 @@ defaultAirflowRepository: apache/airflow
 defaultAirflowTag: "3.2.2"
 
 nodeSelector:
-  workload: platform
+  workload: cpu
 
 postgresql:
   enabled: true
   primary:
     nodeSelector:
-      workload: platform
+      workload: cpu
     persistence:
       enabled: true
       size: 20Gi

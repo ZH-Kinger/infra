@@ -62,22 +62,22 @@ resource "alicloud_cs_managed_kubernetes" "this" {
   }
 }
 
-resource "alicloud_cs_kubernetes_node_pool" "system" {
+resource "alicloud_cs_kubernetes_node_pool" "cpu" {
   cluster_id            = alicloud_cs_managed_kubernetes.this.id
-  node_pool_name        = "system"
+  node_pool_name        = "cpu"
   vswitch_ids           = [alicloud_vswitch.nodes.id]
-  instance_types        = var.system_instance_types
-  desired_size          = tostring(var.system_node_count)
+  instance_types        = var.cpu_instance_types
+  desired_size          = tostring(var.cpu_node_count)
   image_type            = "AliyunLinux3ContainerOptimized"
   system_disk_category  = "cloud_essd"
-  system_disk_size      = 120
+  system_disk_size      = 200
   runtime_name          = "containerd"
   install_cloud_monitor = true
   tags                  = var.tags
 
   labels {
     key   = "workload"
-    value = "platform"
+    value = "cpu"
   }
 
   management {
@@ -90,27 +90,27 @@ resource "alicloud_cs_kubernetes_node_pool" "system" {
   depends_on = [alicloud_cs_managed_kubernetes.this]
 }
 
-resource "alicloud_cs_kubernetes_node_pool" "spark" {
+resource "alicloud_cs_kubernetes_node_pool" "storage" {
   cluster_id            = alicloud_cs_managed_kubernetes.this.id
-  node_pool_name        = "spark"
+  node_pool_name        = "storage"
   vswitch_ids           = [alicloud_vswitch.nodes.id]
-  instance_types        = var.spark_instance_types
-  desired_size          = tostring(var.spark_node_count)
+  instance_types        = var.storage_instance_types
+  desired_size          = tostring(var.storage_node_count)
   image_type            = "AliyunLinux3ContainerOptimized"
   system_disk_category  = "cloud_essd"
-  system_disk_size      = 300
+  system_disk_size      = 120
   runtime_name          = "containerd"
   install_cloud_monitor = true
   tags                  = var.tags
 
   labels {
     key   = "workload"
-    value = "spark"
+    value = "storage"
   }
 
   taints {
     key    = "workload"
-    value  = "spark"
+    value  = "storage"
     effect = "NoSchedule"
   }
 
@@ -121,7 +121,7 @@ resource "alicloud_cs_kubernetes_node_pool" "spark" {
     max_unavailable = 1
   }
 
-  depends_on = [alicloud_cs_kubernetes_node_pool.system]
+  depends_on = [alicloud_cs_kubernetes_node_pool.cpu]
 }
 
 resource "alicloud_oss_bucket" "data" {
