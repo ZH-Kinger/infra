@@ -1,0 +1,61 @@
+executor: LocalExecutor
+
+defaultAirflowRepository: apache/airflow
+defaultAirflowTag: "3.2.2"
+
+nodeSelector:
+  workload: platform
+
+postgresql:
+  enabled: true
+  primary:
+    nodeSelector:
+      workload: platform
+    persistence:
+      enabled: true
+      size: 20Gi
+
+redis:
+  enabled: false
+
+scheduler:
+  replicas: 2
+  serviceAccount:
+    create: true
+    name: airflow-scheduler
+
+apiServer:
+  replicas: 2
+
+triggerer:
+  replicas: 1
+
+dags:
+  persistence:
+    enabled: false
+  gitSync:
+    enabled: false
+
+extraVolumes:
+  - name: datalake-itest-dags
+    configMap:
+      name: datalake-itest-airflow-dags
+
+extraVolumeMounts:
+  - name: datalake-itest-dags
+    mountPath: /opt/airflow/dags/repository
+    readOnly: true
+
+env:
+  - name: _PIP_ADDITIONAL_REQUIREMENTS
+    value: "apache-airflow-providers-cncf-kubernetes==10.20.0"
+
+config:
+  core:
+    load_examples: "False"
+  scheduler:
+    standalone_dag_processor: "False"
+
+createUserJob:
+  defaultUser:
+    enabled: false

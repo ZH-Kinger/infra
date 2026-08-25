@@ -1,0 +1,25 @@
+controller:
+  replicas: 2
+  nodeSelector:
+    workload: platform
+  podDisruptionBudget:
+    enable: true
+    minAvailable: 1
+
+webhook:
+  enable: true
+  replicas: 2
+  nodeSelector:
+    workload: platform
+  podDisruptionBudget:
+    enable: true
+    minAvailable: 1
+
+spark:
+  jobNamespaces:
+    - datalake-itest
+  serviceAccount:
+    create: false
+    name: spark-itest
+  rbac:
+    create: true

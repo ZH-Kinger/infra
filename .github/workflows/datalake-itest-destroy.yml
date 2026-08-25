@@ -1,0 +1,111 @@
+name: Destroy data lake integration environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type DESTROY-DATALAKE-ITEST"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: datalake-itest
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.15.8"
+  ALIBABA_CLOUD_OIDC_AUDIENCE: github-actions
+
+jobs:
+  plan-destroy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 校验显式确认
+        run: |
+          if [ "${{ inputs.confirmation }}" != "DESTROY-DATALAKE-ITEST" ]; then
+            echo "::error::confirmation must equal DESTROY-DATALAKE-ITEST"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ vars.ALIBABA_CLOUD_PLAN_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
+          audience: ${{ env.ALIBABA_CLOUD_OIDC_AUDIENCE }}
+          role-session-name: datalake-destroy-plan-${{ github.run_id }}
+
+      - name: 生成销毁计划
+        env:
+          TFVARS_JSON: ${{ vars.TFVARS_ITEST_DATALAKE_JSON }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/backend.hcl <<EOF
+          bucket              = "${{ vars.TF_STATE_BUCKET }}"
+          region              = "${{ vars.ALIBABA_CLOUD_REGION }}"
+          tablestore_endpoint = "${{ vars.TF_STATE_LOCK_ENDPOINT }}"
+          tablestore_table    = "${{ vars.TF_STATE_LOCK_TABLE }}"
+          encrypt             = true
+          EOF
+          printf '%s' "$TFVARS_JSON" > /tmp/itest.tfvars.json
+          terraform -chdir=infra/tests/datalake init -input=false -backend-config=/tmp/backend.hcl
+          terraform -chdir=infra/tests/datalake plan -destroy -input=false -lock=false \
+            -var-file=/tmp/itest.tfvars.json -out=tfplan -no-color | tee /tmp/destroy-plan.txt
+          mkdir -p /tmp/destroy-artifact
+          cp infra/tests/datalake/tfplan /tmp/destroy-artifact/tfplan
+          cp /tmp/destroy-plan.txt /tmp/destroy-artifact/plan.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: datalake-itest-destroy-${{ github.sha }}
+          path: /tmp/destroy-artifact/
+          retention-days: 3
+
+  apply-destroy:
+    if: github.ref == 'refs/heads/main'
+    needs: plan-destroy
+    runs-on: ubuntu-latest
+    environment: development
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ vars.ALIBABA_CLOUD_ITEST_APPLY_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
+          audience: ${{ env.ALIBABA_CLOUD_OIDC_AUDIENCE }}
+          role-session-name: datalake-destroy-apply-${{ github.run_id }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: datalake-itest-destroy-${{ github.sha }}
+          path: /tmp/destroy
+
+      - name: 执行审批过的销毁计划
+        run: |
+          set -euo pipefail
+          cat > /tmp/backend.hcl <<EOF
+          bucket              = "${{ vars.TF_STATE_BUCKET }}"
+          region              = "${{ vars.ALIBABA_CLOUD_REGION }}"
+          tablestore_endpoint = "${{ vars.TF_STATE_LOCK_ENDPOINT }}"
+          tablestore_table    = "${{ vars.TF_STATE_LOCK_TABLE }}"
+          encrypt             = true
+          EOF
+          terraform -chdir=infra/tests/datalake init -input=false -backend-config=/tmp/backend.hcl
+          cp /tmp/destroy/tfplan infra/tests/datalake/tfplan
+          terraform -chdir=infra/tests/datalake apply -input=false -lock-timeout=5m -no-color tfplan

@@ -15,6 +15,7 @@ on:
           - dev-access
           - prod-platform
           - prod-access
+          - itest-datalake
           - all
       confirm_apply:
         description: "Apply the generated plans after Environment approval"
@@ -46,13 +47,21 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - id: matrix
         env:
           TARGET: ${{ inputs.target || 'all' }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          all='[{"dir":"infra/envs/dev/platform","layer":"dev-platform","tfvars_var":"TFVARS_DEV_PLATFORM_JSON","environment":"development","role_var":"ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN"},{"dir":"infra/envs/dev/access","layer":"dev-access","tfvars_var":"TFVARS_DEV_ACCESS_JSON","environment":"development","role_var":"ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN"},{"dir":"infra/envs/prod/platform","layer":"prod-platform","tfvars_var":"TFVARS_PROD_PLATFORM_JSON","environment":"production","role_var":"ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN"},{"dir":"infra/envs/prod/access","layer":"prod-access","tfvars_var":"TFVARS_PROD_ACCESS_JSON","environment":"production-access","role_var":"ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN"}]'
-          if [ "$TARGET" = "all" ]; then
+          all='[{"dir":"infra/envs/dev/platform","layer":"dev-platform","tfvars_var":"TFVARS_DEV_PLATFORM_JSON","environment":"development","role_var":"ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN"},{"dir":"infra/envs/dev/access","layer":"dev-access","tfvars_var":"TFVARS_DEV_ACCESS_JSON","environment":"development","role_var":"ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN"},{"dir":"infra/envs/prod/platform","layer":"prod-platform","tfvars_var":"TFVARS_PROD_PLATFORM_JSON","environment":"production","role_var":"ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN"},{"dir":"infra/envs/prod/access","layer":"prod-access","tfvars_var":"TFVARS_PROD_ACCESS_JSON","environment":"production-access","role_var":"ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN"},{"dir":"infra/tests/datalake","layer":"itest-datalake","tfvars_var":"TFVARS_ITEST_DATALAKE_JSON","environment":"development","role_var":"ALIBABA_CLOUD_ITEST_APPLY_ROLE_ARN"}]'
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff --name-only "origin/$BASE_REF...HEAD" > /tmp/changed-files
+            selected=$(printf '%s' "$all" | python3 -c 'import json,sys; items=json.load(sys.stdin); changed=open("/tmp/changed-files", encoding="utf-8").read().splitlines(); chosen=[x for x in items if any(p == x["dir"] or p.startswith(x["dir"] + "/") for p in changed)]; print(json.dumps(chosen or [next(x for x in items if x["layer"] == "dev-platform")], separators=(",", ":")))')
+          elif [ "$TARGET" = "all" ]; then
             selected=$all
           else
             selected=$(printf '%s' "$all" | python3 -c 'import json,os,sys; print(json.dumps([x for x in json.load(sys.stdin) if x["layer"] == os.environ["TARGET"]], separators=(",", ":")))')

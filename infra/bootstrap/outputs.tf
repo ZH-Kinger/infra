@@ -23,6 +23,11 @@ output "access_apply_role_arn" {
   value       = module.access_apply_role.role_arn
 }
 
+output "itest_apply_role_arn" {
+  description = "GitHub development Environment variable ALIBABA_CLOUD_ITEST_APPLY_ROLE_ARN"
+  value       = module.itest_apply_role.role_arn
+}
+
 output "backend_config" {
   description = <<-EOT
     envs 层 backend.hcl 的内容。用法：
@@ -39,10 +44,11 @@ output "backend_config" {
 }
 
 output "ci_role_trust_policies" {
-  description = "三个 CI 角色的信任策略，评审时确认 OIDC sub 是否被放宽"
+  description = "CI 角色的信任策略，评审时确认 OIDC sub 是否被放宽"
   value = {
     plan           = module.plan_role.assume_role_policy
     platform_apply = module.platform_apply_role.assume_role_policy
     access_apply   = module.access_apply_role.assume_role_policy
+    itest_apply    = module.itest_apply_role.assume_role_policy
   }
 }

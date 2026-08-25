@@ -1,0 +1,126 @@
+name: Data lake integration test
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Deploy components and optionally run the end-to-end test"
+        required: true
+        default: deploy-and-test
+        type: choice
+        options:
+          - deploy-and-test
+          - deploy-only
+          - status
+      row_count:
+        description: "Synthetic Iceberg rows (increase only after the smoke test passes)"
+        required: true
+        default: "1000000"
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: datalake-itest
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.15.8"
+  ALIYUN_CLI_VERSION: "3.4.10"
+  ALIBABA_CLOUD_OIDC_AUDIENCE: github-actions
+  KUBECONFIG: /tmp/datalake-itest-kubeconfig
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    environment: development
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aliyun/setup-aliyun-cli-action@v1
+        with:
+          version: ${{ env.ALIYUN_CLI_VERSION }}
+
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.31.1
+
+      - uses: azure/setup-helm@v4.3.0
+        with:
+          version: v3.16.4
+
+      - id: aliyun-auth
+        name: 使用 GitHub OIDC 获取临时阿里云身份
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ vars.ALIBABA_CLOUD_ITEST_APPLY_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
+          audience: ${{ env.ALIBABA_CLOUD_OIDC_AUDIENCE }}
+          role-session-name: datalake-itest-${{ github.run_id }}
+          role-session-expiration: 3600
+
+      - name: 读取 Terraform 输出
+        run: |
+          set -euo pipefail
+          cat > /tmp/backend.hcl <<EOF
+          bucket              = "${{ vars.TF_STATE_BUCKET }}"
+          region              = "${{ vars.ALIBABA_CLOUD_REGION }}"
+          tablestore_endpoint = "${{ vars.TF_STATE_LOCK_ENDPOINT }}"
+          tablestore_table    = "${{ vars.TF_STATE_LOCK_TABLE }}"
+          encrypt             = true
+          EOF
+          terraform -chdir=infra/tests/datalake init -input=false -backend-config=/tmp/backend.hcl
+          terraform -chdir=infra/tests/datalake output -json > /tmp/datalake-outputs.json
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import json
+
+          outputs = json.load(open("/tmp/datalake-outputs.json", encoding="utf-8"))
+          print(f"ACK_CLUSTER_ID={outputs['cluster_id']['value']}")
+          for key, value in outputs["bucket_names"]["value"].items():
+              print(f"{key.upper()}_BUCKET={value}")
+          PY
+
+      - name: 获取短期 ACK kubeconfig
+        run: |
+          set -euo pipefail
+          aliyun cs DescribeClusterUserKubeconfig \
+            --ClusterId "$ACK_CLUSTER_ID" \
+            --PrivateIpAddress false \
+            --TemporaryDurationMinutes 90 > /tmp/kubeconfig-response.json
+          python3 - <<'PY'
+          import json
+
+          response = json.load(open("/tmp/kubeconfig-response.json", encoding="utf-8"))
+          open("/tmp/datalake-itest-kubeconfig", "w", encoding="utf-8").write(response["config"])
+          PY
+          chmod 600 "$KUBECONFIG"
+          kubectl version --client
+          kubectl get nodes -o wide
+
+      - name: 部署或刷新测试组件
+        if: inputs.action != 'status'
+        env:
+          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ steps.aliyun-auth.outputs.aliyun-access-key-id }}
+          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ steps.aliyun-auth.outputs.aliyun-access-key-secret }}
+          ALIBABA_CLOUD_SECURITY_TOKEN: ${{ steps.aliyun-auth.outputs.aliyun-security-token }}
+          ROW_COUNT: ${{ inputs.row_count }}
+        run: deploy/datalake-itest/deploy.sh
+
+      - name: 运行 Airflow 到 Iceberg 端到端测试
+        if: inputs.action == 'deploy-and-test'
+        run: deploy/datalake-itest/run-test.sh
+
+      - name: 输出集群状态
+        if: always()
+        run: |
+          kubectl get nodes -o wide || true
+          kubectl get pods -A -o wide || true
+          kubectl -n datalake-itest get sparkapplications -o wide || true
