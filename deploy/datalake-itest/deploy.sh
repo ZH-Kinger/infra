@@ -77,7 +77,12 @@ helm repo add --force-update apache-airflow https://airflow.apache.org
 helm repo update
 
 kubectl create namespace spark-operator --dry-run=client -o yaml | kubectl apply -f -
-kubectl apply -f "$root_dir/ivy-settings.yaml"
+kubectl -n spark-operator create configmap spark-operator-ivy-settings \
+  --from-file=ivysettings.xml="$root_dir/ivysettings.xml" \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n datalake-itest create configmap spark-workload-ivy-settings \
+  --from-file=ivysettings.xml="$root_dir/ivysettings.xml" \
+  --dry-run=client -o yaml | kubectl apply -f -
 
 helm upgrade --install spark-operator spark-operator/spark-operator \
   --version 2.5.2 \

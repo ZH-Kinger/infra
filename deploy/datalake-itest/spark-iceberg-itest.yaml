@@ -42,6 +42,9 @@ spec:
     - name: itest-code
       configMap:
         name: datalake-itest-spark-code
+    - name: ivy-settings
+      configMap:
+        name: spark-workload-ivy-settings
   driver:
     cores: 1
     memory: 2g
@@ -51,6 +54,10 @@ spec:
     volumeMounts:
       - name: itest-code
         mountPath: /opt/spark/itest
+      - name: ivy-settings
+        mountPath: /etc/spark-operator/ivysettings.xml
+        subPath: ivysettings.xml
+        readOnly: true
     envFrom:
       - configMapRef:
           name: datalake-itest-runtime
@@ -67,6 +74,10 @@ spec:
     volumeMounts:
       - name: itest-code
         mountPath: /opt/spark/itest
+      - name: ivy-settings
+        mountPath: /etc/spark-operator/ivysettings.xml
+        subPath: ivysettings.xml
+        readOnly: true
     envFrom:
       - configMapRef:
           name: datalake-itest-runtime
