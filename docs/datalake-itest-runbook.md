@@ -519,6 +519,13 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：`application_file` 改为相对模板名 `spark-iceberg-itest.yaml`；ConfigMap 仍将该文件挂载在 DAG
   根目录，不改变 SparkApplication 内容。
 
+### 8.24 Airflow 3 手动运行不能依赖 `ts_nodash`
+
+- 现象：DAG 已被调度，但渲染 SparkApplication 时出现 `UndefinedError: 'ts_nodash' is undefined`。
+- 原因：Airflow 3 的手动 DagRun 不一定具有逻辑日期，因此从逻辑日期派生的 `ts_nodash` 不保证存在。
+- 处理：SparkApplication 使用固定基础名，由 `SparkKubernetesOperator` 默认追加随机后缀；批次号由 CI 的
+  `GITHUB_RUN_ID` 写入运行时 ConfigMap，避免把编排器模板变量混入作业身份。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：

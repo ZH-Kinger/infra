@@ -1,7 +1,7 @@
 apiVersion: sparkoperator.k8s.io/v1beta2
 kind: SparkApplication
 metadata:
-  name: "iceberg-itest-{{ ts_nodash | lower }}"
+  name: iceberg-itest
   namespace: datalake-itest
 spec:
   type: Python
@@ -56,9 +56,6 @@ spec:
           name: datalake-itest-oss-sts
       - secretRef:
           name: datalake-itest-minio
-    env:
-      - name: BATCH_ID
-        value: "itest-{{ ts_nodash | lower }}"
   executor:
     instances: 4
     cores: 2

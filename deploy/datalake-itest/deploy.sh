@@ -58,6 +58,7 @@ kubectl -n datalake-itest create configmap datalake-itest-runtime \
   --from-literal=ICEBERG_BUCKET="$ICEBERG_BUCKET" \
   --from-literal=RESULT_BUCKET="$RESULT_BUCKET" \
   --from-literal=OSS_ENDPOINT="oss-cn-hangzhou-internal.aliyuncs.com" \
+  --from-literal=BATCH_ID="itest-${GITHUB_RUN_ID:-manual}" \
   --from-literal=ROW_COUNT="${ROW_COUNT:-1000000}" \
   --dry-run=client -o yaml | kubectl apply -f -
 

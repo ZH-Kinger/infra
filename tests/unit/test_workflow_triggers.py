@@ -238,6 +238,9 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
             'application_file="/opt/airflow/dags/spark-iceberg-itest.yaml"',
             airflow_dag,
         )
+        self.assertNotIn("ts_nodash", spark)
+        self.assertIn("name: iceberg-itest", spark)
+        self.assertIn('--from-literal=BATCH_ID="itest-${GITHUB_RUN_ID:-manual}"', deploy)
         self.assertIn("registry: ghcr.m.daocloud.io", spark_operator)
         self.assertIn('[ "$phase" = "Pending" ] && [ -z "$storage_class" ]', deploy)
         self.assertNotIn("kubectl -n datalake-itest delete pvc --all", deploy)
