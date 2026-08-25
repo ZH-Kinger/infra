@@ -37,7 +37,12 @@ scheduler:
         name: datalake-itest-airflow-dags
   extraVolumeMounts:
     - name: datalake-itest-dags
-      mountPath: /opt/airflow/dags/repository
+      mountPath: /opt/airflow/dags/datalake_itest.py
+      subPath: datalake_itest.py
+      readOnly: true
+    - name: datalake-itest-dags
+      mountPath: /opt/airflow/dags/spark-iceberg-itest.yaml
+      subPath: spark-iceberg-itest.yaml
       readOnly: true
 
 # LocalExecutor reuses worker persistence settings for scheduler logs.
@@ -69,7 +74,12 @@ dagProcessor:
         name: datalake-itest-airflow-dags
   extraVolumeMounts:
     - name: datalake-itest-dags
-      mountPath: /opt/airflow/dags/repository
+      mountPath: /opt/airflow/dags/datalake_itest.py
+      subPath: datalake_itest.py
+      readOnly: true
+    - name: datalake-itest-dags
+      mountPath: /opt/airflow/dags/spark-iceberg-itest.yaml
+      subPath: spark-iceberg-itest.yaml
       readOnly: true
 
 config:

@@ -492,6 +492,15 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
   `_PIP_ADDITIONAL_REQUIREMENTS`。生产环境若需其他版本，应构建并推送 ACR 镜像，不能在 Pod 启动及
   健康探针时在线执行 pip。
 
+### 8.21 ConfigMap 目录挂载触发 DAG 扫描软链接环
+
+- 现象：DAG Processor 已看到 ConfigMap volume，但启动时返回 `Detected recursive loop when walking
+  DAG directory`，路径指向 Kubernetes 原子卷生成的 `..2026_*` 和 `..data` 软链接。
+- 根因：将整个 ConfigMap 目录挂到 `/opt/airflow/dags` 的子目录，会把原子更新使用的隐藏软链接一起
+  暴露给 Airflow 3 文件扫描器。
+- 处理：继续复用同一个 ConfigMap volume，但通过 `subPath` 将 Python DAG 和 SparkApplication 模板
+  分别挂载为普通文件；Scheduler 与 DAG Processor 使用相同的两个目标路径。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：
