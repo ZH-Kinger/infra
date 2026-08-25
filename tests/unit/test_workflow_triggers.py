@@ -189,6 +189,14 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn('"ram:Delete*"', policy)
         self.assertNotIn('Action   = ["ram:*"', policy)
 
+    def test_datalake_itest_sets_region_for_ack_cli(self):
+        workflow = self._read("datalake-itest.yml")
+        self.assertIn("ALIBABA_CLOUD_REGION: ${{ vars.ALIBABA_CLOUD_REGION }}", workflow)
+        self.assertIn(
+            'aliyun --region "$ALIBABA_CLOUD_REGION" cs DescribeClusterUserKubeconfig',
+            workflow,
+        )
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
