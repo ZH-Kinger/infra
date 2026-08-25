@@ -1,3 +1,6 @@
+image:
+  registry: ghcr.m.daocloud.io
+
 controller:
   replicas: 2
   nodeSelector:

@@ -429,8 +429,9 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 根因：MinIO `volumeClaimTemplates` 未声明 `storageClassName`；国内节点直接访问 Docker Hub 不是稳定
   的可重复实验依赖。
 - 处理：MinIO PVC 显式使用 `alicloud-disk-essd`；MinIO/MC 使用官方 Quay，Spark、Airflow 与 PostgreSQL
-  使用已在相同 ACK 节点完成拉取探针的国内镜像代理。部署脚本只清理“Pending 且 storageClass 为空”的
-  失败测试 PVC，绝不删除 Bound 数据卷。
+  使用已在相同 ACK 节点完成拉取探针的国内镜像代理；Spark Operator 的 GHCR registry 同样切换到
+  `ghcr.m.daocloud.io`，独立节点拉取探针约一分钟完成。部署脚本只清理“Pending 且 storageClass 为空”
+  的失败测试 PVC，绝不删除 Bound 数据卷。
 
 ## 9. 当前实验状态
 
