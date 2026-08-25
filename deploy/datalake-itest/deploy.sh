@@ -130,4 +130,4 @@ helm upgrade --install airflow apache-airflow/airflow \
   --wait --timeout 25m
 
 kubectl apply -f "$root_dir/namespace-rbac.yaml"
-kubectl -n airflow rollout status deployment/airflow-scheduler --timeout=10m
+kubectl -n airflow rollout status statefulset/airflow-scheduler --timeout=10m

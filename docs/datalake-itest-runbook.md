@@ -462,6 +462,15 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：设置 `migrateDatabaseJob.useHelmHooks=false`，让迁移任务作为普通 Kubernetes Job
   与工作负载一起创建。迁移完成后 init container 自行放行，Helm 再完成 Ready 验收。
 
+### 8.18 LocalExecutor Scheduler 的资源类型
+
+- 现象：Airflow Helm release 已显示 `STATUS: deployed`，全部 Pod Ready，但部署脚本最后返回
+  `deployments.apps "airflow-scheduler" not found`。
+- 根因：启用 LocalExecutor 和 scheduler 日志持久化后，官方 Chart 将 Scheduler 渲染为
+  StatefulSet，而验收命令误按 Deployment 查询。
+- 处理：改为 `kubectl rollout status statefulset/airflow-scheduler`；该检查只验证就绪状态，
+  不改变工作负载。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：
