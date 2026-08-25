@@ -202,9 +202,7 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         minio = (root / "minio.yaml").read_text(encoding="utf-8")
         spark = (root / "spark-iceberg-itest.yaml").read_text(encoding="utf-8")
         airflow = (root / "airflow-values.yaml").read_text(encoding="utf-8")
-        airflow_dag = (root / "dags" / "datalake_itest.py").read_text(
-            encoding="utf-8"
-        )
+        airflow_dag = (root / "dags" / "datalake_itest.py").read_text(encoding="utf-8")
         spark_operator = (root / "spark-operator-values.yaml").read_text(encoding="utf-8")
         deploy = (root / "deploy.sh").read_text(encoding="utf-8")
         run_test = (root / "run-test.sh").read_text(encoding="utf-8")
