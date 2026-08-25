@@ -369,6 +369,15 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：Plan 角色仅增加 `ots:DescribeTable` 和 `ots:ListTable`；不恢复 `PutRow/DeleteRow`，继续保证 Plan
   无法获取、修改或释放锁记录。
 
+### 8.9 vSwitch 创建不支持 RequestTag 条件
+
+- 阶段：VPC 已成功创建并进入 state，创建 vSwitch 时失败。
+- 现象：策略允许 `vpc:CreateVSwitch`，但带 `acs:RequestTag/Environment=itest` 条件后仍返回
+  `Forbidden.RAM`。
+- 根因：当前 Provider/API 创建 vSwitch 的调用没有向 RAM 条件评估暴露 RequestTag，条件无法命中。
+- 处理：仅将 `vpc:CreateVSwitch` 的创建动作设为无标签条件；`DeleteVSwitch`、修改和标签操作继续要求
+  `acs:ResourceTag/Environment=itest`。因此角色可以创建测试 vSwitch，但不能修改或删除未标记的现有网络。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：
