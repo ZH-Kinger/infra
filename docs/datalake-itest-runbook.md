@@ -35,7 +35,7 @@ LeRobot v3 数据处理、训练集群读取。这些项目要在基础链路通
 | Airflow | `3.2.2`，LocalExecutor |
 | Spark Operator | `2.5.2` |
 | Spark | `3.5.5` |
-| Iceberg | `1.11.0` |
+| Iceberg | `1.10.2`（Java 11 兼容） |
 | Hadoop Aliyun Connector | `3.3.4` |
 | 首轮数据规模 | 1,000,000 行合成 episode 索引 |
 | Spark 并行度 | 4 executors × 2 cores；每个 executor 6 GiB |
@@ -340,7 +340,7 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 
 - 阶段：Spark 作业设计。
 - 风险：Spark 镜像本身不包含 Iceberg Runtime 和 Hadoop Aliyun Connector；短期 STS 还会过期。
-- 处理：作业固定下载 `iceberg-spark-runtime-3.5_2.12:1.11.0` 和 `hadoop-aliyun:3.3.4`，使用
+- 处理：作业固定下载 `iceberg-spark-runtime-3.5_2.12:1.10.2` 和 `hadoop-aliyun:3.3.4`，使用
   `org.apache.hadoop.fs.aliyun.oss.AliyunCredentialsProvider`。每次部署都刷新 Secret，不复用过期会话。
 - 复现判断：若 Maven 下载失败，Driver 会在业务代码前失败；若 STS 过期，OSS 请求会出现认证错误。两者要分开排查。
 
@@ -552,6 +552,14 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
   命名空间的 ConfigMap 不能直接挂到数据作业命名空间。
 - 处理：从同一份版本化 `ivysettings.xml` 在两个命名空间分别生成 ConfigMap；控制器、Driver 和 Executor
   均挂载到相同路径，确保提交端与运行端使用同一依赖源。
+
+### 8.28 Spark 3.5 镜像与 Iceberg 1.11 的 Java 版本不兼容
+
+- 现象：Driver 与四个 Executor 均已启动，但首次执行 Iceberg SQL 时出现
+  `UnsupportedClassVersionError`；Iceberg 类版本为 61，运行时只支持到 55。
+- 原因：当前 `apache/spark:3.5.5` 使用 Java 11；Iceberg 1.11 已移除 Java 11 支持并要求 Java 17。
+- 处理：测试矩阵锁定 Spark 3.5.5 + Java 11 + Iceberg 1.10.2。若未来确实需要 Iceberg 1.11，再整体升级
+  到经过验证的 Java 17 Spark 镜像，不在同一次实验中同时改变计算引擎与表格式版本。
 
 ## 9. 当前实验状态
 
