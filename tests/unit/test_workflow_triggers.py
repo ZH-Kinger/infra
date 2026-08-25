@@ -210,9 +210,7 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn("docker.m.daocloud.io/apache/airflow", airflow)
         self.assertIn("docker.m.daocloud.io\n    repository: bitnamilegacy/postgresql", airflow)
         self.assertIn("storageClass: alicloud-disk-essd", airflow)
-        self.assertGreaterEqual(
-            airflow.count("storageClassName: alicloud-disk-essd"), 2
-        )
+        self.assertGreaterEqual(airflow.count("storageClassName: alicloud-disk-essd"), 2)
         self.assertIn("repair_airflow_pvcs=false", deploy)
         self.assertIn("registry: ghcr.m.daocloud.io", spark_operator)
         self.assertIn('[ "$phase" = "Pending" ] && [ -z "$storage_class" ]', deploy)
