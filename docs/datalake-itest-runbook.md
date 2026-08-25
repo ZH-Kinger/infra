@@ -453,6 +453,15 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
   `pending-upgrade` 或 `pending-rollback` 时卸载该未完成 release，再执行全新安装。正常
   `deployed` release 仍走原地升级。
 
+### 8.17 Helm --wait 与 Airflow 迁移 Hook 循环等待
+
+- 现象：三个 ESSD PVC 均已 Bound，PostgreSQL Ready，但应用 Pod 的
+  `wait-for-airflow-migrations` init container 持续重试，集群中没有迁移 Job。
+- 根因：迁移任务默认是 `post-install` Helm Hook；启用 `helm --wait` 后，Helm 先等待应用
+  Pod Ready，而应用 Pod 又等待尚未执行的迁移 Hook，形成循环依赖。
+- 处理：设置 `migrateDatabaseJob.useHelmHooks=false`，让迁移任务作为普通 Kubernetes Job
+  与工作负载一起创建。迁移完成后 init container 自行放行，Helm 再完成 Ready 验收。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：

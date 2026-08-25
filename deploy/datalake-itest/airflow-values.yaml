@@ -77,3 +77,8 @@ config:
 createUserJob:
   defaultUser:
     enabled: false
+
+# Avoid a --wait/post-install deadlock: application init containers wait for
+# migrations, so the migration job must be created as a regular resource.
+migrateDatabaseJob:
+  useHelmHooks: false
