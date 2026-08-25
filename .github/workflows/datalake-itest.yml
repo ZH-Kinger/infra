@@ -89,9 +89,11 @@ jobs:
           PY
 
       - name: 获取短期 ACK kubeconfig
+        env:
+          ALIBABA_CLOUD_REGION: ${{ vars.ALIBABA_CLOUD_REGION }}
         run: |
           set -euo pipefail
-          aliyun cs DescribeClusterUserKubeconfig \
+          aliyun --region "$ALIBABA_CLOUD_REGION" cs DescribeClusterUserKubeconfig \
             --ClusterId "$ACK_CLUSTER_ID" \
             --PrivateIpAddress false \
             --TemporaryDurationMinutes 90 > /tmp/kubeconfig-response.json

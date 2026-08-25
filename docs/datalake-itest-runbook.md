@@ -411,6 +411,16 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 验收：已有 ACK 集群及节点池的 refresh 全部完成，Plan 可以进入 diff 计算；策略变更不应引入
   任何 `cs:Create*`、`cs:Update*` 或 `cs:Delete*` Allow。
 
+### 8.13 OIDC 凭证不会自动为 aliyun CLI 设置区域
+
+- 阶段：9 台 ECS 已创建并加入 ACK 后，首次运行数据湖集成工作流。
+- 现象：`DescribeClusterUserKubeconfig` 在发出 API 请求前报 `region can't be empty`；MinIO、Spark 和
+  Airflow 均尚未部署。
+- 根因：GitHub OIDC Action 只导出短期 AccessKey 与 SecurityToken，不会为 aliyun CLI 配置默认区域。
+  Terraform Provider 从 backend/变量获得区域，不能推断 CLI 子进程也具备相同配置。
+- 处理：kubeconfig 命令显式使用 `aliyun --region "$ALIBABA_CLOUD_REGION"`，区域仍来自受控的 GitHub
+  Environment 变量；增加工作流契约测试防止参数再次丢失。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：
