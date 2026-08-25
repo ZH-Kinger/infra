@@ -359,44 +359,49 @@ locals {
           }
         },
         {
-          Sid      = "CreateDisposableACKCluster"
+          # Match Alibaba Cloud's published ACK lifecycle permission baseline.
+          # The role is dedicated to the disposable integration environment and
+          # its trust policy only accepts this repository's development
+          # Environment subject. Keeping the complete ACK API surface here avoids
+          # create succeeding and a later refresh, node-pool or cleanup call
+          # failing because the provider used a newly introduced CS action.
+          Sid      = "ManageACKIntegrationLifecycle"
           Effect   = "Allow"
-          Action   = ["cs:CreateCluster"]
-          Resource = ["acs:cs:${var.region}:${local.account_id}:cluster/*"]
-          Condition = {
-            StringEquals = {
-              "acs:RequestTag/Environment" = "itest"
-            }
-          }
-        },
-        {
-          Sid    = "ManageDisposableACKCluster"
-          Effect = "Allow"
-          Action = [
-            "cs:DeleteCluster",
-            "cs:ModifyCluster",
-            "cs:CreateClusterNodePool",
-            "cs:ModifyClusterNodePool",
-            "cs:DeleteClusterNodepool",
-            "cs:ScaleClusterNodePool",
-          ]
-          Resource = ["acs:cs:${var.region}:${local.account_id}:cluster/*"]
-          Condition = {
-            StringEquals = {
-              "acs:ResourceTag/Environment" = "itest"
-            }
-          }
-        },
-        {
-          Sid      = "ReadACKVersionMetadata"
-          Effect   = "Allow"
-          Action   = ["cs:DescribeKubernetesVersionMetadata"]
+          Action   = ["cs:*"]
           Resource = ["*"]
         },
         {
-          Sid      = "DenyIdentityWrites"
-          Effect   = "Deny"
-          Action   = ["ram:*", "ims:*"]
+          # AliyunCSFullAccess also contains this narrowly conditioned PassRole.
+          # ACK uses it for its service/worker roles; it does not permit passing a
+          # role to ECS, Function Compute, or any service other than ACK.
+          Sid      = "PassRolesOnlyToACK"
+          Effect   = "Allow"
+          Action   = ["ram:PassRole"]
+          Resource = ["*"]
+          Condition = {
+            StringEquals = {
+              "acs:Service" = "cs.aliyuncs.com"
+            }
+          }
+        },
+        {
+          # Keep all identity and policy administration forbidden while leaving
+          # the single service-conditioned PassRole above usable.
+          Sid    = "DenyIdentityAdministration"
+          Effect = "Deny"
+          Action = [
+            "ram:Create*",
+            "ram:Update*",
+            "ram:Delete*",
+            "ram:Attach*",
+            "ram:Detach*",
+            "ram:Add*",
+            "ram:Remove*",
+            "ram:Set*",
+            "ram:Change*",
+            "ram:Upload*",
+            "ims:*",
+          ]
           Resource = ["*"]
         },
       ],

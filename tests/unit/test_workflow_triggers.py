@@ -167,6 +167,20 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn('Action = "sts:AssumeRole"', module)
         self.assertNotIn('Action = "sts:AssumeRoleWithOIDC"', module)
 
+    def test_itest_role_covers_ack_lifecycle_without_identity_admin(self):
+        bootstrap = Path("infra/bootstrap/oidc.tf").read_text(encoding="utf-8")
+        policy = bootstrap.split("  itest_apply_policy = jsonencode({", 1)[1].split(
+            "  # -------------------------------------------------------------------------\n"
+            "  # TerraformAccessApplyRole",
+            1,
+        )[0]
+        self.assertIn('Action   = ["cs:*"]', policy)
+        self.assertIn('Action   = ["ram:PassRole"]', policy)
+        self.assertIn('"acs:Service" = "cs.aliyuncs.com"', policy)
+        self.assertIn('"ram:Create*"', policy)
+        self.assertIn('"ram:Delete*"', policy)
+        self.assertNotIn('Action   = ["ram:*"', policy)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
