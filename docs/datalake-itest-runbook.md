@@ -433,6 +433,16 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
   `ghcr.m.daocloud.io`，独立节点拉取探针约一分钟完成。部署脚本只清理“Pending 且 storageClass 为空”
   的失败测试 PVC，绝不删除 Bound 数据卷。
 
+### 8.15 Airflow 三类 PVC 未绑定
+
+- 阶段：MinIO 与 Spark Operator 就绪后的 Airflow Helm 安装。
+- 现象：PostgreSQL、LocalExecutor Scheduler 和 Triggerer PVC 均为 Pending，事件为
+  `no storage class is set`。
+- 根因：这三类持久卷分别由 PostgreSQL 子 Chart、worker/LocalExecutor 和 Triggerer 参数控制，
+  不能依赖 ACK 存在默认 StorageClass。
+- 处理：三处均显式指定 `alicloud-disk-essd`。部署脚本仅在测试 PVC 同时满足“Pending 且
+  storageClass 为空”时删除对应 StatefulSet 和 PVC 以重建；已绑定卷不受影响。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：
