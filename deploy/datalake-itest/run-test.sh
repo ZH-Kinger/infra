@@ -26,6 +26,8 @@ if [ "$dag_ready" != true ]; then
 fi
 
 kubectl -n airflow exec statefulset/airflow-scheduler -- \
+  airflow dags unpause "$dag_id"
+kubectl -n airflow exec statefulset/airflow-scheduler -- \
   airflow dags trigger "$dag_id"
 
 application=""
