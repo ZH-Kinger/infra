@@ -214,6 +214,7 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn("repair_airflow_pvcs=false", deploy)
         self.assertIn("pending-install|pending-upgrade|pending-rollback", deploy)
         self.assertIn("helm uninstall airflow --namespace airflow", deploy)
+        self.assertIn("migrateDatabaseJob:\n  useHelmHooks: false", airflow)
         self.assertIn("registry: ghcr.m.daocloud.io", spark_operator)
         self.assertIn('[ "$phase" = "Pending" ] && [ -z "$storage_class" ]', deploy)
         self.assertNotIn("kubectl -n datalake-itest delete pvc --all", deploy)
