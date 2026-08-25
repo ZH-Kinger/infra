@@ -360,6 +360,15 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
   无依赖的孤立 VPC，避免留下重复网络和计费附属资源。
 - 修复验收：新的 Plan 必须只包含剩余资源，且 Apply 可以完成 VPC 创建后的 refresh。
 
+### 8.8 Plan 禁用锁仍需读取锁表元数据
+
+- 阶段：修复 VPC/OSS 只读权限后的 Plan backend 初始化。
+- 现象：工作流使用 `terraform plan -lock=false`，但 OSS backend 初始化仍因 `OTSNoPermissionAccess` 无法
+  `DescribeTable`。
+- 根因：`-lock=false` 禁止获取状态锁，不代表 backend 不读取锁表是否存在及其元数据。
+- 处理：Plan 角色仅增加 `ots:DescribeTable` 和 `ots:ListTable`；不恢复 `PutRow/DeleteRow`，继续保证 Plan
+  无法获取、修改或释放锁记录。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：

@@ -94,6 +94,15 @@ locals {
     Resource = [local.lock_table_arn]
   }
 
+  # The OSS backend inspects the lock table during init even when `plan` runs
+  # with -lock=false. Keep this metadata-only; PlanRole must not write rows.
+  state_lock_read_statement = {
+    Sid      = "ReadStateLockMetadata"
+    Effect   = "Allow"
+    Action   = ["ots:DescribeTable", "ots:ListTable"]
+    Resource = [local.lock_table_arn]
+  }
+
   state_write_statement = {
     Sid      = "WriteState"
     Effect   = "Allow"
@@ -154,6 +163,7 @@ locals {
     Statement = concat(
       local.state_read_statements,
       [
+        local.state_lock_read_statement,
         local.read_only_statement,
         {
           # 兜底：即使上面的 Allow 写宽了，这条 Deny 也保证 plan 角色改不动任何东西。
