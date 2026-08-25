@@ -202,6 +202,9 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         minio = (root / "minio.yaml").read_text(encoding="utf-8")
         spark = (root / "spark-iceberg-itest.yaml").read_text(encoding="utf-8")
         airflow = (root / "airflow-values.yaml").read_text(encoding="utf-8")
+        airflow_dag = (root / "dags" / "datalake_itest.py").read_text(
+            encoding="utf-8"
+        )
         spark_operator = (root / "spark-operator-values.yaml").read_text(encoding="utf-8")
         deploy = (root / "deploy.sh").read_text(encoding="utf-8")
         run_test = (root / "run-test.sh").read_text(encoding="utf-8")
@@ -232,6 +235,11 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn("dagProcessor:\n  extraVolumes:", airflow)
         self.assertIn('dags_are_paused_at_creation: "False"', airflow)
         self.assertNotIn("_PIP_ADDITIONAL_REQUIREMENTS", airflow)
+        self.assertIn('application_file="spark-iceberg-itest.yaml"', airflow_dag)
+        self.assertNotIn(
+            'application_file="/opt/airflow/dags/spark-iceberg-itest.yaml"',
+            airflow_dag,
+        )
         self.assertIn("registry: ghcr.m.daocloud.io", spark_operator)
         self.assertIn('[ "$phase" = "Pending" ] && [ -z "$storage_class" ]', deploy)
         self.assertNotIn("kubectl -n datalake-itest delete pvc --all", deploy)

@@ -25,7 +25,9 @@ with DAG(
     SparkKubernetesOperator(
         task_id="spark_iceberg_round_trip",
         namespace="datalake-itest",
-        application_file="/opt/airflow/dags/spark-iceberg-itest.yaml",
+        # YAML files are Jinja templates. Resolve this name relative to the
+        # DAG directory instead of passing an absolute template name.
+        application_file="spark-iceberg-itest.yaml",
         kubernetes_conn_id="kubernetes_default",
         in_cluster=True,
         get_logs=True,
