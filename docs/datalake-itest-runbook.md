@@ -480,6 +480,18 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：触发和日志命令统一改为 `statefulset/airflow-scheduler`，并增加契约测试，保证部署与运行脚本
   不再对同一组件使用不同资源类型。
 
+### 8.20 Airflow 3 独立 DAG Processor 未继承顶层挂载
+
+- 现象：Airflow 全部 Pod Ready，但触发命令返回 `DagNotFound`；DAG Processor 日志显示
+  `Found 0 files`。ConfigMap 中两个文件存在，Pod 却没有对应 volume 和 mount。
+- 根因：官方 Chart 1.22.0 按组件配置额外卷；顶层 `extraVolumes`/`extraVolumeMounts` 不会自动传递给
+  Airflow 3 的独立 DAG Processor。LocalExecutor 的 Scheduler 执行任务时也必须看到同一路径。
+- 处理：将 DAG ConfigMap 分别挂载到 `dagProcessor` 和 `scheduler`；端到端脚本在触发前最多等待
+  五分钟确认 DAG 已进入 `DagModel`，超时输出导入错误和 Processor 日志。
+- 补充：官方 Airflow 3.2.2 镜像已包含 Kubernetes provider，删除测试期的
+  `_PIP_ADDITIONAL_REQUIREMENTS`。生产环境若需其他版本，应构建并推送 ACR 镜像，不能在 Pod 启动及
+  健康探针时在线执行 pip。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：

@@ -31,6 +31,14 @@ scheduler:
   serviceAccount:
     create: true
     name: airflow-scheduler
+  extraVolumes:
+    - name: datalake-itest-dags
+      configMap:
+        name: datalake-itest-airflow-dags
+  extraVolumeMounts:
+    - name: datalake-itest-dags
+      mountPath: /opt/airflow/dags/repository
+      readOnly: true
 
 # LocalExecutor reuses worker persistence settings for scheduler logs.
 workers:
@@ -54,19 +62,15 @@ dags:
   gitSync:
     enabled: false
 
-extraVolumes:
-  - name: datalake-itest-dags
-    configMap:
-      name: datalake-itest-airflow-dags
-
-extraVolumeMounts:
-  - name: datalake-itest-dags
-    mountPath: /opt/airflow/dags/repository
-    readOnly: true
-
-env:
-  - name: _PIP_ADDITIONAL_REQUIREMENTS
-    value: "apache-airflow-providers-cncf-kubernetes==10.20.0"
+dagProcessor:
+  extraVolumes:
+    - name: datalake-itest-dags
+      configMap:
+        name: datalake-itest-airflow-dags
+  extraVolumeMounts:
+    - name: datalake-itest-dags
+      mountPath: /opt/airflow/dags/repository
+      readOnly: true
 
 config:
   core:

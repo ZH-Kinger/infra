@@ -2,9 +2,31 @@
 set -eu
 
 started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+dag_id=datalake_spark_iceberg_itest
+
+dag_ready=false
+attempt=0
+while [ "$attempt" -lt 60 ]; do
+  if kubectl -n airflow exec statefulset/airflow-scheduler -- \
+    airflow dags list 2>/dev/null | grep -Fq "$dag_id"; then
+    dag_ready=true
+    break
+  fi
+  attempt=$((attempt + 1))
+  sleep 5
+done
+
+if [ "$dag_ready" != true ]; then
+  printf 'Airflow did not register DAG %s within five minutes.\n' "$dag_id" >&2
+  kubectl -n airflow exec statefulset/airflow-scheduler -- \
+    airflow dags list-import-errors >&2 || true
+  kubectl -n airflow logs deployment/airflow-dag-processor \
+    --tail=300 >&2 || true
+  exit 1
+fi
 
 kubectl -n airflow exec statefulset/airflow-scheduler -- \
-  airflow dags trigger datalake_spark_iceberg_itest
+  airflow dags trigger "$dag_id"
 
 application=""
 attempt=0
