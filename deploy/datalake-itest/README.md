@@ -4,6 +4,9 @@ This directory validates the smallest production-shaped path before the physical
 
 `Airflow -> Spark Operator -> Spark -> Iceberg -> private OSS buckets`.
 
+The reproducible experiment procedure, evidence checklist and known-issue log are in
+[`docs/datalake-itest-runbook.md`](../../docs/datalake-itest-runbook.md).
+
 The ACK Pro cluster and buckets are declared in `infra/tests/datalake`. Terraform changes are planned and
 applied only by the repository workflow. The deployment workflow obtains a short-lived ACK kubeconfig and
 short-lived Alibaba Cloud STS credentials through GitHub OIDC; no long-lived AccessKey is stored. The temporary

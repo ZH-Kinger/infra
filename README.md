@@ -55,6 +55,7 @@ The primary rule is:
 | Understand permission isolation and privilege escalation controls | [Permission model](docs/permissions.md) |
 | Understand pipelines and approvals | [CI/CD](docs/cicd.md) |
 | Initialize or troubleshoot an environment | [Operations runbook](docs/runbook.md) |
+| Reproduce the ACK/Airflow/Spark/Iceberg integration experiment | [Data lake integration runbook](docs/datalake-itest-runbook.md) |
 | Migrate existing CPFS directories into Filesets | [Fileset migration](docs/cpfs-fileset-migration.md) |
 | Evaluate or add another region | [Multi-region boundaries](docs/multi-region.md) |
 | Contribute to this repository | [Repository conventions](AGENTS.md) |
