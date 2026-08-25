@@ -135,12 +135,9 @@ locals {
       "paidataset:GetDataset",
       "paidataset:ListDatasets",
       "paidataset:ListDatasetVersions",
-      "vpc:DescribeVpcs",
-      "vpc:DescribeVSwitches",
-      "vpc:DescribeNatGateways",
-      "vpc:DescribeRouteTables",
-      "vpc:DescribeRouteEntryList",
-      "vpc:DescribeEipAddresses",
+      # The provider refreshes newly created resources through singular
+      # Attribute APIs (for example DescribeVpcAttribute), not only list APIs.
+      "vpc:Describe*",
       "ecs:Describe*",
       "cs:Describe*",
     ]

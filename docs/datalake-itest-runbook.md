@@ -350,6 +350,16 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 结果：2026-08-25 检查杭州 K 区时，配置中的六个候选规格均返回 `Available/WithStock`。
 - 注意：该结果只代表当时库存。Plan 或 Apply 间隔过长仍可能售罄，因此变量使用按顺序回退的实例列表。
 
+### 8.7 VPC 创建成功后因刷新权限失败
+
+- 阶段：首次 4 CPU + 5 存储拓扑 Apply。
+- 现象：VPC 创建 API 成功，但 Terraform 随后的 `DescribeVpcAttribute` 返回 `Forbidden.RAM`；四个 OSS
+  Bucket 已进入 state，VPC 因创建后读取失败成为 state 外孤立资源。
+- 根因：最小权限策略只列出了部分 VPC List/Describe API，未覆盖 Provider 创建后的单资源 Attribute 查询。
+- 处理：只读观测面改为 `vpc:Describe*`；在重试前按资源 ID、名称和 `Environment=itest` 标签核验并删除
+  无依赖的孤立 VPC，避免留下重复网络和计费附属资源。
+- 修复验收：新的 Plan 必须只包含剩余资源，且 Apply 可以完成 VPC 创建后的 refresh。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：
