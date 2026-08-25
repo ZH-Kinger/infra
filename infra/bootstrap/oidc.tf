@@ -309,18 +309,24 @@ locals {
           Resource = local.itest_bucket_arns
         },
         {
-          Sid    = "CreateDisposableTestNetwork"
-          Effect = "Allow"
-          Action = [
-            "vpc:CreateVpc",
-            "vpc:CreateVSwitch",
-          ]
+          Sid      = "CreateDisposableTestNetwork"
+          Effect   = "Allow"
+          Action   = ["vpc:CreateVpc"]
           Resource = ["*"]
           Condition = {
             StringEquals = {
               "acs:RequestTag/Environment" = "itest"
             }
           }
+        },
+        {
+          # CreateVSwitch does not expose request tags to RAM evaluation in
+          # this provider/API path. Creation is the only unconditional action;
+          # every subsequent mutation remains resource-tag constrained.
+          Sid      = "CreateDisposableTestVSwitch"
+          Effect   = "Allow"
+          Action   = ["vpc:CreateVSwitch"]
+          Resource = ["*"]
         },
         {
           Sid    = "ManageDisposableTestNetwork"
