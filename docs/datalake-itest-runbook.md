@@ -386,15 +386,27 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：首次 `TagResources` 改用 `acs:RequestTag/Environment=itest`；删除、修改和取消标签仍使用
   `acs:ResourceTag/Environment=itest`。失败遗留的无标签 vSwitch 经确认无 ECS 依赖后已删除。
 
+### 8.11 ACK 权限必须按完整生命周期审计
+
+- 阶段：vSwitch 权限修复后、首次 ACK Create 之前的主动审计。
+- 发现：原策略逐项允许 `CreateCluster`、节点池增删改等动作，却遗漏了 ACK 系统权限基线包含的
+  `ram:PassRole`；同时 `Deny ram:*` 会覆盖后续新增的 Allow。继续按 API 报错逐项补权限会造成多轮
+  bootstrap，并可能在创建成功后卡在刷新、取 kubeconfig 或销毁阶段。
+- 处理：专用 `TerraformITestApplyRole` 按阿里云 `AliyunCSFullAccess` 的动作基线允许 `cs:*`，并只在
+  `acs:Service=cs.aliyuncs.com` 时允许 `ram:PassRole`。RAM 角色、策略和 OIDC 身份的创建、修改、绑定与
+  删除仍由显式 Deny 禁止。角色的 OIDC 信任仍只接受本仓库受保护的 `development` Environment。
+- 验收：单元测试同时断言 ACK 全生命周期、受限 PassRole 和身份管理 Deny，避免将来再次误改为
+  `Deny ram:*` 而破坏 ACK。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：
 
 - 第一版 3+3 拓扑的本地校验和云端 Terraform Plan 已通过：`13 add / 0 change / 0 destroy`；
-- 4 CPU + 5 存储 ECS 拓扑正在独立变更中，必须取得新的 Plan 后才可 Apply；
+- 4 CPU + 5 存储 ECS 拓扑已进入云端创建阶段；VPC 与四个 OSS Bucket 已在 Terraform state 中；
 - ACK 默认服务角色已完成授权，可创建 Kubernetes 集群；
 - 尚未创建 ACK/ECS，尚未产生真实 Spark/Iceberg 运行结果；
-- 当前唯一权限阻塞项是第 8.2 节的 `TerraformITestApplyRole` 管理员 bootstrap。
+- ACK 完整生命周期权限已在第 8.11 节统一审计，策略更新后再继续剩余资源 Apply。
 
 后续记录必须区分 `PLAN PASSED` 与 `RUNTIME PASSED`，不能把 Terraform Plan 成功写成数据湖链路已经通过。
 
