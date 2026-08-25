@@ -85,6 +85,7 @@ dagProcessor:
 config:
   core:
     load_examples: "False"
+    dags_are_paused_at_creation: "False"
   scheduler:
     standalone_dag_processor: "False"
 

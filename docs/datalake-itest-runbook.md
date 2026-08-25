@@ -501,6 +501,15 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：继续复用同一个 ConfigMap volume，但通过 `subPath` 将 Python DAG 和 SparkApplication 模板
   分别挂载为普通文件；Scheduler 与 DAG Processor 使用相同的两个目标路径。
 
+### 8.22 新 DAG 默认暂停导致手工运行不调度
+
+- 现象：`airflow dags list` 已显示测试 DAG，且导入错误为零，但五分钟内没有创建 SparkApplication；
+  DAG 状态为 `is_paused=True`。
+- 根因：Airflow 默认暂停首次发现的 DAG。触发命令可以创建 DagRun，但 Scheduler 不会为暂停 DAG
+  调度任务。
+- 处理：测试环境设置 `dags_are_paused_at_creation=False`；运行脚本仍在触发前显式执行 `dags unpause`，
+  兼容数据库中已经按旧配置创建的 DagModel。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：
