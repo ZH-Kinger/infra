@@ -17,6 +17,10 @@ resource "alicloud_ims_oidc_provider" "github" {
 
 locals {
   account_id = data.alicloud_account.current.id
+  # Keep the one-time integration role independently targetable during bootstrap.
+  # The provider already exists; constructing its stable ARN avoids pulling an
+  # unrelated provider-description update into the recovery/bootstrap plan.
+  github_oidc_provider_arn = "acs:ram::${local.account_id}:oidc-provider/${var.oidc_provider_name}"
 
   platform_apply_subjects = [
     for environment in var.platform_github_environments :
@@ -563,7 +567,7 @@ module "itest_apply_role" {
   role_name   = "TerraformITestApplyRole"
   description = "Disposable data-lake integration tests: ACK, VPC and prefix-scoped OSS only"
 
-  oidc_provider_arn = alicloud_ims_oidc_provider.github.arn
+  oidc_provider_arn = local.github_oidc_provider_arn
   audience          = var.oidc_audience
   subjects = [
     "repo:${var.github_oidc_repo}:environment:development",

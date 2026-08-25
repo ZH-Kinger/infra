@@ -2,7 +2,13 @@ name: Terraform
 
 on:
   pull_request:
-    paths: ["infra/**", ".github/workflows/terraform.yml"]
+    # bootstrap owns the OIDC trust anchor and CI roles and is deliberately
+    # administrator-operated. Do not route bootstrap-only PRs into an
+    # unrelated environment plan.
+    paths:
+      - "infra/envs/**"
+      - "infra/tests/**"
+      - ".github/workflows/terraform.yml"
   workflow_dispatch:
     inputs:
       target:
@@ -46,6 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      has_layers: ${{ steps.matrix.outputs.has_layers }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,7 +67,7 @@ jobs:
           all='[{"dir":"infra/envs/dev/platform","layer":"dev-platform","tfvars_var":"TFVARS_DEV_PLATFORM_JSON","environment":"development","role_var":"ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN"},{"dir":"infra/envs/dev/access","layer":"dev-access","tfvars_var":"TFVARS_DEV_ACCESS_JSON","environment":"development","role_var":"ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN"},{"dir":"infra/envs/prod/platform","layer":"prod-platform","tfvars_var":"TFVARS_PROD_PLATFORM_JSON","environment":"production","role_var":"ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN"},{"dir":"infra/envs/prod/access","layer":"prod-access","tfvars_var":"TFVARS_PROD_ACCESS_JSON","environment":"production-access","role_var":"ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN"},{"dir":"infra/tests/datalake","layer":"itest-datalake","tfvars_var":"TFVARS_ITEST_DATALAKE_JSON","environment":"development","role_var":"ALIBABA_CLOUD_ITEST_APPLY_ROLE_ARN"}]'
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             git diff --name-only "origin/$BASE_REF...HEAD" > /tmp/changed-files
-            selected=$(printf '%s' "$all" | python3 -c 'import json,sys; items=json.load(sys.stdin); changed=open("/tmp/changed-files", encoding="utf-8").read().splitlines(); chosen=[x for x in items if any(p == x["dir"] or p.startswith(x["dir"] + "/") for p in changed)]; print(json.dumps(chosen or [next(x for x in items if x["layer"] == "dev-platform")], separators=(",", ":")))')
+            selected=$(printf '%s' "$all" | python3 -c 'import json,sys; items=json.load(sys.stdin); changed=open("/tmp/changed-files", encoding="utf-8").read().splitlines(); chosen=[x for x in items if any(p == x["dir"] or p.startswith(x["dir"] + "/") for p in changed)]; print(json.dumps(chosen or [{"dir":".","layer":"none","tfvars_var":"","environment":"","role_var":""}], separators=(",", ":")))')
           elif [ "$TARGET" = "all" ]; then
             selected=$all
           else
@@ -70,11 +77,17 @@ jobs:
             echo "::error::未知 target: $TARGET"
             exit 1
           fi
+          if printf '%s' "$selected" | grep -q '"layer":"none"'; then
+            echo "has_layers=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_layers=true" >> "$GITHUB_OUTPUT"
+          fi
           echo "matrix={\"include\":$selected}" >> "$GITHUB_OUTPUT"
 
   plan:
     name: Plan ${{ matrix.layer }}
     needs: select
+    if: needs.select.outputs.has_layers == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
