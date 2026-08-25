@@ -25,7 +25,7 @@ with DAG(
     SparkKubernetesOperator(
         task_id="spark_iceberg_round_trip",
         namespace="datalake-itest",
-        application_file="/opt/airflow/dags/repository/spark-iceberg-itest.yaml",
+        application_file="/opt/airflow/dags/spark-iceberg-itest.yaml",
         kubernetes_conn_id="kubernetes_default",
         in_cluster=True,
         get_logs=True,
