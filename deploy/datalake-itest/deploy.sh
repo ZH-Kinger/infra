@@ -112,6 +112,17 @@ if [ "$repair_airflow_pvcs" = true ]; then
   done
 fi
 
+# A canceled GitHub Actions run can leave Helm's first install locked in a
+# pending state. This is a disposable integration release, so remove only that
+# incomplete release before retrying. Deployed releases are upgraded normally.
+airflow_release_status=$(helm status airflow --namespace airflow 2>/dev/null |
+  awk '/^STATUS:/ {print $2}' || true)
+case "$airflow_release_status" in
+  pending-install|pending-upgrade|pending-rollback)
+    helm uninstall airflow --namespace airflow
+    ;;
+esac
+
 helm upgrade --install airflow apache-airflow/airflow \
   --version 1.22.0 \
   --namespace airflow \
