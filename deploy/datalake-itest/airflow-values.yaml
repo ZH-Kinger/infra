@@ -18,6 +18,7 @@ postgresql:
     persistence:
       enabled: true
       size: 20Gi
+      storageClass: alicloud-disk-essd
 
 redis:
   enabled: false
@@ -31,11 +32,21 @@ scheduler:
     create: true
     name: airflow-scheduler
 
+# LocalExecutor reuses worker persistence settings for scheduler logs.
+workers:
+  persistence:
+    storageClassName: alicloud-disk-essd
+  celery:
+    persistence:
+      storageClassName: alicloud-disk-essd
+
 apiServer:
   replicas: 2
 
 triggerer:
   replicas: 1
+  persistence:
+    storageClassName: alicloud-disk-essd
 
 dags:
   persistence:

@@ -88,6 +88,30 @@ kubectl -n airflow create configmap datalake-itest-airflow-dags \
   --from-file=spark-iceberg-itest.yaml="$rendered_spark_application" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+# A previous test release may have created immutable Airflow volume claim
+# templates without a StorageClass. Repair only empty, Pending test PVCs;
+# Bound volumes and PVCs with an explicit class are never removed here.
+repair_airflow_pvcs=false
+for pvc in data-airflow-postgresql-0 logs-airflow-scheduler-0 logs-airflow-triggerer-0; do
+  phase=$(kubectl -n airflow get pvc "$pvc" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+  storage_class=$(kubectl -n airflow get pvc "$pvc" -o jsonpath='{.spec.storageClassName}' 2>/dev/null || true)
+  if [ "$phase" = "Pending" ] && [ -z "$storage_class" ]; then
+    repair_airflow_pvcs=true
+  fi
+done
+if [ "$repair_airflow_pvcs" = true ]; then
+  kubectl -n airflow delete statefulset \
+    airflow-postgresql airflow-scheduler airflow-triggerer \
+    --ignore-not-found
+  for pvc in data-airflow-postgresql-0 logs-airflow-scheduler-0 logs-airflow-triggerer-0; do
+    phase=$(kubectl -n airflow get pvc "$pvc" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    storage_class=$(kubectl -n airflow get pvc "$pvc" -o jsonpath='{.spec.storageClassName}' 2>/dev/null || true)
+    if [ "$phase" = "Pending" ] && [ -z "$storage_class" ]; then
+      kubectl -n airflow delete pvc "$pvc"
+    fi
+  done
+fi
+
 helm upgrade --install airflow apache-airflow/airflow \
   --version 1.22.0 \
   --namespace airflow \
