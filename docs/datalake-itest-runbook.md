@@ -536,6 +536,14 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：为 Spark Operator 控制器挂载专用 `ivysettings.xml`，并通过 `spark.jars.ivySettings` 指定只使用
   阿里云公共 Maven 镜像。生产环境仍建议把固定版本依赖预装进 ACR 镜像，消除运行时下载的不确定性。
 
+### 8.26 Spark Operator 无家目录用户的 Ivy 缓存
+
+- 现象：依赖解析不再卡住，但立即报 `FileNotFoundException: /nonexistent/.ivy2.5.2/cache/...`。
+- 原因：控制器以 UID 185 运行，镜像将 `HOME` 设置为 `/nonexistent`，Ivy 默认缓存目录不可创建；同时普通
+  路径形式的 Ivy settings 未被 Spark 作为本地 URI 加载。
+- 处理：设置 `spark.jars.ivy=/tmp/spark-ivy-cache`，使用控制器已挂载的可写临时卷；将配置地址改为
+  `file:///etc/spark-operator/ivysettings.xml`，确保 Spark 加载指定解析器。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：

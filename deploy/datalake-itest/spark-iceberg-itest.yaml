@@ -21,7 +21,8 @@ spec:
     repositories:
       - https://maven.aliyun.com/repository/public
   sparkConf:
-    spark.jars.ivySettings: /etc/spark-operator/ivysettings.xml
+    spark.jars.ivy: /tmp/spark-ivy-cache
+    spark.jars.ivySettings: file:///etc/spark-operator/ivysettings.xml
     spark.sql.extensions: org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
     spark.sql.catalog.datalake: org.apache.iceberg.spark.SparkCatalog
     spark.sql.catalog.datalake.type: hadoop
