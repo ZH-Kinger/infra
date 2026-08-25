@@ -152,6 +152,14 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn('"ots:Delete*"', plan_policy)
         self.assertNotIn("local.state_lock_statement", plan_policy)
         self.assertIn('"oss:GetBucket*"', bootstrap)
+        # ACK provider refresh must match the complete read baseline from the
+        # AliyunCSReadOnlyAccess system policy, not only cs:Describe*.
+        self.assertIn('"cs:CheckServiceRole"', bootstrap)
+        self.assertIn('"cs:CheckControlPlaneLogEnable"', bootstrap)
+        self.assertIn('"cs:Get*"', bootstrap)
+        self.assertIn('"cs:List*"', bootstrap)
+        self.assertIn('"cs:Query*"', bootstrap)
+        self.assertIn('"cs:Describe*"', bootstrap)
 
     def test_oidc_subject_uses_immutable_github_ids(self):
         bootstrap = Path("infra/bootstrap/variables.tf").read_text(encoding="utf-8")

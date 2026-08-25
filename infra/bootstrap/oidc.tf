@@ -148,6 +148,14 @@ locals {
       # Attribute APIs (for example DescribeVpcAttribute), not only list APIs.
       "vpc:Describe*",
       "ecs:Describe*",
+      # 与阿里云系统策略 AliyunCSReadOnlyAccess 的 ACK 只读动作保持一致。
+      # Provider refresh 不只调用 Describe API；已有控制面会调用
+      # CheckControlPlaneLogEnable，节点池等资源还会使用 Get/List/Query API。
+      "cs:CheckServiceRole",
+      "cs:CheckControlPlaneLogEnable",
+      "cs:Get*",
+      "cs:List*",
+      "cs:Query*",
       "cs:Describe*",
     ]
     Resource = ["*"]

@@ -398,6 +398,19 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 验收：单元测试同时断言 ACK 全生命周期、受限 PassRole 和身份管理 Deny，避免将来再次误改为
   `Deny ram:*` 而破坏 ACK。
 
+### 8.12 ACK Plan refresh 需要完整只读 API 基线
+
+- 阶段：ACK 控制面创建成功、服务角色已授权后的下一次 Terraform Plan。
+- 现象：Plan 在刷新已有集群时调用 `cs:CheckControlPlaneLogEnable`，`TerraformPlanRole` 只有
+  `cs:Describe*`，因此返回 `Forbidden.RAM`；Apply 尚未开始。
+- 根因：ACK Provider 的读取路径不仅使用 `Describe*`。阿里云系统策略
+  `AliyunCSReadOnlyAccess` 的 CS 只读基线还包含 `CheckServiceRole`、
+  `CheckControlPlaneLogEnable`、`Get*`、`List*` 和 `Query*`。
+- 处理：Plan/Apply 共用的只读观测面同步上述完整 CS 只读动作；Plan 角色仍保留
+  `DenyAllMutations`，不获得 ACK 创建、修改或删除权限。
+- 验收：已有 ACK 集群及节点池的 refresh 全部完成，Plan 可以进入 diff 计算；策略变更不应引入
+  任何 `cs:Create*`、`cs:Update*` 或 `cs:Delete*` Allow。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：
