@@ -1,0 +1,78 @@
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: "iceberg-itest-{{ ts_nodash | lower }}"
+  namespace: datalake-itest
+spec:
+  type: Python
+  mode: cluster
+  image: apache/spark:3.5.5
+  imagePullPolicy: IfNotPresent
+  mainApplicationFile: local:///opt/spark/itest/iceberg_itest.py
+  sparkVersion: 3.5.5
+  timeToLiveSeconds: 3600
+  restartPolicy:
+    type: Never
+  deps:
+    packages:
+      - org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.11.0
+      - org.apache.hadoop:hadoop-aliyun:3.3.4
+    repositories:
+      - https://maven.aliyun.com/repository/public
+  sparkConf:
+    spark.sql.extensions: org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+    spark.sql.catalog.datalake: org.apache.iceberg.spark.SparkCatalog
+    spark.sql.catalog.datalake.type: hadoop
+    spark.sql.catalog.datalake.warehouse: "oss://__ICEBERG_BUCKET__/warehouse"
+    spark.sql.defaultCatalog: datalake
+    spark.hadoop.fs.oss.impl: org.apache.hadoop.fs.aliyun.oss.AliyunOSSFileSystem
+    spark.hadoop.fs.AbstractFileSystem.oss.impl: org.apache.hadoop.fs.aliyun.oss.OSS
+    spark.hadoop.fs.oss.endpoint: __OSS_ENDPOINT__
+    spark.serializer: org.apache.spark.serializer.KryoSerializer
+    spark.sql.shuffle.partitions: "64"
+    spark.dynamicAllocation.enabled: "false"
+  volumes:
+    - name: itest-code
+      configMap:
+        name: datalake-itest-spark-code
+  driver:
+    cores: 1
+    memory: 2g
+    serviceAccount: spark-itest
+    nodeSelector:
+      workload: spark
+    tolerations:
+      - key: workload
+        operator: Equal
+        value: spark
+        effect: NoSchedule
+    volumeMounts:
+      - name: itest-code
+        mountPath: /opt/spark/itest
+    envFrom:
+      - configMapRef:
+          name: datalake-itest-runtime
+      - secretRef:
+          name: datalake-itest-oss-sts
+    env:
+      - name: BATCH_ID
+        value: "itest-{{ ts_nodash | lower }}"
+  executor:
+    instances: 4
+    cores: 2
+    memory: 6g
+    nodeSelector:
+      workload: spark
+    tolerations:
+      - key: workload
+        operator: Equal
+        value: spark
+        effect: NoSchedule
+    volumeMounts:
+      - name: itest-code
+        mountPath: /opt/spark/itest
+    envFrom:
+      - configMapRef:
+          name: datalake-itest-runtime
+      - secretRef:
+          name: datalake-itest-oss-sts

@@ -15,6 +15,7 @@ on:
           - dev-access
           - prod-platform
           - prod-access
+          - itest-datalake
           - all
       confirm_apply:
         description: "Apply the generated plans after Environment approval"
@@ -51,7 +52,7 @@ jobs:
           TARGET: ${{ inputs.target || 'all' }}
         run: |
           set -euo pipefail
-          all='[{"dir":"infra/envs/dev/platform","layer":"dev-platform","tfvars_var":"TFVARS_DEV_PLATFORM_JSON","environment":"development","role_var":"ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN"},{"dir":"infra/envs/dev/access","layer":"dev-access","tfvars_var":"TFVARS_DEV_ACCESS_JSON","environment":"development","role_var":"ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN"},{"dir":"infra/envs/prod/platform","layer":"prod-platform","tfvars_var":"TFVARS_PROD_PLATFORM_JSON","environment":"production","role_var":"ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN"},{"dir":"infra/envs/prod/access","layer":"prod-access","tfvars_var":"TFVARS_PROD_ACCESS_JSON","environment":"production-access","role_var":"ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN"}]'
+          all='[{"dir":"infra/envs/dev/platform","layer":"dev-platform","tfvars_var":"TFVARS_DEV_PLATFORM_JSON","environment":"development","role_var":"ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN"},{"dir":"infra/envs/dev/access","layer":"dev-access","tfvars_var":"TFVARS_DEV_ACCESS_JSON","environment":"development","role_var":"ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN"},{"dir":"infra/envs/prod/platform","layer":"prod-platform","tfvars_var":"TFVARS_PROD_PLATFORM_JSON","environment":"production","role_var":"ALIBABA_CLOUD_PLATFORM_APPLY_ROLE_ARN"},{"dir":"infra/envs/prod/access","layer":"prod-access","tfvars_var":"TFVARS_PROD_ACCESS_JSON","environment":"production-access","role_var":"ALIBABA_CLOUD_ACCESS_APPLY_ROLE_ARN"},{"dir":"infra/tests/datalake","layer":"itest-datalake","tfvars_var":"TFVARS_ITEST_DATALAKE_JSON","environment":"development","role_var":"ALIBABA_CLOUD_ITEST_APPLY_ROLE_ARN"}]'
           if [ "$TARGET" = "all" ]; then
             selected=$all
           else

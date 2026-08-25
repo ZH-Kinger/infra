@@ -35,6 +35,7 @@ locals {
     "TerraformPlanRole",
     "TerraformPlatformApplyRole",
     "TerraformAccessApplyRole",
+    "TerraformITestApplyRole",
   ]
 
   # 自身 ARN 集合：用于「禁止修改自己」的 Deny 语句。
@@ -64,6 +65,11 @@ locals {
 
   managed_group_arns = [
     for p in var.managed_name_prefixes : "acs:ram:*:${local.account_id}:group/${p}*"
+  ]
+
+  itest_bucket_arns = [
+    "acs:oss:*:${local.account_id}:dataset-sink-itest-*",
+    "acs:oss:*:${local.account_id}:dataset-sink-itest-*/*",
   ]
 
   # state 读取与锁表写入拆开。Plan 用 -lock=false 保持真正只读；只有 Apply
@@ -127,6 +133,12 @@ locals {
       "paidataset:ListDatasetVersions",
       "vpc:DescribeVpcs",
       "vpc:DescribeVSwitches",
+      "vpc:DescribeNatGateways",
+      "vpc:DescribeRouteTables",
+      "vpc:DescribeRouteEntryList",
+      "vpc:DescribeEipAddresses",
+      "ecs:Describe*",
+      "cs:Describe*",
     ]
     Resource = ["*"]
   }
@@ -252,6 +264,110 @@ locals {
             "paidataset:DeleteDataset",
             "paidataset:DeleteDatasetVersion",
           ]
+          Resource = ["*"]
+        },
+      ],
+    )
+  })
+
+  # Disposable ACK data-lake test environment. This role is deliberately separate
+  # from the normal platform role: it can operate ACK/VPC only for integration tests,
+  # while identity writes remain denied and OSS access is prefix-scoped.
+  itest_apply_policy = jsonencode({
+    Version = "1"
+    Statement = concat(
+      local.state_read_statements,
+      [
+        local.state_lock_statement,
+        local.state_write_statement,
+        local.read_only_statement,
+        {
+          Sid    = "ManageDisposableTestBuckets"
+          Effect = "Allow"
+          Action = [
+            "oss:PutBucket*",
+            "oss:GetBucket*",
+            "oss:DeleteBucket",
+            "oss:ListObjects",
+            "oss:GetObject",
+            "oss:PutObject",
+            "oss:DeleteObject",
+            "oss:AbortMultipartUpload",
+            "oss:ListParts",
+          ]
+          Resource = local.itest_bucket_arns
+        },
+        {
+          Sid    = "CreateDisposableTestNetwork"
+          Effect = "Allow"
+          Action = [
+            "vpc:CreateVpc",
+            "vpc:CreateVSwitch",
+          ]
+          Resource = ["*"]
+          Condition = {
+            StringEquals = {
+              "acs:RequestTag/Environment" = "itest"
+            }
+          }
+        },
+        {
+          Sid    = "ManageDisposableTestNetwork"
+          Effect = "Allow"
+          Action = [
+            "vpc:DeleteVpc",
+            "vpc:ModifyVpcAttribute",
+            "vpc:DeleteVSwitch",
+            "vpc:ModifyVSwitchAttribute",
+            "vpc:TagResources",
+            "vpc:UntagResources",
+          ]
+          Resource = ["*"]
+          Condition = {
+            StringEquals = {
+              "acs:ResourceTag/Environment" = "itest"
+            }
+          }
+        },
+        {
+          Sid      = "CreateDisposableACKCluster"
+          Effect   = "Allow"
+          Action   = ["cs:CreateCluster"]
+          Resource = ["acs:cs:${var.region}:${local.account_id}:cluster/*"]
+          Condition = {
+            StringEquals = {
+              "acs:RequestTag/Environment" = "itest"
+            }
+          }
+        },
+        {
+          Sid    = "ManageDisposableACKCluster"
+          Effect = "Allow"
+          Action = [
+            "cs:DeleteCluster",
+            "cs:ModifyCluster",
+            "cs:CreateClusterNodePool",
+            "cs:ModifyClusterNodePool",
+            "cs:DeleteClusterNodepool",
+            "cs:ScaleClusterNodePool",
+          ]
+          Resource = ["acs:cs:${var.region}:${local.account_id}:cluster/*"]
+          Condition = {
+            StringEquals = {
+              "acs:ResourceTag/Environment" = "itest"
+            }
+          }
+        },
+        {
+          Sid      = "ReadACKVersionMetadata"
+          Effect   = "Allow"
+          Action   = ["cs:DescribeKubernetesVersionMetadata"]
+          Resource = ["*"]
+        },
+        {
+          Sid      = "DenyIdentityWrites"
+          Effect   = "Deny"
+          Action   = ["ram:*", "ims:*"]
           Resource = ["*"]
         },
       ],
@@ -438,5 +554,22 @@ module "access_apply_role" {
 
   policy_documents = {
     TerraformAccessApplyRolePolicy = local.access_apply_policy
+  }
+}
+
+module "itest_apply_role" {
+  source = "../modules/ci-oidc-role"
+
+  role_name   = "TerraformITestApplyRole"
+  description = "Disposable data-lake integration tests: ACK, VPC and prefix-scoped OSS only"
+
+  oidc_provider_arn = alicloud_ims_oidc_provider.github.arn
+  audience          = var.oidc_audience
+  subjects = [
+    "repo:${var.github_oidc_repo}:environment:development",
+  ]
+
+  policy_documents = {
+    TerraformITestApplyRolePolicy = local.itest_apply_policy
   }
 }
