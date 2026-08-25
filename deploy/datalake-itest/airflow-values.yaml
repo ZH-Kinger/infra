@@ -1,6 +1,6 @@
 executor: LocalExecutor
 
-defaultAirflowRepository: apache/airflow
+defaultAirflowRepository: docker.m.daocloud.io/apache/airflow
 defaultAirflowTag: "3.2.2"
 
 nodeSelector:
@@ -8,6 +8,10 @@ nodeSelector:
 
 postgresql:
   enabled: true
+  image:
+    registry: docker.m.daocloud.io
+    repository: bitnamilegacy/postgresql
+    tag: "16.1.0-debian-11-r15"
   primary:
     nodeSelector:
       workload: cpu
@@ -16,6 +20,9 @@ postgresql:
       size: 20Gi
 
 redis:
+  enabled: false
+
+statsd:
   enabled: false
 
 scheduler:

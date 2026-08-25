@@ -28,6 +28,26 @@ if ! kubectl -n datalake-itest get secret datalake-itest-minio >/dev/null 2>&1; 
 fi
 
 kubectl -n datalake-itest delete job minio-bootstrap --ignore-not-found
+
+# The first failed deployment may have created unbound PVCs before an ESSD
+# StorageClass was specified. PVC storageClassName is immutable, so repair only
+# that empty, Pending test fixture. Never delete a Bound volume here.
+repair_minio_pvcs=false
+for ordinal in 0 1 2 3 4; do
+  pvc="data-minio-$ordinal"
+  phase=$(kubectl -n datalake-itest get pvc "$pvc" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+  storage_class=$(kubectl -n datalake-itest get pvc "$pvc" -o jsonpath='{.spec.storageClassName}' 2>/dev/null || true)
+  if [ "$phase" = "Pending" ] && [ -z "$storage_class" ]; then
+    repair_minio_pvcs=true
+  fi
+done
+if [ "$repair_minio_pvcs" = true ]; then
+  kubectl -n datalake-itest delete statefulset minio --ignore-not-found
+  for ordinal in 0 1 2 3 4; do
+    kubectl -n datalake-itest delete pvc "data-minio-$ordinal" --ignore-not-found
+  done
+fi
+
 kubectl apply -f "$root_dir/minio.yaml"
 kubectl -n datalake-itest rollout status statefulset/minio --timeout=20m
 kubectl -n datalake-itest wait --for=condition=complete job/minio-bootstrap --timeout=10m
