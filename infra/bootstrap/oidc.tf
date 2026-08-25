@@ -329,6 +329,19 @@ locals {
           Resource = ["*"]
         },
         {
+          # A new vSwitch has no resource tags until this API succeeds. Gate
+          # the initial tag write by the requested Environment value instead.
+          Sid      = "TagDisposableTestNetwork"
+          Effect   = "Allow"
+          Action   = ["vpc:TagResources"]
+          Resource = ["*"]
+          Condition = {
+            StringEquals = {
+              "acs:RequestTag/Environment" = "itest"
+            }
+          }
+        },
+        {
           Sid    = "ManageDisposableTestNetwork"
           Effect = "Allow"
           Action = [
@@ -336,7 +349,6 @@ locals {
             "vpc:ModifyVpcAttribute",
             "vpc:DeleteVSwitch",
             "vpc:ModifyVSwitchAttribute",
-            "vpc:TagResources",
             "vpc:UntagResources",
           ]
           Resource = ["*"]

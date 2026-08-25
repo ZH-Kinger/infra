@@ -378,6 +378,14 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：仅将 `vpc:CreateVSwitch` 的创建动作设为无标签条件；`DeleteVSwitch`、修改和标签操作继续要求
   `acs:ResourceTag/Environment=itest`。因此角色可以创建测试 vSwitch，但不能修改或删除未标记的现有网络。
 
+### 8.10 新建 vSwitch 的首次标签写入死锁
+
+- 阶段：vSwitch 创建 API 已成功，Provider 紧接着调用 `TagResources`。
+- 现象：新 vSwitch 尚无资源标签，要求 `acs:ResourceTag/Environment=itest` 的 `TagResources` Allow 无法命中。
+- 根因：资源标签条件适合约束已有资源的后续变更，不适合约束资源的第一次标签写入。
+- 处理：首次 `TagResources` 改用 `acs:RequestTag/Environment=itest`；删除、修改和取消标签仍使用
+  `acs:ResourceTag/Environment=itest`。失败遗留的无标签 vSwitch 经确认无 ECS 依赖后已删除。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：
