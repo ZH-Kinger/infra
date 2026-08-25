@@ -212,6 +212,8 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn("storageClass: alicloud-disk-essd", airflow)
         self.assertGreaterEqual(airflow.count("storageClassName: alicloud-disk-essd"), 2)
         self.assertIn("repair_airflow_pvcs=false", deploy)
+        self.assertIn("pending-install|pending-upgrade|pending-rollback", deploy)
+        self.assertIn("helm uninstall airflow --namespace airflow", deploy)
         self.assertIn("registry: ghcr.m.daocloud.io", spark_operator)
         self.assertIn('[ "$phase" = "Pending" ] && [ -z "$storage_class" ]', deploy)
         self.assertNotIn("kubectl -n datalake-itest delete pvc --all", deploy)

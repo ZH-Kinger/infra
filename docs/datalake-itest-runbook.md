@@ -443,6 +443,16 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：三处均显式指定 `alicloud-disk-essd`。部署脚本仅在测试 PVC 同时满足“Pending 且
   storageClass 为空”时删除对应 StatefulSet 和 PVC 以重建；已绑定卷不受影响。
 
+### 8.16 取消运行遗留 Helm pending-install
+
+- 现象：Airflow 空 PVC 已安全清理，但下一次 `helm upgrade --install` 返回
+  `another operation (install/upgrade/rollback) is in progress`。
+- 根因：上一轮 GitHub Actions 在首次安装 Airflow 时被取消，Helm release v1 保持
+  `pending-install`，后续升级无法取得 release 锁。
+- 处理：部署前读取 Airflow 测试 release 状态；仅当状态为 `pending-install`、
+  `pending-upgrade` 或 `pending-rollback` 时卸载该未完成 release，再执行全新安装。正常
+  `deployed` release 仍走原地升级。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：
