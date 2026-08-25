@@ -510,6 +510,15 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：测试环境设置 `dags_are_paused_at_creation=False`；运行脚本仍在触发前显式执行 `dags unpause`，
   兼容数据库中已经按旧配置创建的 DagModel。
 
+### 8.23 SparkApplication YAML 必须使用模板搜索相对路径
+
+- 现象：DAG 已解除暂停且任务进入 LocalExecutor，但 `SparkKubernetesOperator` 在渲染
+  `application_file` 时返回 `TemplateNotFound`；文件已挂载且 DAG 搜索目录正确。
+- 根因：`.yaml` 是 Airflow 模板扩展名。Jinja loader 的根目录已经是 `/opt/airflow/dags`，传入绝对路径
+  会被当成模板名称，而不是直接打开的文件系统路径。
+- 处理：`application_file` 改为相对模板名 `spark-iceberg-itest.yaml`；ConfigMap 仍将该文件挂载在 DAG
+  根目录，不改变 SparkApplication 内容。
+
 ## 9. 当前实验状态
 
 截至 2026-08-25：
