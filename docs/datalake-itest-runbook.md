@@ -617,6 +617,14 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：测试部署脚本比较 `currentRevision` 与 `updateRevision`；检测到版本切换时并行重建三个 Pod，但保留
   全部 Bound PVC。该处理只用于可重建的集成测试命名空间，生产 etcd 应采用逐成员替换和健康检查流程。
 
+### 8.34 网关早于元数据初始化导致进度截止
+
+- 现象：etcd 与格式化任务成功后，`juicefs-s3-gateway` 仍立即返回 `ProgressDeadlineExceeded`；旧
+  ReplicaSet 的 Docker Hub 拉取失败 Pod 还占用强制反亲和位置。
+- 原因：网关曾在元数据不可用时启动失败，Deployment 的历史进度截止状态不会因后端恢复自动清除。
+- 处理：格式化成功作为明确闸门，之后重建无状态的 S3 网关、POSIX 客户端和测试客户端；元数据 PVC 与
+  MinIO 数据盘均不删除。生产环境应通过初始化流程或 init container 保证依赖就绪，而不是重建有状态服务。
+
 ## 9. 当前实验状态
 
 截至 2026-08-26，基础集成实验已经达到 `RUNTIME PASSED`：
