@@ -597,9 +597,18 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
   `couldn't find local name "$(HOSTNAME)" in the initial cluster configuration`。
 - 原因：容器运行时会在进程启动时提供 `HOSTNAME`，但 Kubernetes 对 `command/args` 的 `$(VAR_NAME)`
   替换只使用 PodSpec 中显式声明的环境变量。
-- 处理：通过 Downward API 将 `metadata.name` 注入 `ETCD_NAME`，启动参数统一使用 `$(ETCD_NAME)`；由于
+- 处理：通过 Downward API 将 `metadata.name` 注入 PodSpec 环境变量，启动参数引用该变量；由于
   失败启动已经在测试 PVC 留下无效的初始成员信息，改用同一 PVC 下的新 `data-v2` 子目录重新初始化，
   不自动删除 Bound 云盘。
+
+### 8.32 Downward API 变量名不能占用 etcd 配置前缀
+
+- 现象：Downward API 已取得正确 Pod 名，但 etcd 报
+  `conflicting environment variable is shadowed by corresponding command-line flag`。
+- 原因：`ETCD_NAME` 会被 etcd 当作自身配置环境变量，与命令行 `--name` 冲突，而这里的目的只是让
+  Kubernetes 在启动前替换参数。
+- 处理：将中间变量改为 `POD_NAME`，继续由 Downward API 注入；命令行仍显式设置 `--name`，避免同一个
+  配置同时从环境和参数进入。
 
 ## 9. 当前实验状态
 
