@@ -85,11 +85,14 @@ kubectl -n datalake-itest wait --for=condition=complete job/juicefs-format --tim
 # Recreate only these stateless test clients after the format gate succeeds.
 kubectl -n datalake-itest delete deployment \
   juicefs-s3-gateway juicefs-posix-client juicefs-s3-client \
+  juicefs-nfs-gateway juicefs-nfs-client \
   --ignore-not-found --wait=true
 kubectl apply -f "$root_dir/juicefs.yaml"
 kubectl -n datalake-itest rollout status deployment/juicefs-s3-gateway --timeout=15m
 kubectl -n datalake-itest rollout status deployment/juicefs-posix-client --timeout=15m
 kubectl -n datalake-itest rollout status deployment/juicefs-s3-client --timeout=10m
+kubectl -n datalake-itest rollout status deployment/juicefs-nfs-gateway --timeout=20m
+kubectl -n datalake-itest rollout status deployment/juicefs-nfs-client --timeout=20m
 
 kubectl -n datalake-itest create configmap datalake-itest-runtime \
   --from-literal=LANDING_BUCKET="$LANDING_BUCKET" \

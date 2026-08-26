@@ -625,6 +625,13 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：格式化成功作为明确闸门，之后重建无状态的 S3 网关、POSIX 客户端和测试客户端；元数据 PVC 与
   MinIO 数据盘均不删除。生产环境应通过初始化流程或 init container 保证依赖就绪，而不是重建有状态服务。
 
+### 8.35 NFSv4 协议层验证
+
+POSIX 挂载互通只证明 JuiceFS 命名空间一致，不能证明 NFS 客户端链路。实验因此在一个存储节点上按 JuiceFS
+官方方式挂载文件系统并启动 `nfs-kernel-server`，CPU 节点使用 `mount -t nfs4` 连接，再执行 S3 写/NFS 读和
+NFS 写/S3 读。单 NFS Pod 只用于验证协议与语义，不代表生产高可用；供应商原生 NFS 仍需独立验证 VIP、
+锁状态迁移、网关故障切换和性能。
+
 ## 9. 当前实验状态
 
 截至 2026-08-26，基础集成实验已经达到 `RUNTIME PASSED`：
