@@ -28,6 +28,7 @@ if ! kubectl -n datalake-itest get secret datalake-itest-minio >/dev/null 2>&1; 
 fi
 
 kubectl -n datalake-itest delete job minio-bootstrap --ignore-not-found
+kubectl -n datalake-itest delete job juicefs-format --ignore-not-found
 
 # The first failed deployment may have created unbound PVCs before an ESSD
 # StorageClass was specified. PVC storageClassName is immutable, so repair only
@@ -51,6 +52,20 @@ fi
 kubectl apply -f "$root_dir/minio.yaml"
 kubectl -n datalake-itest rollout status statefulset/minio --timeout=20m
 kubectl -n datalake-itest wait --for=condition=complete job/minio-bootstrap --timeout=10m
+
+if ! kubectl -n datalake-itest get secret datalake-itest-juicefs-access >/dev/null 2>&1; then
+  juicefs_password=$(openssl rand -hex 24)
+  kubectl -n datalake-itest create secret generic datalake-itest-juicefs-access \
+    --from-literal=MINIO_ROOT_USER=juicefs-itest \
+    --from-literal=MINIO_ROOT_PASSWORD="$juicefs_password"
+fi
+
+kubectl apply -f "$root_dir/juicefs.yaml"
+kubectl -n datalake-itest rollout status statefulset/juicefs-meta --timeout=15m
+kubectl -n datalake-itest wait --for=condition=complete job/juicefs-format --timeout=10m
+kubectl -n datalake-itest rollout status deployment/juicefs-s3-gateway --timeout=15m
+kubectl -n datalake-itest rollout status deployment/juicefs-posix-client --timeout=15m
+kubectl -n datalake-itest rollout status deployment/juicefs-s3-client --timeout=10m
 
 kubectl -n datalake-itest create configmap datalake-itest-runtime \
   --from-literal=LANDING_BUCKET="$LANDING_BUCKET" \

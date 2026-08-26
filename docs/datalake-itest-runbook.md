@@ -2,11 +2,13 @@
 
 本文记录如何在阿里云上复现一条最小但接近生产形态的数据湖链路：
 
-`GitHub Actions → ACK Pro → Airflow → 4 CPU 节点 → Spark/Iceberg → 5 存储节点 MinIO → OSS`
+`采集 S3 → JuiceFS S3 Gateway → 统一 JuiceFS 命名空间 → 5 存储节点 MinIO`，以及
+`GitHub Actions → ACK Pro → Airflow → 4 CPU 节点 → Spark/Iceberg → OSS`
 
-目标不是做性能结论，而是先验证控制面、计算面、元数据和五节点对象存储能否完整闭环。MinIO 只模拟
-本地 S3 合约和节点故障，不代表 H3C 混闪的 HDD/NVMe 性能。本地 NFS 多协议互通、lakeFS 和专线同步
-属于下一阶段，不混入本实验，否则失败时无法定位层次。
+目标不是做性能结论，而是先验证控制面、计算面、元数据、五节点对象存储，以及 S3/文件入口能否共享同一
+命名空间。MinIO 只模拟本地对象数据层和节点故障，不代表 H3C 混闪的 HDD/NVMe 性能。JuiceFS 模拟
+多协议统一命名空间：S3 通过三副本网关进入，文件侧通过 POSIX/FUSE 挂载验证。实际 NFS 线协议、lakeFS
+和专线同步继续作为独立测试门，避免基础命名空间不通时同时排查更多层次。
 
 ## 1. 实验范围
 
@@ -18,6 +20,7 @@
 4. 作业能执行幂等写入、当前快照读取和指定 Snapshot ID 的历史读取。
 5. 验证结果能通过阿里云内网端点写回 OSS Result Bucket，失败能在 CI 中返回非零退出码。
 6. 环境能通过独立的审批式工作流整体销毁，不在控制台逐个删除资源。
+7. S3 Gateway 写入的文件能从 JuiceFS POSIX 挂载按相同路径和内容读取，反向写入也能从 S3 读取。
 
 不验证以下内容：lakeFS 分支与合并、本地 H3C 混闪、多协议互通、5 Gbps 专线吞吐、真实 MCAP 或
 LeRobot v3 数据处理、训练集群读取。这些项目要在基础链路通过后分阶段接入。
@@ -31,6 +34,7 @@ LeRobot v3 数据处理、训练集群读取。这些项目要在基础链路通
 | CPU 节点池 | 4 节点；优先 `ecs.g8i.2xlarge`，按变量中的列表回退 |
 | 存储节点池 | 5 节点；优先 `ecs.g8i.xlarge`，按变量中的列表回退 |
 | 本地 S3 模拟 | MinIO 5 成员；每成员独立 200 GiB ESSD PVC |
+| 统一命名空间 | JuiceFS 1.3.0；3 个 S3 Gateway 副本；3 成员 etcd 元数据集群 |
 | Airflow Helm Chart | `1.22.0` |
 | Airflow | `3.2.2`，LocalExecutor |
 | Spark Operator | `2.5.2` |
@@ -51,8 +55,10 @@ Terraform 代码位于 `infra/tests/datalake`，创建：
 - 1 个四节点 CPU 池和 1 个五节点存储池；
 - 4 个启用版本控制、AES-256 服务端加密的私有 Bucket：`landing`、`lakefs`、`iceberg`、`result`。
 
-五节点 MinIO 保存本地 Iceberg 表，OSS 在本实验中只承担归档和结果层。`lakefs` Bucket 在第一阶段只预留，
-不部署 lakeFS。测试数据没有业务价值，Bucket 标记为 `Ephemeral=true`。不要上传生产原始数据。
+五节点 MinIO 保存本地 Iceberg 表和 JuiceFS 内部数据块，OSS 在本实验中只承担归档和结果层。应用只能通过
+JuiceFS S3 Gateway 或文件挂载访问 JuiceFS 数据，禁止直接写内部 `juicefs-data` Bucket。`lakefs` Bucket
+在第一阶段只预留，不部署 lakeFS。测试数据没有业务价值，Bucket 标记为 `Ephemeral=true`。不要上传生产
+原始数据。
 
 这里的“5 个存储节点”和“4 个 OSS Bucket”不是同一层概念：5 台存储 ECS 共同组成**一个**分布式 MinIO
 对象存储集群；4 个 OSS Bucket 只是阿里云侧按数据阶段划分的逻辑命名空间，不是 4 台存储服务器。生产环境

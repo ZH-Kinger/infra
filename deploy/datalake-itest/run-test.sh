@@ -3,6 +3,57 @@ set -eu
 
 started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 dag_id=datalake_spark_iceberg_itest
+interop_id="${GITHUB_RUN_ID:-manual}"
+s3_payload="s3-to-posix-${interop_id}"
+posix_payload="posix-to-s3-${interop_id}"
+s3_key="interop/${interop_id}/s3-to-posix.txt"
+posix_key="interop/${interop_id}/posix-to-s3.txt"
+
+# The quoted script must expand inside the remote container, not in this shell.
+# shellcheck disable=SC2016
+kubectl -n datalake-itest exec deployment/juicefs-s3-client -- \
+  env OBJECT_KEY="$s3_key" EXPECTED="$s3_payload" /bin/sh -ec '
+    mc alias set jfs "$S3_ENDPOINT" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+    printf "%s" "$EXPECTED" | mc pipe "jfs/factory/$OBJECT_KEY"
+  '
+
+# shellcheck disable=SC2016
+kubectl -n datalake-itest exec deployment/juicefs-posix-client -- \
+  env FILE="/jfs/$s3_key" EXPECTED="$s3_payload" /bin/sh -ec '
+    attempt=0
+    while [ "$attempt" -lt 60 ]; do
+      actual=$(cat "$FILE" 2>/dev/null || true)
+      [ "$actual" = "$EXPECTED" ] && exit 0
+      attempt=$((attempt + 1))
+      sleep 2
+    done
+    printf "S3-written object was not visible through JuiceFS POSIX mount: %s\n" "$FILE" >&2
+    exit 1
+  '
+
+# shellcheck disable=SC2016
+kubectl -n datalake-itest exec deployment/juicefs-posix-client -- \
+  env FILE="/jfs/$posix_key" EXPECTED="$posix_payload" /bin/sh -ec '
+    mkdir -p "$(dirname "$FILE")"
+    printf "%s" "$EXPECTED" > "$FILE"
+    sync
+  '
+
+# shellcheck disable=SC2016
+kubectl -n datalake-itest exec deployment/juicefs-s3-client -- \
+  env OBJECT_KEY="$posix_key" EXPECTED="$posix_payload" /bin/sh -ec '
+    attempt=0
+    while [ "$attempt" -lt 60 ]; do
+      actual=$(mc cat "jfs/factory/$OBJECT_KEY" 2>/dev/null || true)
+      [ "$actual" = "$EXPECTED" ] && exit 0
+      attempt=$((attempt + 1))
+      sleep 2
+    done
+    printf "POSIX-written file was not visible through JuiceFS S3 Gateway: %s\n" "$OBJECT_KEY" >&2
+    exit 1
+  '
+
+printf '%s\n' "JuiceFS S3 <-> POSIX shared-namespace test completed."
 
 dag_ready=false
 attempt=0

@@ -135,3 +135,4 @@ spec:
               until mc alias set local http://minio.datalake-itest.svc.cluster.local:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do sleep 5; done
               mc mb --ignore-existing local/landing
               mc mb --ignore-existing local/iceberg
+              mc mb --ignore-existing local/juicefs-data

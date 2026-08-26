@@ -258,6 +258,26 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn('[ "$phase" = "Pending" ] && [ -z "$storage_class" ]', deploy)
         self.assertNotIn("kubectl -n datalake-itest delete pvc --all", deploy)
 
+    def test_datalake_itest_models_shared_s3_and_file_namespace(self):
+        root = Path("deploy/datalake-itest")
+        juicefs = (root / "juicefs.yaml").read_text(encoding="utf-8")
+        minio = (root / "minio.yaml").read_text(encoding="utf-8")
+        deploy = (root / "deploy.sh").read_text(encoding="utf-8")
+        run_test = (root / "run-test.sh").read_text(encoding="utf-8")
+
+        self.assertIn("mc mb --ignore-existing local/juicefs-data", minio)
+        self.assertIn("name: juicefs-meta\n", juicefs)
+        self.assertIn("name: juicefs-s3-gateway\n", juicefs)
+        self.assertIn("replicas: 3", juicefs)
+        self.assertIn("workload: storage", juicefs)
+        self.assertIn("--storage minio", juicefs)
+        self.assertIn("/juicefs-data", juicefs)
+        self.assertIn("juicefs mount", juicefs)
+        self.assertIn("rollout status deployment/juicefs-s3-gateway", deploy)
+        self.assertIn("S3 <-> POSIX shared-namespace test completed", run_test)
+        self.assertIn('mc pipe "jfs/factory/$OBJECT_KEY"', run_test)
+        self.assertIn('mc cat "jfs/factory/$OBJECT_KEY"', run_test)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
