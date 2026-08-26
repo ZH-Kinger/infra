@@ -112,6 +112,19 @@ if ! kubectl -n datalake-itest get secret datalake-itest-lakefs-access >/dev/nul
 fi
 
 kubectl apply -f "$root_dir/lakefs.yaml"
+
+# A failed first image pull or an invalid PostgreSQL revision can leave ordinal
+# zero on an obsolete StatefulSet revision. Replace only the Pod when the
+# template changed; the Bound metadata PVC is retained.
+lakefs_pg_current_revision=$(kubectl -n datalake-itest get statefulset lakefs-postgresql \
+  -o jsonpath='{.status.currentRevision}' 2>/dev/null || true)
+lakefs_pg_update_revision=$(kubectl -n datalake-itest get statefulset lakefs-postgresql \
+  -o jsonpath='{.status.updateRevision}' 2>/dev/null || true)
+if [ -n "$lakefs_pg_update_revision" ] && \
+   [ "$lakefs_pg_current_revision" != "$lakefs_pg_update_revision" ]; then
+  kubectl -n datalake-itest delete pod lakefs-postgresql-0 \
+    --ignore-not-found --wait=false
+fi
 kubectl -n datalake-itest rollout status statefulset/lakefs-postgresql --timeout=10m
 kubectl -n datalake-itest rollout status deployment/lakefs --timeout=15m
 kubectl -n datalake-itest wait --for=condition=complete job/lakefs-bootstrap --timeout=10m
