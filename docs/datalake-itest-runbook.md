@@ -610,6 +610,13 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：将中间变量改为 `POD_NAME`，继续由 Downward API 注入；命令行仍显式设置 `--name`，避免同一个
   配置同时从环境和参数进入。
 
+### 8.33 etcd StatefulSet 滚动升级等待环
+
+- 现象：旧版本三个成员均无法启动时，StatefulSet 仍按倒序逐台滚动；新的 `juicefs-meta-2` 等待另外两个
+  成员形成 quorum，而控制器又等待 `juicefs-meta-2` Ready 后才更新旧成员。
+- 处理：测试部署脚本比较 `currentRevision` 与 `updateRevision`；检测到版本切换时并行重建三个 Pod，但保留
+  全部 Bound PVC。该处理只用于可重建的集成测试命名空间，生产 etcd 应采用逐成员替换和健康检查流程。
+
 ## 9. 当前实验状态
 
 截至 2026-08-26，基础集成实验已经达到 `RUNTIME PASSED`：

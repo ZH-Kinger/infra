@@ -61,6 +61,22 @@ if ! kubectl -n datalake-itest get secret datalake-itest-juicefs-access >/dev/nu
 fi
 
 kubectl apply -f "$root_dir/juicefs.yaml"
+
+# This namespace is a disposable integration environment. An etcd StatefulSet
+# cannot always roll from a broken revision one ordinal at a time: the newest
+# member waits for quorum while the older broken members wait for it to become
+# Ready. Restart all members together during a revision transition. Bound PVCs
+# are preserved, so initialized metadata survives the Pod replacement.
+current_revision=$(kubectl -n datalake-itest get statefulset juicefs-meta \
+  -o jsonpath='{.status.currentRevision}' 2>/dev/null || true)
+update_revision=$(kubectl -n datalake-itest get statefulset juicefs-meta \
+  -o jsonpath='{.status.updateRevision}' 2>/dev/null || true)
+if [ -n "$current_revision" ] && [ -n "$update_revision" ] && \
+   [ "$current_revision" != "$update_revision" ]; then
+  kubectl -n datalake-itest delete pod \
+    juicefs-meta-0 juicefs-meta-1 juicefs-meta-2 \
+    --ignore-not-found --wait=false
+fi
 kubectl -n datalake-itest rollout status statefulset/juicefs-meta --timeout=15m
 kubectl -n datalake-itest wait --for=condition=complete job/juicefs-format --timeout=10m
 kubectl -n datalake-itest rollout status deployment/juicefs-s3-gateway --timeout=15m
