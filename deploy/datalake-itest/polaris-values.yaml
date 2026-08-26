@@ -1,0 +1,74 @@
+replicaCount: 2
+
+image:
+  repository: docker.m.daocloud.io/apache/polaris
+  tag: "1.7.0"
+  pullPolicy: IfNotPresent
+
+nodeSelector:
+  workload: cpu
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: polaris
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: "2"
+    memory: 3Gi
+
+persistence:
+  type: relational-jdbc
+  relationalJdbc:
+    secret:
+      name: datalake-itest-polaris-persistence
+      username: username
+      password: password
+      jdbcUrl: jdbcUrl
+
+storage:
+  secret:
+    name: datalake-itest-minio
+    awsAccessKeyId: MINIO_ROOT_USER
+    awsSecretAccessKey: MINIO_ROOT_PASSWORD
+
+authentication:
+  type: internal
+  tokenBroker:
+    type: symmetric-key
+    secret:
+      name: datalake-itest-polaris-token-key
+      symmetricKey:
+        secretKey: symmetric.key
+
+realmContext:
+  type: default
+  realms:
+    - POLARIS
+  requireHeader: false
+
+extraEnv:
+  - name: POLARIS_BOOTSTRAP_CREDENTIALS
+    valueFrom:
+      secretKeyRef:
+        name: datalake-itest-polaris-client
+        key: POLARIS_BOOTSTRAP_CREDENTIALS
+  - name: AWS_REGION
+    value: us-east-1
+  - name: AWS_ENDPOINT_URL
+    value: http://minio.datalake-itest.svc.cluster.local:9000
+  - name: QUARKUS_OTEL_SDK_DISABLED
+    value: "true"
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

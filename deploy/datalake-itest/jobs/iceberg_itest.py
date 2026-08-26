@@ -19,7 +19,11 @@ batch_id = required("BATCH_ID")
 result_bucket = required("RESULT_BUCKET")
 row_count = int(os.environ.get("ROW_COUNT", "1000000"))
 
-spark = SparkSession.builder.appName(f"iceberg-itest-{batch_id}").getOrCreate()
+spark = (
+    SparkSession.builder.appName(f"iceberg-itest-{batch_id}")
+    .config("spark.sql.catalog.datalake.credential", required("POLARIS_CREDENTIAL"))
+    .getOrCreate()
+)
 hadoop = spark.sparkContext._jsc.hadoopConfiguration()
 hadoop.set("fs.oss.endpoint", required("OSS_ENDPOINT"))
 hadoop.set("fs.oss.accessKeyId", required("ALIBABA_CLOUD_ACCESS_KEY_ID"))
