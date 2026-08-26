@@ -1,0 +1,312 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: juicefs-meta-headless
+  namespace: datalake-itest
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: juicefs-meta
+  ports:
+    - name: client
+      port: 2379
+    - name: peer
+      port: 2380
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: juicefs-meta
+  namespace: datalake-itest
+spec:
+  serviceName: juicefs-meta-headless
+  podManagementPolicy: Parallel
+  replicas: 3
+  selector:
+    matchLabels:
+      app: juicefs-meta
+  template:
+    metadata:
+      labels:
+        app: juicefs-meta
+    spec:
+      nodeSelector:
+        workload: storage
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: storage
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: juicefs-meta
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: etcd
+          image: quay.io/coreos/etcd@sha256:a1fbaea309fa27bad418200539a69cffb4c9336fe1a6b0af23874cd15293c8f8
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              exec etcd \
+                --name "${HOSTNAME}" \
+                --data-dir /var/lib/etcd \
+                --listen-client-urls http://0.0.0.0:2379 \
+                --advertise-client-urls "http://${HOSTNAME}.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379" \
+                --listen-peer-urls http://0.0.0.0:2380 \
+                --initial-advertise-peer-urls "http://${HOSTNAME}.juicefs-meta-headless.datalake-itest.svc.cluster.local:2380" \
+                --initial-cluster-token datalake-itest-juicefs-meta \
+                --initial-cluster-state new \
+                --initial-cluster "juicefs-meta-0=http://juicefs-meta-0.juicefs-meta-headless.datalake-itest.svc.cluster.local:2380,juicefs-meta-1=http://juicefs-meta-1.juicefs-meta-headless.datalake-itest.svc.cluster.local:2380,juicefs-meta-2=http://juicefs-meta-2.juicefs-meta-headless.datalake-itest.svc.cluster.local:2380"
+          ports:
+            - name: client
+              containerPort: 2379
+            - name: peer
+              containerPort: 2380
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - ETCDCTL_API=3 etcdctl --endpoints=http://127.0.0.1:2379 endpoint health
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - ETCDCTL_API=3 etcdctl --endpoints=http://127.0.0.1:2379 endpoint health
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/etcd
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        storageClassName: alicloud-disk-essd
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: juicefs-format
+  namespace: datalake-itest
+spec:
+  backoffLimit: 12
+  template:
+    metadata:
+      labels:
+        app: juicefs-format
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        workload: cpu
+      containers:
+        - name: format
+          image: juicedata/mount@sha256:dfac9c74121c06216b9b669628eae0b275c95355dcc235189c20d4ce4ff35bc0
+          env:
+            - name: META_URL
+              value: etcd://juicefs-meta-0.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379,juicefs-meta-1.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379,juicefs-meta-2.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379/juicefs
+          envFrom:
+            - secretRef:
+                name: datalake-itest-minio
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              until juicefs status "$META_URL" >/dev/null 2>&1; do
+                if juicefs format \
+                  --storage minio \
+                  --bucket http://minio.datalake-itest.svc.cluster.local:9000/juicefs-data \
+                  --access-key "$MINIO_ROOT_USER" \
+                  --secret-key "$MINIO_ROOT_PASSWORD" \
+                  --trash-days 1 \
+                  "$META_URL" factory; then
+                  break
+                fi
+                sleep 5
+              done
+              juicefs status "$META_URL"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: juicefs-s3-gateway
+  namespace: datalake-itest
+spec:
+  selector:
+    app: juicefs-s3-gateway
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: s3
+    - name: metrics
+      port: 9567
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: juicefs-s3-gateway
+  namespace: datalake-itest
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: juicefs-s3-gateway
+  template:
+    metadata:
+      labels:
+        app: juicefs-s3-gateway
+    spec:
+      nodeSelector:
+        workload: storage
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: storage
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: juicefs-s3-gateway
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: gateway
+          image: juicedata/mount@sha256:dfac9c74121c06216b9b669628eae0b275c95355dcc235189c20d4ce4ff35bc0
+          env:
+            - name: META_URL
+              value: etcd://juicefs-meta-0.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379,juicefs-meta-1.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379,juicefs-meta-2.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379/juicefs
+          envFrom:
+            - secretRef:
+                name: datalake-itest-juicefs-access
+          command: ["/bin/sh", "-ec"]
+          args:
+            - exec juicefs gateway "$META_URL" 0.0.0.0:9000 --metrics=0.0.0.0:9567
+          ports:
+            - name: s3
+              containerPort: 9000
+            - name: metrics
+              containerPort: 9567
+          readinessProbe:
+            tcpSocket:
+              port: s3
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: s3
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: juicefs-posix-client
+  namespace: datalake-itest
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: juicefs-posix-client
+  template:
+    metadata:
+      labels:
+        app: juicefs-posix-client
+    spec:
+      nodeSelector:
+        workload: cpu
+      containers:
+        - name: mount
+          image: juicedata/mount@sha256:dfac9c74121c06216b9b669628eae0b275c95355dcc235189c20d4ce4ff35bc0
+          securityContext:
+            privileged: true
+          env:
+            - name: META_URL
+              value: etcd://juicefs-meta-0.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379,juicefs-meta-1.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379,juicefs-meta-2.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379/juicefs
+          command: ["/bin/sh", "-ec"]
+          args:
+            - exec juicefs mount "$META_URL" /jfs --cache-dir=/cache --cache-size=1024 --metrics=0.0.0.0:9567
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-ec", "cat /jfs/.control >/dev/null"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: mountpoint
+              mountPath: /jfs
+            - name: cache
+              mountPath: /cache
+      volumes:
+        - name: mountpoint
+          emptyDir: {}
+        - name: cache
+          emptyDir:
+            sizeLimit: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: juicefs-s3-client
+  namespace: datalake-itest
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: juicefs-s3-client
+  template:
+    metadata:
+      labels:
+        app: juicefs-s3-client
+    spec:
+      nodeSelector:
+        workload: cpu
+      containers:
+        - name: mc
+          image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+          env:
+            - name: S3_ENDPOINT
+              value: http://juicefs-s3-gateway.datalake-itest.svc.cluster.local:9000
+          envFrom:
+            - secretRef:
+                name: datalake-itest-juicefs-access
+          command: ["/bin/sh", "-ec"]
+          args: ["sleep infinity"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

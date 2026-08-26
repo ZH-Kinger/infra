@@ -130,4 +130,8 @@ jobs:
           kubectl -n datalake-itest get statefulset,pvc,service -o wide || true
           kubectl -n datalake-itest get pods -l app=minio \
             -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase,IP:.status.podIP' || true
+          kubectl -n datalake-itest get pods -l app=juicefs-meta \
+            -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase,IP:.status.podIP' || true
+          kubectl -n datalake-itest get pods -l app=juicefs-s3-gateway \
+            -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase,IP:.status.podIP' || true
           kubectl -n datalake-itest get sparkapplications -o wide || true
