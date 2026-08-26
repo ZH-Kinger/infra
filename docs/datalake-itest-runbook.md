@@ -645,15 +645,17 @@ NFS 写/S3 读。单 NFS Pod 只用于验证协议与语义，不代表生产高
 
 - ACK Pro、4 台 CPU ECS 和 5 台存储 ECS 已由 Terraform 创建；
 - 5 个 MinIO Pod 分散运行在 5 个存储节点上，共同提供一个本地 S3 入口；
+- 3 个 etcd 成员与 3 个 JuiceFS S3 网关分散在存储节点上，提供同一共享命名空间；
+- S3 写/POSIX 读、POSIX 写/S3 读、S3 写/NFSv4 读和 NFSv4 写/S3 读均已逐字节校验通过；
 - Airflow 已成功创建并跟踪 SparkApplication；
 - Spark Driver 和 4 个 Executor 已分散到 4 个 CPU 节点执行；
 - Iceberg 1.10.2 已在五节点 MinIO 上完成建表、幂等写入、当前读取和指定快照读取；
 - 同一 `batch_id` 重跑后没有产生双倍数据，最终当前读取与快照读取均为 1,000,000 行；
 - 验证报告已通过 Hadoop Aliyun Connector 和 STS 临时凭据写入 OSS Result Bucket；
-- GitHub Actions 集成任务成功结束，总耗时 7 分 8 秒。
+- 最新 GitHub Actions 集成任务成功结束，总耗时 7 分 52 秒。
 
 这个结果证明控制面和数据链路能够闭环，不代表生产性能已经达标。MinIO 使用的是云盘，无法代替 H3C 混闪
-集群对 NFS/S3 吞吐、尾延迟、磁盘/节点故障重建和多协议互通的现场验收；5 Gbps 专线、真实 MCAP 转
+集群对 NFS/S3 吞吐、尾延迟、并发一致性、磁盘/节点故障重建和网关高可用的现场验收；5 Gbps 专线、真实 MCAP 转
 LeRobot v3、lakeFS 分支发布和训练集群读取仍需分阶段测试。
 
 后续记录必须继续区分 `PLAN PASSED`、`RUNTIME PASSED` 与 `PERFORMANCE PASSED`。
@@ -695,3 +697,24 @@ LeRobot v3、lakeFS 分支发布和训练集群读取仍需分阶段测试。
 | 结果 | Iceberg 写入、指定快照回读、同批次幂等重跑、OSS 报告写入全部成功 |
 | 结论 | **RUNTIME PASSED** |
 | 尚未覆盖 | 性能基准、节点故障、NFS/S3 互通、5 Gbps 专线、真实业务数据、lakeFS |
+
+### DL-ITEST-20260826-03
+
+| 字段 | 本次记录 |
+|---|---|
+| 目标 | 验证五节点对象存储上同一 JuiceFS 命名空间的 S3、POSIX 与真实 NFSv4.1 互通 |
+| 代码评审 | [infra PR #39](https://github.com/ZH-Kinger/infra/pull/39)、[#40](https://github.com/ZH-Kinger/infra/pull/40) 至 [#46](https://github.com/ZH-Kinger/infra/pull/46) |
+| GitHub Test Run | [32928079273](https://github.com/ZH-Kinger/infra/actions/runs/32928079273) |
+| CPU / 存储节点 | 4 台 CPU ECS / 5 台存储 ECS |
+| 对象层 | 5 节点 MinIO；单一集群、单一 S3 服务入口 |
+| 元数据层 | 3 成员 etcd，成员分散到不同存储节点 |
+| 协议层 | 3 副本 JuiceFS S3 Gateway；1 个实验 NFSv4 网关；CPU 节点真实 `mount -t nfs4` |
+| 互通校验 | S3→POSIX、POSIX→S3、S3→NFSv4、NFSv4→S3 全部通过 |
+| SparkApplication | `iceberg-itest-kyt9wofp` |
+| Batch ID | `itest-32928079273` |
+| row_count / snapshot_count | `1,000,000` / `1,000,000` |
+| Iceberg Snapshot ID | `8740493753032255561` |
+| 总耗时 | 7 分 52 秒（含网关部署、协议校验、Airflow 调度、Spark/Iceberg 与 OSS 报告） |
+| 结果 | 多协议共享命名空间和完整数据湖链路均成功 |
+| 结论 | **RUNTIME PASSED** |
+| 尚未覆盖 | NFS 网关 HA、并发/性能、故障注入、5 Gbps 专线、真实 MCAP/LeRobot v3、lakeFS |
