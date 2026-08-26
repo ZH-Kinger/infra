@@ -5,6 +5,10 @@ This directory validates the smallest production-shaped path before the physical
 `S3 client -> JuiceFS S3 Gateway -> shared JuiceFS namespace -> five-node MinIO`, followed by
 `Airflow -> Spark Operator -> four CPU nodes -> Iceberg -> private OSS archive`.
 
+The environment also deploys lakeFS as an optional release-control layer. The test writes a release manifest
+through its S3 gateway, creates a commit and tag, then reads the object back by immutable commit ID. Spark does
+not depend on lakeFS, so disabling it leaves the processing path unchanged.
+
 The reproducible experiment procedure, evidence checklist and known-issue log are in
 [`docs/datalake-itest-runbook.md`](../../docs/datalake-itest-runbook.md).
 
@@ -27,8 +31,10 @@ session is placed in a Kubernetes Secret only for the duration of the test and i
 - Spark validates append, current-snapshot read, historical-snapshot read and result publication.
 - The OSS credential Secret expires with the CI session and is refreshed by every deploy run.
 - The first run uses one million generated rows. Increase `row_count` only after the smoke test succeeds.
-- lakeFS and the on-premises H3C mixed-flash implementation remain outside this gate. MinIO and JuiceFS validate
-  object/file namespace interoperability, while vendor-specific NFS behavior is tested after delivery.
+- lakeFS runs on CPU nodes with PostgreSQL metadata. Its block store uses the same S3-compatible endpoint
+  abstraction that will point to H3C in production.
+- The on-premises H3C mixed-flash implementation remains outside this gate. MinIO and JuiceFS validate
+  object/file namespace interoperability, while vendor-specific behavior is tested after delivery.
 
 ## Execution
 

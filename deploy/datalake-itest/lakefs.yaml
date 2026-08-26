@@ -1,0 +1,277 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: lakefs-postgresql
+  namespace: datalake-itest
+spec:
+  selector:
+    app: lakefs-postgresql
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: lakefs-postgresql
+  namespace: datalake-itest
+spec:
+  serviceName: lakefs-postgresql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lakefs-postgresql
+  template:
+    metadata:
+      labels:
+        app: lakefs-postgresql
+    spec:
+      nodeSelector:
+        workload: cpu
+      containers:
+        - name: postgresql
+          image: postgres:16.4-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_DB
+              value: lakefs
+            - name: POSTGRES_USER
+              value: lakefs
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-lakefs-config
+                  key: POSTGRES_PASSWORD
+          ports:
+            - name: postgresql
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-ec", "pg_isready -U lakefs -d lakefs"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: alicloud-disk-essd
+        resources:
+          requests:
+            storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lakefs
+  namespace: datalake-itest
+spec:
+  selector:
+    app: lakefs
+  ports:
+    - name: http-s3
+      port: 8000
+      targetPort: http-s3
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lakefs
+  namespace: datalake-itest
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: lakefs
+  template:
+    metadata:
+      labels:
+        app: lakefs
+    spec:
+      nodeSelector:
+        workload: cpu
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: lakefs
+      containers:
+        - name: lakefs
+          image: treeverse/lakefs:1.84.1
+          imagePullPolicy: IfNotPresent
+          args: ["run"]
+          env:
+            - name: LAKEFS_LISTEN_ADDRESS
+              value: "0.0.0.0:8000"
+            - name: LAKEFS_DATABASE_TYPE
+              value: postgres
+            - name: LAKEFS_DATABASE_POSTGRES_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-lakefs-config
+                  key: LAKEFS_DATABASE_POSTGRES_CONNECTION_STRING
+            - name: LAKEFS_AUTH_ENCRYPT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-lakefs-config
+                  key: LAKEFS_AUTH_ENCRYPT_SECRET_KEY
+            - name: LAKEFS_BLOCKSTORE_TYPE
+              value: s3
+            - name: LAKEFS_BLOCKSTORE_S3_ENDPOINT
+              value: http://minio.datalake-itest.svc.cluster.local:9000
+            - name: LAKEFS_BLOCKSTORE_S3_FORCE_PATH_STYLE
+              value: "true"
+            - name: LAKEFS_BLOCKSTORE_S3_REGION
+              value: us-east-1
+            - name: LAKEFS_BLOCKSTORE_S3_CREDENTIALS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-minio
+                  key: MINIO_ROOT_USER
+            - name: LAKEFS_BLOCKSTORE_S3_CREDENTIALS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-minio
+                  key: MINIO_ROOT_PASSWORD
+          ports:
+            - name: http-s3
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /_health
+              port: http-s3
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /_health
+              port: http-s3
+            initialDelaySeconds: 30
+            periodSeconds: 10
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lakefs-bootstrap
+  namespace: datalake-itest
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app: lakefs-bootstrap
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        workload: cpu
+      containers:
+        - name: bootstrap
+          image: curlimages/curl:8.10.1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: LAKEFS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-lakefs-access
+                  key: LAKEFS_ACCESS_KEY_ID
+            - name: LAKEFS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-lakefs-access
+                  key: LAKEFS_SECRET_ACCESS_KEY
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              endpoint=http://lakefs:8000/api/v1
+              until curl -fsS http://lakefs:8000/_health >/dev/null; do sleep 3; done
+              state=$(curl -fsS "$endpoint/setup_lakefs")
+              case "$state" in
+                *not_initialized*)
+                  curl -fsS -X POST -H 'Content-Type: application/json' \
+                    --data "{\"username\":\"itest-admin\",\"key\":{\"access_key_id\":\"$LAKEFS_ACCESS_KEY_ID\",\"secret_access_key\":\"$LAKEFS_SECRET_ACCESS_KEY\"}}" \
+                    "$endpoint/setup_lakefs" >/dev/null
+                  ;;
+              esac
+              if ! curl -fsS -u "$LAKEFS_ACCESS_KEY_ID:$LAKEFS_SECRET_ACCESS_KEY" \
+                "$endpoint/repositories/robotics" >/dev/null 2>&1; then
+                curl -fsS -u "$LAKEFS_ACCESS_KEY_ID:$LAKEFS_SECRET_ACCESS_KEY" \
+                  -X POST -H 'Content-Type: application/json' \
+                  --data '{"name":"robotics","storage_namespace":"s3://lakefs-data/robotics/","default_branch":"main","sample_data":false}' \
+                  "$endpoint/repositories" >/dev/null
+              fi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lakefs-s3-client
+  namespace: datalake-itest
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lakefs-s3-client
+  template:
+    metadata:
+      labels:
+        app: lakefs-s3-client
+    spec:
+      nodeSelector:
+        workload: cpu
+      containers:
+        - name: mc
+          image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec", "sleep infinity"]
+          env:
+            - name: LAKEFS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-lakefs-access
+                  key: LAKEFS_ACCESS_KEY_ID
+            - name: LAKEFS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-lakefs-access
+                  key: LAKEFS_SECRET_ACCESS_KEY
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lakefs-api-client
+  namespace: datalake-itest
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lakefs-api-client
+  template:
+    metadata:
+      labels:
+        app: lakefs-api-client
+    spec:
+      nodeSelector:
+        workload: cpu
+      containers:
+        - name: curl
+          image: curlimages/curl:8.10.1
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec", "sleep infinity"]
+          env:
+            - name: LAKEFS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-lakefs-access
+                  key: LAKEFS_ACCESS_KEY_ID
+            - name: LAKEFS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-lakefs-access
+                  key: LAKEFS_SECRET_ACCESS_KEY

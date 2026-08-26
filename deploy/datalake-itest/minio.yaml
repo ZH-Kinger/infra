@@ -136,3 +136,4 @@ spec:
               mc mb --ignore-existing local/landing
               mc mb --ignore-existing local/iceberg
               mc mb --ignore-existing local/juicefs-data
+              mc mb --ignore-existing local/lakefs-data
