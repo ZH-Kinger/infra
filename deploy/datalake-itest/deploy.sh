@@ -29,6 +29,7 @@ fi
 
 kubectl -n datalake-itest delete job minio-bootstrap --ignore-not-found
 kubectl -n datalake-itest delete job juicefs-format --ignore-not-found
+kubectl -n datalake-itest delete job lakefs-bootstrap --ignore-not-found
 
 # The first failed deployment may have created unbound PVCs before an ESSD
 # StorageClass was specified. PVC storageClassName is immutable, so repair only
@@ -93,6 +94,29 @@ kubectl -n datalake-itest rollout status deployment/juicefs-posix-client --timeo
 kubectl -n datalake-itest rollout status deployment/juicefs-s3-client --timeout=10m
 kubectl -n datalake-itest rollout status deployment/juicefs-nfs-gateway --timeout=20m
 kubectl -n datalake-itest rollout status deployment/juicefs-nfs-client --timeout=20m
+
+if ! kubectl -n datalake-itest get secret datalake-itest-lakefs-config >/dev/null 2>&1; then
+  lakefs_postgres_password=$(openssl rand -hex 24)
+  lakefs_encrypt_secret=$(openssl rand -hex 32)
+  kubectl -n datalake-itest create secret generic datalake-itest-lakefs-config \
+    --from-literal=POSTGRES_PASSWORD="$lakefs_postgres_password" \
+    --from-literal=LAKEFS_DATABASE_POSTGRES_CONNECTION_STRING="postgres://lakefs:${lakefs_postgres_password}@lakefs-postgresql:5432/lakefs?sslmode=disable" \
+    --from-literal=LAKEFS_AUTH_ENCRYPT_SECRET_KEY="$lakefs_encrypt_secret"
+fi
+if ! kubectl -n datalake-itest get secret datalake-itest-lakefs-access >/dev/null 2>&1; then
+  lakefs_access_key=$(openssl rand -hex 10)
+  lakefs_secret_key=$(openssl rand -hex 32)
+  kubectl -n datalake-itest create secret generic datalake-itest-lakefs-access \
+    --from-literal=LAKEFS_ACCESS_KEY_ID="$lakefs_access_key" \
+    --from-literal=LAKEFS_SECRET_ACCESS_KEY="$lakefs_secret_key"
+fi
+
+kubectl apply -f "$root_dir/lakefs.yaml"
+kubectl -n datalake-itest rollout status statefulset/lakefs-postgresql --timeout=10m
+kubectl -n datalake-itest rollout status deployment/lakefs --timeout=15m
+kubectl -n datalake-itest wait --for=condition=complete job/lakefs-bootstrap --timeout=10m
+kubectl -n datalake-itest rollout status deployment/lakefs-s3-client --timeout=10m
+kubectl -n datalake-itest rollout status deployment/lakefs-api-client --timeout=10m
 
 kubectl -n datalake-itest create configmap datalake-itest-runtime \
   --from-literal=LANDING_BUCKET="$LANDING_BUCKET" \

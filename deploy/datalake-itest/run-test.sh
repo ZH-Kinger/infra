@@ -12,6 +12,9 @@ nfs_payload="s3-to-nfs-${interop_id}"
 nfs_write_payload="nfs-to-s3-${interop_id}"
 nfs_key="interop/${interop_id}/s3-to-nfs.txt"
 nfs_write_key="interop/${interop_id}/nfs-to-s3.txt"
+lakefs_payload="lakefs-release-${interop_id}"
+lakefs_key="releases/${interop_id}/manifest.json"
+lakefs_tag="release-${interop_id}"
 
 # The quoted script must expand inside the remote container, not in this shell.
 # shellcheck disable=SC2016
@@ -103,6 +106,45 @@ kubectl -n datalake-itest exec deployment/juicefs-s3-client -- \
   '
 
 printf '%s\n' "JuiceFS S3 <-> NFSv4 shared-namespace test completed."
+
+# lakeFS is an optional release boundary. Spark and the storage interoperability
+# tests do not depend on it, but a release must be readable by immutable commit.
+# shellcheck disable=SC2016
+kubectl -n datalake-itest exec deployment/lakefs-s3-client -- \
+  env OBJECT_KEY="$lakefs_key" PAYLOAD="$lakefs_payload" /bin/sh -ec '
+    mc alias set lakefs http://lakefs:8000 "$LAKEFS_ACCESS_KEY_ID" "$LAKEFS_SECRET_ACCESS_KEY" --api S3v4 >/dev/null
+    printf "%s" "$PAYLOAD" > /tmp/lakefs-release
+    mc cp /tmp/lakefs-release "lakefs/robotics/main/$OBJECT_KEY" >/dev/null
+  '
+
+# shellcheck disable=SC2016
+commit_response=$(kubectl -n datalake-itest exec deployment/lakefs-api-client -- \
+  env COMMIT_MESSAGE="integration release ${interop_id}" /bin/sh -ec '
+    curl -fsS -u "$LAKEFS_ACCESS_KEY_ID:$LAKEFS_SECRET_ACCESS_KEY" \
+      -X POST -H "Content-Type: application/json" \
+      --data "{\"message\":\"$COMMIT_MESSAGE\",\"metadata\":{\"source\":\"datalake-itest\"}}" \
+      http://lakefs:8000/api/v1/repositories/robotics/branches/main/commits
+  ')
+commit_id=$(printf '%s' "$commit_response" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+test -n "$commit_id"
+
+# shellcheck disable=SC2016
+kubectl -n datalake-itest exec deployment/lakefs-api-client -- \
+  env TAG_NAME="$lakefs_tag" COMMIT_ID="$commit_id" /bin/sh -ec '
+    curl -fsS -u "$LAKEFS_ACCESS_KEY_ID:$LAKEFS_SECRET_ACCESS_KEY" \
+      -X POST -H "Content-Type: application/json" \
+      --data "{\"id\":\"$TAG_NAME\",\"ref\":\"$COMMIT_ID\"}" \
+      http://lakefs:8000/api/v1/repositories/robotics/tags >/dev/null
+  '
+
+# shellcheck disable=SC2016
+kubectl -n datalake-itest exec deployment/lakefs-s3-client -- \
+  env OBJECT_KEY="$lakefs_key" EXPECTED="$lakefs_payload" COMMIT_ID="$commit_id" /bin/sh -ec '
+    mc alias set lakefs http://lakefs:8000 "$LAKEFS_ACCESS_KEY_ID" "$LAKEFS_SECRET_ACCESS_KEY" --api S3v4 >/dev/null
+    actual=$(mc cat "lakefs/robotics/$COMMIT_ID/$OBJECT_KEY")
+    test "$actual" = "$EXPECTED"
+  '
+printf 'lakeFS commit/tag test passed: commit=%s tag=%s\n' "$commit_id" "$lakefs_tag"
 
 dag_ready=false
 attempt=0
