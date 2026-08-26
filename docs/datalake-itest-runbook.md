@@ -632,6 +632,13 @@ POSIX 挂载互通只证明 JuiceFS 命名空间一致，不能证明 NFS 客户
 NFS 写/S3 读。单 NFS Pod 只用于验证协议与语义，不代表生产高可用；供应商原生 NFS 仍需独立验证 VIP、
 锁状态迁移、网关故障切换和性能。
 
+### 8.36 精简 NFS 客户端缺少网络协议数据库
+
+- 现象：服务端已经导出 `/jfs`，客户端 `mount.nfs4` 仍报 `Failed to find 'tcp' protocol`。
+- 原因：测试镜像使用 `--no-install-recommends` 安装 `nfs-common`，没有同时取得由 `netbase` 提供的网络协议
+  数据文件。
+- 处理：显式安装 `netbase`，保留 `vers=4.1,proto=tcp`，避免通过删除协议参数掩盖镜像依赖问题。
+
 ## 9. 当前实验状态
 
 截至 2026-08-26，基础集成实验已经达到 `RUNTIME PASSED`：
