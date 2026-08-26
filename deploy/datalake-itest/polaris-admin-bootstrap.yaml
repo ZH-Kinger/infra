@@ -1,0 +1,50 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: polaris-admin-bootstrap
+  namespace: datalake-itest
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        workload: cpu
+      containers:
+        - name: polaris-admin
+          image: docker.m.daocloud.io/apache/polaris-admin-tool:1.7.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POLARIS_PERSISTENCE_TYPE
+              value: relational-jdbc
+            - name: POLARIS_PERSISTENCE_RELATIONAL_JDBC_DATABASE_TYPE
+              value: postgresql
+            - name: QUARKUS_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-polaris-persistence
+                  key: username
+            - name: QUARKUS_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-polaris-persistence
+                  key: password
+            - name: QUARKUS_DATASOURCE_JDBC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-polaris-persistence
+                  key: jdbcUrl
+          args:
+            - bootstrap
+            - --credentials-file=/var/run/secrets/polaris/credentials.json
+          volumeMounts:
+            - name: bootstrap-credentials
+              mountPath: /var/run/secrets/polaris
+              readOnly: true
+      volumes:
+        - name: bootstrap-credentials
+          secret:
+            secretName: datalake-itest-polaris-client
+            items:
+              - key: credentials.json
+                path: credentials.json

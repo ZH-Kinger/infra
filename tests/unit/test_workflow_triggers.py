@@ -205,7 +205,8 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         airflow_dag = (root / "dags" / "datalake_itest.py").read_text(encoding="utf-8")
         spark_operator = (root / "spark-operator-values.yaml").read_text(encoding="utf-8")
         polaris = (root / "polaris-values.yaml").read_text(encoding="utf-8")
-        polaris_bootstrap = (root / "polaris-bootstrap.yaml").read_text(encoding="utf-8")
+        polaris_admin = (root / "polaris-admin-bootstrap.yaml").read_text(encoding="utf-8")
+        polaris_catalog = (root / "polaris-catalog-bootstrap.yaml").read_text(encoding="utf-8")
         ivy_settings = (root / "ivysettings.xml").read_text(encoding="utf-8")
         deploy = (root / "deploy.sh").read_text(encoding="utf-8")
         run_test = (root / "run-test.sh").read_text(encoding="utf-8")
@@ -246,8 +247,27 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn("repository: docker.m.daocloud.io/apache/polaris", polaris)
         self.assertIn("type: relational-jdbc", polaris)
         self.assertIn("name: datalake-itest-polaris-persistence", polaris)
-        self.assertIn('stsUnavailable": true', polaris_bootstrap)
+        self.assertIn(
+            "docker.m.daocloud.io/apache/polaris-admin-tool:1.7.0",
+            polaris_admin,
+        )
+        self.assertIn(
+            "--credentials-file=/var/run/secrets/polaris/credentials.json",
+            polaris_admin,
+        )
+        self.assertNotIn("--credential=$(POLARIS_BOOTSTRAP_CREDENTIALS)", polaris_admin)
+        self.assertIn('--from-literal=credentials.json="$polaris_credentials_json"', deploy)
+        self.assertIn('stsUnavailable": true', polaris_catalog)
         self.assertIn("polaris-database-bootstrap", deploy)
+        self.assertIn("polaris-admin-bootstrap", deploy)
+        self.assertLess(
+            deploy.index("job/polaris-admin-bootstrap"),
+            deploy.index("helm upgrade --install polaris"),
+        )
+        self.assertLess(
+            deploy.index("helm upgrade --install polaris"),
+            deploy.index('apply -f "$root_dir/polaris-catalog-bootstrap.yaml"'),
+        )
         self.assertIn("polaris/polaris", deploy)
         self.assertIn("--version 1.7.0", deploy)
         self.assertNotIn("POLARIS_CLIENT_SECRET=", polaris)

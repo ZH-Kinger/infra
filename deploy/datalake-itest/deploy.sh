@@ -31,7 +31,8 @@ kubectl -n datalake-itest delete job minio-bootstrap --ignore-not-found
 kubectl -n datalake-itest delete job juicefs-format --ignore-not-found
 kubectl -n datalake-itest delete job lakefs-bootstrap --ignore-not-found
 kubectl -n datalake-itest delete job \
-  polaris-database-bootstrap polaris-catalog-bootstrap --ignore-not-found
+  polaris-database-bootstrap polaris-admin-bootstrap \
+  polaris-catalog-bootstrap --ignore-not-found
 
 # The first failed deployment may have created unbound PVCs before an ESSD
 # StorageClass was specified. PVC storageClassName is immutable, so repair only
@@ -140,23 +141,41 @@ if ! kubectl -n datalake-itest get secret datalake-itest-polaris-persistence >/d
     --from-literal=password="$polaris_postgres_password" \
     --from-literal=jdbcUrl=jdbc:postgresql://lakefs-postgresql:5432/polaris
 fi
-if ! kubectl -n datalake-itest get secret datalake-itest-polaris-client >/dev/null 2>&1; then
+if kubectl -n datalake-itest get secret datalake-itest-polaris-client >/dev/null 2>&1; then
+  polaris_client_id=$(kubectl -n datalake-itest get secret datalake-itest-polaris-client \
+    -o jsonpath='{.data.POLARIS_CLIENT_ID}' | base64 -d)
+  polaris_client_secret=$(kubectl -n datalake-itest get secret datalake-itest-polaris-client \
+    -o jsonpath='{.data.POLARIS_CLIENT_SECRET}' | base64 -d)
+else
+  polaris_client_id=root
   polaris_client_secret=$(openssl rand -hex 32)
-  kubectl -n datalake-itest create secret generic datalake-itest-polaris-client \
-    --from-literal=POLARIS_CLIENT_ID=root \
-    --from-literal=POLARIS_CLIENT_SECRET="$polaris_client_secret" \
-    --from-literal=POLARIS_CREDENTIAL="root:${polaris_client_secret}" \
-    --from-literal=POLARIS_BOOTSTRAP_CREDENTIALS="POLARIS,root,${polaris_client_secret}"
 fi
+polaris_credentials_json=$(printf \
+  '{"POLARIS":{"client-id":"%s","client-secret":"%s"}}' \
+  "$polaris_client_id" "$polaris_client_secret")
+kubectl -n datalake-itest create secret generic datalake-itest-polaris-client \
+  --from-literal=POLARIS_CLIENT_ID="$polaris_client_id" \
+  --from-literal=POLARIS_CLIENT_SECRET="$polaris_client_secret" \
+  --from-literal=POLARIS_CREDENTIAL="${polaris_client_id}:${polaris_client_secret}" \
+  --from-literal=POLARIS_BOOTSTRAP_CREDENTIALS="POLARIS,${polaris_client_id},${polaris_client_secret}" \
+  --from-literal=credentials.json="$polaris_credentials_json" \
+  --dry-run=client -o yaml | kubectl apply -f -
 if ! kubectl -n datalake-itest get secret datalake-itest-polaris-token-key >/dev/null 2>&1; then
   polaris_token_key=$(openssl rand -hex 32)
   kubectl -n datalake-itest create secret generic datalake-itest-polaris-token-key \
     --from-literal=symmetric.key="$polaris_token_key"
 fi
 
-kubectl apply -f "$root_dir/polaris-bootstrap.yaml"
+kubectl apply -f "$root_dir/polaris-database-bootstrap.yaml"
 kubectl -n datalake-itest wait \
   --for=condition=complete job/polaris-database-bootstrap --timeout=10m
+
+# A JDBC-backed Polaris server cannot serve catalog requests until the official
+# Admin Tool has created polaris_schema and bootstrapped the realm. The command
+# is idempotent, so every deployment can safely verify this gate.
+kubectl apply -f "$root_dir/polaris-admin-bootstrap.yaml"
+kubectl -n datalake-itest wait \
+  --for=condition=complete job/polaris-admin-bootstrap --timeout=15m
 
 helm repo add --force-update polaris https://downloads.apache.org/polaris/helm-chart
 helm repo update polaris
@@ -165,6 +184,7 @@ helm upgrade --install polaris polaris/polaris \
   --namespace datalake-itest \
   --values "$root_dir/polaris-values.yaml" \
   --wait --timeout 15m
+kubectl apply -f "$root_dir/polaris-catalog-bootstrap.yaml"
 kubectl -n datalake-itest wait \
   --for=condition=complete job/polaris-catalog-bootstrap --timeout=10m
 
