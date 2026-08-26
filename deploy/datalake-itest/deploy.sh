@@ -79,6 +79,14 @@ if [ -n "$current_revision" ] && [ -n "$update_revision" ] && \
 fi
 kubectl -n datalake-itest rollout status statefulset/juicefs-meta --timeout=15m
 kubectl -n datalake-itest wait --for=condition=complete job/juicefs-format --timeout=10m
+
+# Gateways started while metadata was unavailable can accumulate a failed
+# progress deadline and leave obsolete ReplicaSets holding anti-affinity slots.
+# Recreate only these stateless test clients after the format gate succeeds.
+kubectl -n datalake-itest delete deployment \
+  juicefs-s3-gateway juicefs-posix-client juicefs-s3-client \
+  --ignore-not-found --wait=true
+kubectl apply -f "$root_dir/juicefs.yaml"
 kubectl -n datalake-itest rollout status deployment/juicefs-s3-gateway --timeout=15m
 kubectl -n datalake-itest rollout status deployment/juicefs-posix-client --timeout=15m
 kubectl -n datalake-itest rollout status deployment/juicefs-s3-client --timeout=10m

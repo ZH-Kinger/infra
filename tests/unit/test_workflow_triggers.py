@@ -288,6 +288,10 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn(".status.updateRevision", deploy)
         self.assertIn("juicefs-meta-0 juicefs-meta-1 juicefs-meta-2", deploy)
         self.assertIn("--ignore-not-found --wait=false", deploy)
+        self.assertIn(
+            "juicefs-s3-gateway juicefs-posix-client juicefs-s3-client", deploy
+        )
+        self.assertIn("--ignore-not-found --wait=true", deploy)
         self.assertIn("S3 <-> POSIX shared-namespace test completed", run_test)
         self.assertIn('mc pipe "jfs/factory/$OBJECT_KEY"', run_test)
         self.assertIn('mc cat "jfs/factory/$OBJECT_KEY"', run_test)
