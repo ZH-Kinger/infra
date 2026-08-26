@@ -247,6 +247,9 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn("repository: docker.m.daocloud.io/apache/polaris", polaris)
         self.assertIn("type: relational-jdbc", polaris)
         self.assertIn("name: datalake-itest-polaris-persistence", polaris)
+        self.assertIn("name: AWS_ACCESS_KEY_ID", polaris)
+        self.assertIn("name: AWS_SECRET_ACCESS_KEY", polaris)
+        self.assertGreaterEqual(polaris.count("name: datalake-itest-minio"), 3)
         self.assertIn(
             "docker.m.daocloud.io/apache/polaris-admin-tool:1.7.0",
             polaris_admin,
@@ -258,6 +261,12 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertNotIn("--credential=$(POLARIS_BOOTSTRAP_CREDENTIALS)", polaris_admin)
         self.assertIn('--from-literal=credentials.json="$polaris_credentials_json"', deploy)
         self.assertIn('stsUnavailable": true', polaris_catalog)
+        self.assertIn(
+            '"allowedLocations": ["s3://polaris-warehouse/iceberg/"]',
+            polaris_catalog,
+        )
+        self.assertIn("api/management/v1/catalogs/robotics", polaris_catalog)
+        self.assertIn('"currentEntityVersion": $entity_version', polaris_catalog)
         self.assertIn("polaris-database-bootstrap", deploy)
         self.assertIn("polaris-admin-bootstrap", deploy)
         self.assertLess(

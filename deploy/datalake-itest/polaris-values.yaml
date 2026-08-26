@@ -57,6 +57,19 @@ realmContext:
   requireHeader: false
 
 extraEnv:
+  # Polaris uses its own storage configuration for catalog operations, while
+  # the Iceberg AWS SDK path used during table validation also consults the
+  # standard AWS credential chain. Both resolve to the same scoped Secret.
+  - name: AWS_ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: datalake-itest-minio
+        key: MINIO_ROOT_USER
+  - name: AWS_SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: datalake-itest-minio
+        key: MINIO_ROOT_PASSWORD
   - name: POLARIS_BOOTSTRAP_CREDENTIALS
     valueFrom:
       secretKeyRef:
