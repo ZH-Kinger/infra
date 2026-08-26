@@ -588,8 +588,18 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 诊断：JuiceFS 拉取错误明确指向 `registry-1.docker.io` 连接超时；etcd 容器状态显示官方镜像内不存在
   `/bin/sh`，尚未进入 etcd 自身启动逻辑。
 - 处理：保持同一 JuiceFS 1.3.0 amd64 镜像摘要，通过 DaoCloud 国内代理拉取；etcd 不再通过 shell 拼接
-  参数，直接执行 `/usr/local/bin/etcd`，利用 Kubernetes `$(HOSTNAME)` 参数展开，并直接调用
-  `/usr/local/bin/etcdctl` 做健康检查。
+  参数，直接执行 `/usr/local/bin/etcd`，并直接调用 `/usr/local/bin/etcdctl` 做健康检查。Pod 名的参数注入
+  方式在第 8.31 节继续修正。
+
+### 8.31 容器内 `HOSTNAME` 不等于 PodSpec 参数变量
+
+- 现象：etcd 已能执行，但日志中的成员名和广播地址仍包含字面量 `$(HOSTNAME)`，并报
+  `couldn't find local name "$(HOSTNAME)" in the initial cluster configuration`。
+- 原因：容器运行时会在进程启动时提供 `HOSTNAME`，但 Kubernetes 对 `command/args` 的 `$(VAR_NAME)`
+  替换只使用 PodSpec 中显式声明的环境变量。
+- 处理：通过 Downward API 将 `metadata.name` 注入 `ETCD_NAME`，启动参数统一使用 `$(ETCD_NAME)`；由于
+  失败启动已经在测试 PVC 留下无效的初始成员信息，改用同一 PVC 下的新 `data-v2` 子目录重新初始化，
+  不自动删除 Bound 云盘。
 
 ## 9. 当前实验状态
 
