@@ -50,16 +50,20 @@ spec:
           image: quay.io/coreos/etcd@sha256:a1fbaea309fa27bad418200539a69cffb4c9336fe1a6b0af23874cd15293c8f8
           command: ["/usr/local/bin/etcd"]
           args:
-            - --name=$(HOSTNAME)
-            - --data-dir=/var/lib/etcd
+            - --name=$(ETCD_NAME)
+            - --data-dir=/var/lib/etcd/data-v2
             - --listen-client-urls=http://0.0.0.0:2379
-            - --advertise-client-urls=http://$(HOSTNAME).juicefs-meta-headless.datalake-itest.svc.cluster.local:2379
+            - --advertise-client-urls=http://$(ETCD_NAME).juicefs-meta-headless.datalake-itest.svc.cluster.local:2379
             - --listen-peer-urls=http://0.0.0.0:2380
-            - --initial-advertise-peer-urls=http://$(HOSTNAME).juicefs-meta-headless.datalake-itest.svc.cluster.local:2380
+            - --initial-advertise-peer-urls=http://$(ETCD_NAME).juicefs-meta-headless.datalake-itest.svc.cluster.local:2380
             - --initial-cluster-token=datalake-itest-juicefs-meta
             - --initial-cluster-state=new
             - --initial-cluster=juicefs-meta-0=http://juicefs-meta-0.juicefs-meta-headless.datalake-itest.svc.cluster.local:2380,juicefs-meta-1=http://juicefs-meta-1.juicefs-meta-headless.datalake-itest.svc.cluster.local:2380,juicefs-meta-2=http://juicefs-meta-2.juicefs-meta-headless.datalake-itest.svc.cluster.local:2380
           env:
+            - name: ETCD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: ETCDCTL_API
               value: "3"
           ports:

@@ -272,6 +272,9 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn("workload: storage", juicefs)
         self.assertIn("docker.m.daocloud.io/juicedata/mount@sha256:", juicefs)
         self.assertIn('command: ["/usr/local/bin/etcd"]', juicefs)
+        self.assertIn("fieldPath: metadata.name", juicefs)
+        self.assertIn("--name=$(ETCD_NAME)", juicefs)
+        self.assertNotIn("--name=$(HOSTNAME)", juicefs)
         old_etcd_shell_entrypoint = (
             'command: ["/bin/sh", "-ec"]\n          args:\n            - |\n              exec etcd'
         )
