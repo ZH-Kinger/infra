@@ -432,7 +432,7 @@ spec:
             - |
               rm -f /etc/apt/sources.list.d/gluster.list /etc/apt/sources.list.d/ceph.list
               apt-get update -o Acquire::Retries=5
-              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nfs-common
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nfs-common netbase
               mkdir -p /nfs
               for attempt in $(seq 1 60); do
                 mount -t nfs4 -o vers=4.1,proto=tcp,timeo=50,retrans=2 juicefs-nfs-gateway:/ /nfs && break

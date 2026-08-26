@@ -294,6 +294,7 @@ class WorkflowTriggerIsolationTests(unittest.TestCase):
         self.assertIn("S3 <-> POSIX shared-namespace test completed", run_test)
         self.assertIn("mount -t nfs4", juicefs)
         self.assertIn("nfs-kernel-server", juicefs)
+        self.assertIn("nfs-common netbase", juicefs)
         self.assertIn("S3 <-> NFSv4 shared-namespace test completed", run_test)
         self.assertIn('mc pipe "jfs/factory/$OBJECT_KEY"', run_test)
         self.assertIn('mc cat "jfs/factory/$OBJECT_KEY"', run_test)
