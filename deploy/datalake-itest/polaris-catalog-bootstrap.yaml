@@ -61,7 +61,7 @@ spec:
                   },
                   "storageConfigInfo": {
                     "storageType": "S3",
-                    "allowedLocations": ["s3://polaris-warehouse/"],
+                    "allowedLocations": ["s3://polaris-warehouse/iceberg/"],
                     "endpoint": "http://minio.datalake-itest.svc.cluster.local:9000",
                     "endpointInternal": "http://minio.datalake-itest.svc.cluster.local:9000",
                     "stsUnavailable": true,
@@ -73,6 +73,46 @@ spec:
               JSON
               )
               case "$status" in
-                201|204|409) ;;
+                201|204) ;;
+                409)
+                  get_status=$(curl -sS --connect-timeout 5 --max-time 30 \
+                    -o /tmp/current-catalog -w '%{http_code}' \
+                    -H "Authorization: Bearer $token" \
+                    http://polaris:8181/api/management/v1/catalogs/robotics)
+                  if [ "$get_status" != 200 ]; then
+                    cat /tmp/current-catalog >&2
+                    exit 1
+                  fi
+                  entity_version=$(sed -n \
+                    's/.*"entityVersion"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+                    /tmp/current-catalog)
+                  test -n "$entity_version"
+                  update_status=$(curl -sS --connect-timeout 5 --max-time 30 \
+                    -o /tmp/update-response -w '%{http_code}' -X PUT \
+                    -H "Authorization: Bearer $token" \
+                    -H 'Content-Type: application/json' \
+                    --data @- http://polaris:8181/api/management/v1/catalogs/robotics <<JSON
+              {
+                "currentEntityVersion": $entity_version,
+                "properties": {
+                  "default-base-location": "s3://polaris-warehouse/iceberg/"
+                },
+                "storageConfigInfo": {
+                  "storageType": "S3",
+                  "allowedLocations": ["s3://polaris-warehouse/iceberg/"],
+                  "endpoint": "http://minio.datalake-itest.svc.cluster.local:9000",
+                  "endpointInternal": "http://minio.datalake-itest.svc.cluster.local:9000",
+                  "stsUnavailable": true,
+                  "pathStyleAccess": true,
+                  "region": "us-east-1"
+                }
+              }
+              JSON
+                  )
+                  if [ "$update_status" != 200 ]; then
+                    cat /tmp/update-response >&2
+                    exit 1
+                  fi
+                  ;;
                 *) cat /tmp/catalog-response >&2; exit 1 ;;
               esac
