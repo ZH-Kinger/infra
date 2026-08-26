@@ -48,19 +48,20 @@ spec:
       containers:
         - name: etcd
           image: quay.io/coreos/etcd@sha256:a1fbaea309fa27bad418200539a69cffb4c9336fe1a6b0af23874cd15293c8f8
-          command: ["/bin/sh", "-ec"]
+          command: ["/usr/local/bin/etcd"]
           args:
-            - |
-              exec etcd \
-                --name "${HOSTNAME}" \
-                --data-dir /var/lib/etcd \
-                --listen-client-urls http://0.0.0.0:2379 \
-                --advertise-client-urls "http://${HOSTNAME}.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379" \
-                --listen-peer-urls http://0.0.0.0:2380 \
-                --initial-advertise-peer-urls "http://${HOSTNAME}.juicefs-meta-headless.datalake-itest.svc.cluster.local:2380" \
-                --initial-cluster-token datalake-itest-juicefs-meta \
-                --initial-cluster-state new \
-                --initial-cluster "juicefs-meta-0=http://juicefs-meta-0.juicefs-meta-headless.datalake-itest.svc.cluster.local:2380,juicefs-meta-1=http://juicefs-meta-1.juicefs-meta-headless.datalake-itest.svc.cluster.local:2380,juicefs-meta-2=http://juicefs-meta-2.juicefs-meta-headless.datalake-itest.svc.cluster.local:2380"
+            - --name=$(HOSTNAME)
+            - --data-dir=/var/lib/etcd
+            - --listen-client-urls=http://0.0.0.0:2379
+            - --advertise-client-urls=http://$(HOSTNAME).juicefs-meta-headless.datalake-itest.svc.cluster.local:2379
+            - --listen-peer-urls=http://0.0.0.0:2380
+            - --initial-advertise-peer-urls=http://$(HOSTNAME).juicefs-meta-headless.datalake-itest.svc.cluster.local:2380
+            - --initial-cluster-token=datalake-itest-juicefs-meta
+            - --initial-cluster-state=new
+            - --initial-cluster=juicefs-meta-0=http://juicefs-meta-0.juicefs-meta-headless.datalake-itest.svc.cluster.local:2380,juicefs-meta-1=http://juicefs-meta-1.juicefs-meta-headless.datalake-itest.svc.cluster.local:2380,juicefs-meta-2=http://juicefs-meta-2.juicefs-meta-headless.datalake-itest.svc.cluster.local:2380
+          env:
+            - name: ETCDCTL_API
+              value: "3"
           ports:
             - name: client
               containerPort: 2379
@@ -69,17 +70,19 @@ spec:
           readinessProbe:
             exec:
               command:
-                - /bin/sh
-                - -ec
-                - ETCDCTL_API=3 etcdctl --endpoints=http://127.0.0.1:2379 endpoint health
+                - /usr/local/bin/etcdctl
+                - --endpoints=http://127.0.0.1:2379
+                - endpoint
+                - health
             initialDelaySeconds: 10
             periodSeconds: 5
           livenessProbe:
             exec:
               command:
-                - /bin/sh
-                - -ec
-                - ETCDCTL_API=3 etcdctl --endpoints=http://127.0.0.1:2379 endpoint health
+                - /usr/local/bin/etcdctl
+                - --endpoints=http://127.0.0.1:2379
+                - endpoint
+                - health
             initialDelaySeconds: 30
             periodSeconds: 10
           resources:
@@ -119,7 +122,7 @@ spec:
         workload: cpu
       containers:
         - name: format
-          image: juicedata/mount@sha256:dfac9c74121c06216b9b669628eae0b275c95355dcc235189c20d4ce4ff35bc0
+          image: docker.m.daocloud.io/juicedata/mount@sha256:dfac9c74121c06216b9b669628eae0b275c95355dcc235189c20d4ce4ff35bc0
           env:
             - name: META_URL
               value: etcd://juicefs-meta-0.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379,juicefs-meta-1.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379,juicefs-meta-2.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379/juicefs
@@ -190,7 +193,7 @@ spec:
               topologyKey: kubernetes.io/hostname
       containers:
         - name: gateway
-          image: juicedata/mount@sha256:dfac9c74121c06216b9b669628eae0b275c95355dcc235189c20d4ce4ff35bc0
+          image: docker.m.daocloud.io/juicedata/mount@sha256:dfac9c74121c06216b9b669628eae0b275c95355dcc235189c20d4ce4ff35bc0
           env:
             - name: META_URL
               value: etcd://juicefs-meta-0.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379,juicefs-meta-1.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379,juicefs-meta-2.juicefs-meta-headless.datalake-itest.svc.cluster.local:2379/juicefs
@@ -242,7 +245,7 @@ spec:
         workload: cpu
       containers:
         - name: mount
-          image: juicedata/mount@sha256:dfac9c74121c06216b9b669628eae0b275c95355dcc235189c20d4ce4ff35bc0
+          image: docker.m.daocloud.io/juicedata/mount@sha256:dfac9c74121c06216b9b669628eae0b275c95355dcc235189c20d4ce4ff35bc0
           securityContext:
             privileged: true
           env:

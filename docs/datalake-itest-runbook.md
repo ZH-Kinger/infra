@@ -581,6 +581,16 @@ vSwitch、NAT 和四个测试 Bucket 均已消失，Terraform state 中不再有
 - 处理：不设置该插件属性，仅提供 `fs.oss.accessKeyId`、`fs.oss.accessKeySecret` 和
   `fs.oss.securityToken`，让 `AliyunOSSFileSystem` 使用内置 STS 凭据流程。
 
+### 8.30 JuiceFS 首次部署的镜像与极简容器问题
+
+- 现象：国内 ACK 节点访问 Docker Hub 超时，JuiceFS Pod 为 `ImagePullBackOff`；三个 etcd Pod 为
+  `CrashLoopBackOff`。
+- 诊断：JuiceFS 拉取错误明确指向 `registry-1.docker.io` 连接超时；etcd 容器状态显示官方镜像内不存在
+  `/bin/sh`，尚未进入 etcd 自身启动逻辑。
+- 处理：保持同一 JuiceFS 1.3.0 amd64 镜像摘要，通过 DaoCloud 国内代理拉取；etcd 不再通过 shell 拼接
+  参数，直接执行 `/usr/local/bin/etcd`，利用 Kubernetes `$(HOSTNAME)` 参数展开，并直接调用
+  `/usr/local/bin/etcdctl` 做健康检查。
+
 ## 9. 当前实验状态
 
 截至 2026-08-26，基础集成实验已经达到 `RUNTIME PASSED`：
