@@ -8,6 +8,10 @@ s3_payload="s3-to-posix-${interop_id}"
 posix_payload="posix-to-s3-${interop_id}"
 s3_key="interop/${interop_id}/s3-to-posix.txt"
 posix_key="interop/${interop_id}/posix-to-s3.txt"
+nfs_payload="s3-to-nfs-${interop_id}"
+nfs_write_payload="nfs-to-s3-${interop_id}"
+nfs_key="interop/${interop_id}/s3-to-nfs.txt"
+nfs_write_key="interop/${interop_id}/nfs-to-s3.txt"
 
 # The quoted script must expand inside the remote container, not in this shell.
 # shellcheck disable=SC2016
@@ -54,6 +58,51 @@ kubectl -n datalake-itest exec deployment/juicefs-s3-client -- \
   '
 
 printf '%s\n' "JuiceFS S3 <-> POSIX shared-namespace test completed."
+
+# Exercise the real NFSv4 wire protocol, not merely another FUSE/POSIX client.
+# shellcheck disable=SC2016
+kubectl -n datalake-itest exec deployment/juicefs-s3-client -- \
+  env OBJECT_KEY="$nfs_key" EXPECTED="$nfs_payload" /bin/sh -ec '
+    printf "%s" "$EXPECTED" | mc pipe "jfs/factory/$OBJECT_KEY"
+  '
+
+# shellcheck disable=SC2016
+kubectl -n datalake-itest exec deployment/juicefs-nfs-client -- \
+  env FILE="/nfs/$nfs_key" EXPECTED="$nfs_payload" /bin/sh -ec '
+    attempt=0
+    while [ "$attempt" -lt 60 ]; do
+      actual=$(cat "$FILE" 2>/dev/null || true)
+      [ "$actual" = "$EXPECTED" ] && exit 0
+      attempt=$((attempt + 1))
+      sleep 2
+    done
+    printf "S3-written object was not visible through NFSv4: %s\n" "$FILE" >&2
+    exit 1
+  '
+
+# shellcheck disable=SC2016
+kubectl -n datalake-itest exec deployment/juicefs-nfs-client -- \
+  env FILE="/nfs/$nfs_write_key" EXPECTED="$nfs_write_payload" /bin/sh -ec '
+    mkdir -p "$(dirname "$FILE")"
+    printf "%s" "$EXPECTED" > "$FILE"
+    sync
+  '
+
+# shellcheck disable=SC2016
+kubectl -n datalake-itest exec deployment/juicefs-s3-client -- \
+  env OBJECT_KEY="$nfs_write_key" EXPECTED="$nfs_write_payload" /bin/sh -ec '
+    attempt=0
+    while [ "$attempt" -lt 60 ]; do
+      actual=$(mc cat "jfs/factory/$OBJECT_KEY" 2>/dev/null || true)
+      [ "$actual" = "$EXPECTED" ] && exit 0
+      attempt=$((attempt + 1))
+      sleep 2
+    done
+    printf "NFSv4-written file was not visible through S3: %s\n" "$OBJECT_KEY" >&2
+    exit 1
+  '
+
+printf '%s\n' "JuiceFS S3 <-> NFSv4 shared-namespace test completed."
 
 dag_ready=false
 attempt=0
