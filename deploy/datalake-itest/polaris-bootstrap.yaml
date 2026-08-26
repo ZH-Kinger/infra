@@ -1,0 +1,114 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: polaris-database-bootstrap
+  namespace: datalake-itest
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        workload: cpu
+      containers:
+        - name: postgresql-client
+          image: docker.m.daocloud.io/library/postgres:16.4-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-lakefs-config
+                  key: POSTGRES_PASSWORD
+            - name: POLARIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-polaris-persistence
+                  key: password
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              until pg_isready -h lakefs-postgresql -U lakefs -d postgres; do sleep 3; done
+              if ! psql -h lakefs-postgresql -U lakefs -d postgres -tAc \
+                "SELECT 1 FROM pg_roles WHERE rolname='polaris'" | grep -q 1; then
+                psql -h lakefs-postgresql -U lakefs -d postgres -v ON_ERROR_STOP=1 \
+                  -c "CREATE USER polaris WITH PASSWORD '$POLARIS_PASSWORD'"
+              else
+                psql -h lakefs-postgresql -U lakefs -d postgres -v ON_ERROR_STOP=1 \
+                  -c "ALTER USER polaris WITH PASSWORD '$POLARIS_PASSWORD'"
+              fi
+              if ! psql -h lakefs-postgresql -U lakefs -d postgres -tAc \
+                "SELECT 1 FROM pg_database WHERE datname='polaris'" | grep -q 1; then
+                createdb -h lakefs-postgresql -U lakefs -O polaris polaris
+              fi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: polaris-catalog-bootstrap
+  namespace: datalake-itest
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        workload: cpu
+      containers:
+        - name: curl
+          image: docker.m.daocloud.io/curlimages/curl:8.10.1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POLARIS_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-polaris-client
+                  key: POLARIS_CLIENT_ID
+            - name: POLARIS_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: datalake-itest-polaris-client
+                  key: POLARIS_CLIENT_SECRET
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              until curl -fsS http://polaris-mgmt:8182/q/health/ready >/dev/null; do sleep 3; done
+              token_response=$(curl -fsS -X POST \
+                -H 'Content-Type: application/x-www-form-urlencoded' \
+                --data-urlencode grant_type=client_credentials \
+                --data-urlencode "client_id=$POLARIS_CLIENT_ID" \
+                --data-urlencode "client_secret=$POLARIS_CLIENT_SECRET" \
+                --data-urlencode scope=PRINCIPAL_ROLE:ALL \
+                http://polaris:8181/api/catalog/v1/oauth/tokens)
+              token=$(printf '%s' "$token_response" | sed -n \
+                's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+              test -n "$token"
+              status=$(curl -sS -o /tmp/catalog-response -w '%{http_code}' -X POST \
+                -H "Authorization: Bearer $token" \
+                -H 'Content-Type: application/json' \
+                --data @- http://polaris:8181/api/management/v1/catalogs <<'JSON'
+              {
+                "catalog": {
+                  "name": "robotics",
+                  "type": "INTERNAL",
+                  "readOnly": false,
+                  "properties": {
+                    "default-base-location": "s3://polaris-warehouse/iceberg/"
+                  },
+                  "storageConfigInfo": {
+                    "storageType": "S3",
+                    "allowedLocations": ["s3://polaris-warehouse/"],
+                    "endpoint": "http://minio.datalake-itest.svc.cluster.local:9000",
+                    "endpointInternal": "http://minio.datalake-itest.svc.cluster.local:9000",
+                    "stsUnavailable": true,
+                    "pathStyleAccess": true,
+                    "region": "us-east-1"
+                  }
+                }
+              }
+              JSON
+              )
+              case "$status" in
+                201|204|409) ;;
+                *) cat /tmp/catalog-response >&2; exit 1 ;;
+              esac

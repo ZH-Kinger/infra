@@ -30,6 +30,8 @@ fi
 kubectl -n datalake-itest delete job minio-bootstrap --ignore-not-found
 kubectl -n datalake-itest delete job juicefs-format --ignore-not-found
 kubectl -n datalake-itest delete job lakefs-bootstrap --ignore-not-found
+kubectl -n datalake-itest delete job \
+  polaris-database-bootstrap polaris-catalog-bootstrap --ignore-not-found
 
 # The first failed deployment may have created unbound PVCs before an ESSD
 # StorageClass was specified. PVC storageClassName is immutable, so repair only
@@ -130,6 +132,41 @@ kubectl -n datalake-itest rollout status deployment/lakefs --timeout=15m
 kubectl -n datalake-itest wait --for=condition=complete job/lakefs-bootstrap --timeout=10m
 kubectl -n datalake-itest rollout status deployment/lakefs-s3-client --timeout=10m
 kubectl -n datalake-itest rollout status deployment/lakefs-api-client --timeout=10m
+
+if ! kubectl -n datalake-itest get secret datalake-itest-polaris-persistence >/dev/null 2>&1; then
+  polaris_postgres_password=$(openssl rand -hex 24)
+  kubectl -n datalake-itest create secret generic datalake-itest-polaris-persistence \
+    --from-literal=username=polaris \
+    --from-literal=password="$polaris_postgres_password" \
+    --from-literal=jdbcUrl=jdbc:postgresql://lakefs-postgresql:5432/polaris
+fi
+if ! kubectl -n datalake-itest get secret datalake-itest-polaris-client >/dev/null 2>&1; then
+  polaris_client_secret=$(openssl rand -hex 32)
+  kubectl -n datalake-itest create secret generic datalake-itest-polaris-client \
+    --from-literal=POLARIS_CLIENT_ID=root \
+    --from-literal=POLARIS_CLIENT_SECRET="$polaris_client_secret" \
+    --from-literal=POLARIS_CREDENTIAL="root:${polaris_client_secret}" \
+    --from-literal=POLARIS_BOOTSTRAP_CREDENTIALS="POLARIS,root,${polaris_client_secret}"
+fi
+if ! kubectl -n datalake-itest get secret datalake-itest-polaris-token-key >/dev/null 2>&1; then
+  polaris_token_key=$(openssl rand -hex 32)
+  kubectl -n datalake-itest create secret generic datalake-itest-polaris-token-key \
+    --from-literal=symmetric.key="$polaris_token_key"
+fi
+
+kubectl apply -f "$root_dir/polaris-bootstrap.yaml"
+kubectl -n datalake-itest wait \
+  --for=condition=complete job/polaris-database-bootstrap --timeout=10m
+
+helm repo add --force-update polaris https://downloads.apache.org/polaris/helm-chart
+helm repo update polaris
+helm upgrade --install polaris polaris/polaris \
+  --version 1.7.0 \
+  --namespace datalake-itest \
+  --values "$root_dir/polaris-values.yaml" \
+  --wait --timeout 15m
+kubectl -n datalake-itest wait \
+  --for=condition=complete job/polaris-catalog-bootstrap --timeout=10m
 
 kubectl -n datalake-itest create configmap datalake-itest-runtime \
   --from-literal=LANDING_BUCKET="$LANDING_BUCKET" \
