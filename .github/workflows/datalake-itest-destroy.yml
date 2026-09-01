@@ -31,9 +31,9 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
@@ -65,7 +65,7 @@ jobs:
           cp infra/tests/datalake/tfplan /tmp/destroy-artifact/tfplan
           cp /tmp/destroy-plan.txt /tmp/destroy-artifact/plan.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: datalake-itest-destroy-${{ github.sha }}
           path: /tmp/destroy-artifact/
@@ -77,9 +77,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: development
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
@@ -91,7 +91,7 @@ jobs:
           audience: ${{ env.ALIBABA_CLOUD_OIDC_AUDIENCE }}
           role-session-name: datalake-destroy-apply-${{ github.run_id }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: datalake-itest-destroy-${{ github.sha }}
           path: /tmp/destroy
