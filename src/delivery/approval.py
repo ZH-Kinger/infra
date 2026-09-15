@@ -9,7 +9,7 @@
   · 表单里的申请单号就是这张申请单（防止一个审批实例被套用到另一张单子上）
   · 实例没有被撤销（reverted：通过后又被撤销的单据，status 可能仍是 APPROVED）
   · 至少有一位申请人以外的审批人点了通过（task_list 里 APPROVED 的任务）：只有本人或自动通过的
-    不算，allow_self_approval=true 才放开。只算 APPROVED 不算 DONE（或签节点里别人批了，其余是 DONE）
+    不算，allow_self_approval=true 才放开。只算 APPROVED 不算 DONE（或签里别人批了，其余是 DONE）
 
 飞书回调、本地保存的状态都只当「该去查一次了」的提示，不当结论。
 
