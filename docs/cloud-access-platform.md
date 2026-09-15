@@ -119,6 +119,10 @@ server.py ── HTTP 接口、角色校验、CSRF
 | `delivery` CLI：`request` / `creds` / `assets` / `requests sweep` / `approval widgets` | 已完成 |
 | 真实云上联调（执行身份、资源中心、飞书审批定义） | 待准备配置后实测 |
 | 状态通知：申请人飞书私信（开通、可领取、失败、未通过、即将到期、到期收回），开通失败告警到管理员群（`notify.py`，`DELIVERY_NOTIFY=1`） | 已完成 |
+| 申请人以外的审批人同意才开通（`task_list` 核对，`allow_self_approval` 默认关） | 已完成 |
+| 管理后台「权限规则」：全部策略是否对员工开放、原因、风险天数（只读） | 已完成 |
+| 管理后台「系统状态」：配置缺项、快照过期、执行身份、通知、卡住的申请单（`health.py`，不调外部接口） | 已完成 |
+| 申请详情一键打开飞书审批（PC / 手机 AppLink） | 已完成 |
 | 公司 IAM 模式下的 CLI 登录、飞书审批回调 | 后续 |
 
 ## 8. 代码地图
@@ -134,5 +138,7 @@ server.py ── HTTP 接口、角色校验、CSRF
 | `assets.py` | 资源中心采集与视图 |
 | `policies.py` | 权限策略目录采集、申请规则（禁用、风险、天数） |
 | `notify.py` | 申请状态通知：申请人飞书私信卡片、开通失败管理员告警 |
+| `health.py` | 管理后台系统状态检查 |
+| `notify.py` | 飞书私信与管理员告警 |
 | `cli_requests.py` | CLI 子命令 |
 | `web/core.js` · `web/requests.js` · `web/assets.js` | 前端公共工具、申请页面、资产页面 |
