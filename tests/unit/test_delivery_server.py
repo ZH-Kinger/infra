@@ -307,13 +307,19 @@ class ApiTests(unittest.TestCase):
                 "/api/admin/overview",
                 "/api/admin/people",
                 "/api/admin/people/on_1",
+                "/api/admin/health",
             ):
                 self.assertEqual(live.get(path)[0], 401, path)
 
     def test_non_admin_gets_403_on_admin_routes(self):
         with self._live() as live:
             sid = self._login(live, "on_1")
-            for path in ("/api/admin/overview", "/api/admin/people", "/api/admin/people/on_admin"):
+            for path in (
+                "/api/admin/overview",
+                "/api/admin/people",
+                "/api/admin/people/on_admin",
+                "/api/admin/health",
+            ):
                 status, body = self._get(live, path, sid)
                 self.assertEqual(status, 403, path)
                 self.assertNotIn("boss", json.dumps(body))
@@ -378,6 +384,9 @@ class ApiTests(unittest.TestCase):
             self.assertEqual([a["name"] for a in detail["accounts"]], ["xints"])
             self.assertEqual(self._get(live, "/api/admin/people/on_nobody", sid)[0], 404)
             self.assertEqual(self._get(live, "/api/admin/people?filter=bogus", sid)[0], 400)
+            status, state = self._get(live, "/api/admin/health", sid)
+            self.assertEqual(status, 200)
+            self.assertIn("summary", state)
 
     def test_broken_snapshot_is_an_error_not_empty_data(self):
         (self.dir / "inventory.json").write_text("{", encoding="utf-8")

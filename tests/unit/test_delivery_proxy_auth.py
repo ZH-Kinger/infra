@@ -459,8 +459,9 @@ class ProxyModeServerTests(unittest.TestCase):
         self.assertEqual(data["role"], "user")
 
     def test_non_admin_forbidden(self):
-        status, _ = self._req("GET", "/api/admin/people", _headers(**{H_UNION_ID: "on_x"}))
-        self.assertEqual(status, 403)
+        for path in ("/api/admin/people", "/api/admin/health"):
+            status, _ = self._req("GET", path, _headers(**{H_UNION_ID: "on_x"}))
+            self.assertEqual(status, 403, path)
 
 
 class FeishuModeUnchangedTests(unittest.TestCase):

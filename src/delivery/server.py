@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import assets as assets_mod
+from . import health as health_mod
 from . import inventory
 from . import notify as notify_mod
 from . import people as people_mod
@@ -321,6 +322,7 @@ _STATIC = {
     "/requests.js": ("requests.js", "text/javascript; charset=utf-8"),
     "/assets.js": ("assets.js", "text/javascript; charset=utf-8"),
     "/permissions.js": ("permissions.js", "text/javascript; charset=utf-8"),
+    "/health.js": ("health.js", "text/javascript; charset=utf-8"),
 }
 #: 页面只加载同源资源。前端不拼 innerHTML，这条 CSP 是第二道闸。
 _CSP = (
@@ -329,6 +331,14 @@ _CSP = (
 )
 _ADMIN_PEOPLE = "/api/admin/people/"
 _ADMIN_REVIEW = "/api/admin/review"
+
+
+def _approval_ready(backend) -> Optional[bool]:
+    """审批对象能不能建出来（不发网络请求）；配置本身读坏了交给系统状态页那一项去报。"""
+    try:
+        return backend.approval() is not None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _is_requests_path(path: str) -> bool:
@@ -811,6 +821,17 @@ def make_handler(
                 )
             if _is_requests_path(path):
                 return self._requests("GET", path, None)
+            if path == "/api/admin/health":
+                if self._require(admin=True) is None:
+                    return None
+                return self._json(
+                    200,
+                    health_mod.collect(
+                        backend,
+                        auth_mode="proxy" if proxy is not None else "feishu",
+                        approval_ready=_approval_ready(backend),
+                    ),
+                )
             if path in ("/api/assets", "/api/admin/assets"):
                 admin = path == "/api/admin/assets"
                 session = self._require(admin=admin)

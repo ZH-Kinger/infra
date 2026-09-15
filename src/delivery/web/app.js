@@ -7,6 +7,7 @@
 
 import { ApiError, api, apiPost, clear, h, mount, platformTag, requestTitle, safePath } from "./core.js";
 import { renderAssets } from "./assets.js";
+import { renderHealth } from "./health.js";
 import { permissionRoutes } from "./permissions.js";
 import { requestRoutes } from "./requests.js";
 
@@ -134,6 +135,7 @@ function parseHash() {
   if (path === "admin/requests") return { page: "admin-requests", filter: query || "open", space: "admin" };
   if (path === "admin/assets") return { page: "admin-assets", space: "admin" };
   if (path === "admin/policies") return { page: "admin-policies", space: "admin" };
+  if (path === "admin/health") return { page: "admin-health", space: "admin" };
   if (path === "assets") return { page: "assets", space: "user" };
   if (path === "admin") return { page: "admin", space: "admin" };
   if (path.startsWith("request=")) {
@@ -178,6 +180,10 @@ function route() {
       () => api(`/api/admin/people/${encodeURIComponent(key)}`),
       (detail) => mount(personPage(detail, { admin: true })),
     );
+  }
+  if (page === "admin-health") {
+    markTab("admin-health");
+    return renderHealth({ load });
   }
   if (page === "admin-policies") {
     markTab("admin-policies");

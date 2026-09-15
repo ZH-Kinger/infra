@@ -315,6 +315,13 @@ label.perm:hover{background:var(--surface-2)}
 .rules-card .chips{display:flex; gap:.35rem; flex-wrap:wrap}
 .rules-card code.pill{font-family:var(--mono); font-weight:500}
 .admin-perm{cursor:default}
+.health-row{display:grid; grid-template-columns:4.5rem minmax(0,1fr); gap:.75rem; align-items:start;
+  padding:.85rem 1.25rem; border-top:1px solid var(--hair)}
+.health-row:first-child{border-top:0}
+.health-row .pill{justify-self:start; margin-top:.1rem}
+.health-fix{margin:.25rem 0 0; font-size:.8125rem; color:var(--ink-2); overflow-wrap:anywhere}
+.health-fix b{font-weight:600; color:var(--ink)}
+.health-row.level-crit{background:color-mix(in srgb,var(--crit-soft) 45%,transparent)}
 .grant-name.mono{font-family:var(--mono); font-size:.8125rem}
 .grant-list li{display:flex; align-items:center; gap:.5rem; flex-wrap:wrap}
 .grant-name{font-size:.875rem; color:var(--ink); overflow-wrap:anywhere; flex:1; min-width:0}
