@@ -177,6 +177,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     srv.add_argument("--admins", default=None, help="管理员名单，默认 identity/admins.json")
     srv.add_argument(
+        "--proposal",
+        default="identity/sso-map.proposal.json",
+        help="映射提案，名册审核重建名册时用",
+    )
+    srv.add_argument(
+        "--manual", default="identity/manual-links.json", help="人工记录，名册审核写入这里"
+    )
+    srv.add_argument(
         "--labels",
         default="identity/accounts.json",
         help='云账号显示名，形如 {"aliyun/<UID>": "主账号"}',
@@ -208,10 +216,30 @@ def build_parser() -> argparse.ArgumentParser:
     iamx.add_argument(
         "--baseline",
         default="",
-        help="上次发给 IT 的属性表（或 latest = identity/iam-sent/ 里最新一份），只导出变化",
+        help="只导出变化。基线必须是 identity/iam-sent/ 里经 IT 确认的全量存档，latest = 最新一份",
     )
     iamx.add_argument(
-        "--record", action="store_true", help="把本次导出存档到 identity/iam-sent/，作为下次的基线"
+        "--record",
+        action="store_true",
+        help="把本次的全量状态存进 identity/iam-sent/pending/，等 IT 确认导入后再 --confirm-sent",
+    )
+    iamx.add_argument(
+        "--confirm-sent",
+        default="",
+        metavar="FILE",
+        help="IT 确认已导入后执行：把 pending 里的这份存档转为正式基线",
+    )
+    iamx.add_argument(
+        "--resolved",
+        action="append",
+        default=[],
+        metavar="EMAIL",
+        help="已核对无误的邮箱：上次因邮箱复用或姓名不符被跳过的行，这次正常导出",
+    )
+    iamx.add_argument(
+        "--allow-mass-remove",
+        action="store_true",
+        help="增量里 remove 超过阈值、或基线里有人整体消失时，确认无误后才加",
     )
 
     ppl = isub.add_parser("people", help="生成人员名册：映射提案 + 通讯录 union_id")
@@ -227,6 +255,42 @@ def build_parser() -> argparse.ArgumentParser:
         default="identity/manual-links.json",
         help="人工确认的对应（优先于规则推断），格式见 people.apply_manual",
     )
+
+    rf = commands.add_parser(
+        "refresh", help="定时任务：采集权限快照、生成映射提案、重建人员名册，异常时飞书告警"
+    )
+    rf.add_argument("--inventory", default="identity/inventory.json")
+    rf.add_argument("--proposal", default="identity/sso-map.proposal.json")
+    rf.add_argument("--people", default="identity/people.json")
+    rf.add_argument("--manual", default="identity/manual-links.json")
+    rf.add_argument(
+        "--directory",
+        default="none",
+        help="union_id 来源：none（默认，沿用上一份名册）、feishu、csv:<路径>",
+    )
+    rf.add_argument("--domain", default="wuji.tech", help="企业邮箱域名")
+    rf.add_argument(
+        "--baseline",
+        default="identity/inventory.baseline.json",
+        help="变化比对基线，只有采集成功的平台才更新",
+    )
+    rf.add_argument(
+        "--aliyun-profile",
+        action="append",
+        default=[],
+        metavar="PREFIX",
+        help="阿里云凭证环境变量前缀，可重复，快照和映射提案都按这些账号采集",
+    )
+    rf.add_argument(
+        "--service", action="append", default=[], metavar="NAME", help="同 identity sso-map"
+    )
+    rf.add_argument(
+        "--trust-unverified-when-derivable",
+        action="store_true",
+        help="同 identity sso-map：企业邮箱未验证、但用户名可由它推出时也直接确认。"
+        "要和上次手动生成提案时的选择一致，否则名册里的已确认账号会变",
+    )
+    rf.add_argument("--no-alert", action="store_true", help="只打印，不发飞书告警")
 
     lg = commands.add_parser("login", help="用飞书账号登录（浏览器授权）")
     lg.add_argument("--server", default="", help="后端地址，默认取 DELIVERY_SERVER")
@@ -580,7 +644,7 @@ def _cmd_identity_map(args: argparse.Namespace) -> int:
         w.writerow(["平台", "账号", "飞书邮箱", "云用户名（填进飞书工号）", "来源"])
         for m in mappings:
             w.writerow([m.platform, m.account, m.email, m.cloud_name, m.source])
-        Path(args.csv).write_text(buf.getvalue(), encoding="utf-8")
+        _write_private_text(args.csv, buf.getvalue())
         print(f"\nCSV 已写入 {args.csv}")
     return 0 if not pending else 1
 
@@ -631,7 +695,7 @@ def _cmd_identity(args: argparse.Namespace) -> int:
     else:
         print(render(report, limit=args.limit))
     if args.csv:
-        Path(args.csv).write_text(to_csv(report), encoding="utf-8")
+        _write_private_text(args.csv, to_csv(report))
         print(f"\nCSV 已写入 {args.csv}")
     # 未清零时返回 1：让它能直接当 CI 门禁用
     return 0 if report.ready else 1
@@ -777,15 +841,8 @@ def _cmd_identity_ssomap(args) -> int:
         trust_unverified_when_derivable=args.trust_unverified_when_derivable,
     )
 
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(proposal.to_dict(), ensure_ascii=False, indent=2) + "\n"
-    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, payload.encode("utf-8"))
-    finally:
-        os.close(fd)
-    out.chmod(0o600)
+    out = _write_private(args.out, proposal.to_dict())
 
     if args.json:
         print(payload, end="")
@@ -880,36 +937,57 @@ def _is_under(path: Path, base: Path) -> bool:
 
 def _write_private(path: str, data: dict) -> Path:
     """含全员身份/权限数据的文件：0600，原子替换。"""
+    return _write_private_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def _write_private_text(path: str, text: str) -> Path:
     out = Path(path).resolve()  # 先解析符号链接，临时文件和替换都基于真实路径
     _require_identity_dir(out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_suffix(out.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
-    finally:
-        os.close(fd)
-    tmp.replace(out)
+    _atomic_private_write(out, text.encode("utf-8"))
     return out
+
+
+def _atomic_private_write(out: Path, payload: bytes) -> None:
+    """临时文件用 mkstemp（O_EXCL、随机名），不会顺着事先放好的符号链接写到别处。"""
+    import tempfile
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{out.name}.", suffix=".tmp", dir=out.parent)
+    try:
+        try:
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
+        Path(tmp).chmod(0o600)
+        Path(tmp).replace(out)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _snapshot_jobs(aliyun_profiles, skip) -> list:
+    from .clouds import aliyun, volcano
+    from .inventory_collect import collect_aliyun, collect_volcano
+
+    jobs = []
+    if "aliyun" not in skip:
+        for prefix in aliyun_profiles or ["ALIYUN"]:
+            creds = aliyun.Credentials.from_env(prefix)
+            jobs.append(("aliyun", prefix, lambda p, c=creds: collect_aliyun(c, progress=p)))
+    if "volcano" not in skip:
+        vcreds = volcano.Credentials.from_env()
+        jobs.append(("volcano", "default", lambda p: collect_volcano(vcreds, progress=p)))
+    return jobs
 
 
 def _cmd_inventory_collect(args) -> int:
     from . import inventory
-    from .clouds import aliyun, volcano
-    from .inventory_collect import build_snapshot, collect_aliyun, collect_volcano
+    from .inventory_collect import build_snapshot
 
     def say(msg: str) -> None:
         print(f"\r\033[K{msg}", end="", file=sys.stderr, flush=True)
 
-    jobs = []
-    if "aliyun" not in args.skip:
-        for prefix in args.aliyun_profile or ["ALIYUN"]:
-            creds = aliyun.Credentials.from_env(prefix)
-            jobs.append(("aliyun", prefix, lambda p, c=creds: collect_aliyun(c, progress=p)))
-    if "volcano" not in args.skip:
-        vcreds = volcano.Credentials.from_env()
-        jobs.append(("volcano", "default", lambda p: collect_volcano(vcreds, progress=p)))
-    data = build_snapshot(jobs, progress=say)
+    data = build_snapshot(_snapshot_jobs(args.aliyun_profile, args.skip), progress=say)
     for skipped in args.skip:
         # 跳过也要留痕：否则快照看起来是完整的，名册里那朵云的账号全显示「快照中不存在」
         data["accounts"].append({"platform": skipped, "account": "*", "error": "本次采集跳过"})
@@ -1003,71 +1081,16 @@ def _iam_rows(index, specs: dict) -> list:
     return rows
 
 
-def _iam_person_key(row: dict) -> tuple:
-    return (row["feishu_union_id"], row["email"].lower())
-
-
-def _iam_diff(current: list, baseline: list) -> list:
-    """只留变化：新增或改值 → set；基线里 set 过、现在没有了 → remove。
-
-    人按 union_id 对，没有 union_id 时按邮箱对（这个人上次还没有 union_id 的情况）。
-    skip 行不进增量：IT 不需要处理它们，原因在全量导出和命令输出里看。
-    """
-
-    def index_rows(rows):
-        by_uid, by_mail = {}, {}
-        for r in rows:
-            if r["action"] != "set":
-                continue
-            if r["feishu_union_id"]:
-                by_uid[(r["feishu_union_id"], r["app"])] = r
-            if r["email"]:
-                by_mail[(r["email"].lower(), r["app"])] = r
-        return by_uid, by_mail
-
-    def find(r, by_uid, by_mail):
-        if r["feishu_union_id"]:
-            hit = by_uid.get((r["feishu_union_id"], r["app"]))
-            if hit is not None:
-                return hit
-        if not r["email"]:
-            return None
-        hit = by_mail.get((r["email"].lower(), r["app"]))
-        # 按邮箱对只用于「一边还没有 union_id」：两边都有且不同，就是两个人（邮箱被复用）
-        if hit is not None and r["feishu_union_id"] and hit["feishu_union_id"]:
-            return None
-        return hit
-
-    old_uid, old_mail = index_rows(baseline)
-    new_uid, new_mail = index_rows(current)
-    out = []
-    for r in current:
-        if r["action"] != "set":
-            continue
-        prev = find(r, old_uid, old_mail)
-        if prev is None or prev["value"] != r["value"]:
-            out.append(dict(r))
-    for prev in baseline:
-        if prev["action"] != "set" or find(prev, new_uid, new_mail) is not None:
-            continue
-        removed = dict(prev, action="remove", problem="")
-        # 基线里这个人还没有 union_id、现在有了：按 union_id 删更准。
-        # 基线里已有 union_id 的绝不改成别人的（邮箱可能已复用给新人）。
-        if not prev["feishu_union_id"] and prev["email"]:
-            for r in current:
-                if r["email"].lower() == prev["email"].lower() and r["feishu_union_id"]:
-                    removed["feishu_union_id"] = r["feishu_union_id"]
-                    removed["match_by"] = "feishu_union_id"
-                    break
-        out.append(removed)
-    return out
-
-
 def _resolve_baseline(value: str) -> Path:
+    from .iam_export import confirmed_archives
+
     if value == "latest":
-        archived = sorted(Path(IAM_SENT_DIR).glob("*.csv"))
+        archived = confirmed_archives(Path(IAM_SENT_DIR))
         if not archived:
-            raise DeliveryError(f"{IAM_SENT_DIR} 里还没有存档：第一次请导出全量并加 --record")
+            raise DeliveryError(
+                f"{IAM_SENT_DIR} 里还没有确认过的存档：第一次请导出全量加 --record，"
+                "IT 导入后再 --confirm-sent"
+            )
         return archived[-1]
     path = Path(value)
     if not path.exists():
@@ -1075,24 +1098,17 @@ def _resolve_baseline(value: str) -> Path:
     return path
 
 
-def _csv_cell(value: str) -> str:
-    # Excel 打开 CSV 时会把 = + - @ 开头的格子当公式执行
-    return "'" + value if value[:1] in ("=", "+", "-", "@") else value
-
-
-def _csv_uncell(value: str) -> str:
-    return value[1:] if value[:1] == "'" and value[1:2] in ("=", "+", "-", "@") else value
-
-
 def _read_iam_csv(path: Path) -> list:
     import csv
+
+    from .iam_export import uncell
 
     try:
         with path.open(encoding="utf-8-sig", newline="") as fh:
             reader = csv.DictReader(fh)
             if reader.fieldnames != IAM_CSV_HEADER:
                 raise DeliveryError(f"{path} 不是当前格式的属性表（表头不一致），不能当基线")
-            return [{k: _csv_uncell(v or "") for k, v in row.items()} for row in reader]
+            return [{k: uncell(k, v or "") for k, v in row.items()} for row in reader]
     except OSError as exc:
         raise DeliveryError(f"读不了基线 {path}：{exc}") from exc
 
@@ -1101,21 +1117,16 @@ def _write_iam_csv(out: Path, rows: list) -> None:
     import csv
     import io
 
+    from .iam_export import cell
+
     out = out.resolve()
     _require_identity_dir(out)
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(IAM_CSV_HEADER)
     for r in rows:
-        writer.writerow([_csv_cell(r[k]) if k != "action" else r[k] for k in IAM_CSV_HEADER])
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_suffix(out.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, buf.getvalue().encode("utf-8-sig"))
-    finally:
-        os.close(fd)
-    tmp.replace(out)
+        writer.writerow([cell(k, r[k]) for k in IAM_CSV_HEADER])
+    _atomic_private_write(out, buf.getvalue().encode("utf-8-sig"))
 
 
 def _cmd_identity_iam_export(args) -> int:
@@ -1124,8 +1135,25 @@ def _cmd_identity_iam_export(args) -> int:
     默认导出全量；`--baseline` 只导出与上次发给 IT 的存档相比有变化的行，
     删号、改名以 remove / set 表达。`--record` 把本次结果存档。
     """
+    from . import iam_export
     from . import people as people_mod
 
+    if args.confirm_sent:
+        if args.baseline or args.record or args.allow_mass_remove or args.resolved:
+            raise DeliveryError("--confirm-sent 只做确认，不能和 --baseline / --record 等一起用")
+        return _confirm_sent(args.confirm_sent)
+    sent_dir = Path(IAM_SENT_DIR).resolve()
+    if Path(args.out).resolve().is_relative_to(sent_dir):
+        raise DeliveryError(f"--out 不能写到 {IAM_SENT_DIR} 里：那里只放确认过的全量存档")
+    if (
+        args.record
+        and args.baseline != "latest"
+        and iam_export.confirmed_archives(Path(IAM_SENT_DIR))
+    ):
+        raise DeliveryError(
+            "已经有确认过的基线：--record 必须和 --baseline latest 一起用。"
+            "否则这份存档没有对应的 remove，确认后旧值会永远留在 IAM 里"
+        )
     bindings = Path(args.people).with_name("bindings.json")
     index = people_mod.load(args.people, bindings_path=str(bindings) if bindings.exists() else None)
     attr_file = Path(args.attributes)
@@ -1170,12 +1198,38 @@ def _cmd_identity_iam_export(args) -> int:
     if len(set(columns)) != len(columns):
         raise DeliveryError(f"{attr_file} 里有两个云账号用了同一个应用标识，值会互相覆盖")
 
-    full = _iam_rows(index, specs)
+    full = iam_export.sanitize(_iam_rows(index, specs))
     rows = full
+    notes: list = []
+    baseline = None
+    base_rows: list = []
+    if args.resolved and not args.baseline:
+        raise DeliveryError("--resolved 只在增量导出（--baseline latest）时有意义")
     if args.baseline:
         baseline = _resolve_baseline(args.baseline)
-        rows = _iam_diff(full, _read_iam_csv(baseline))
+        base_rows = _read_iam_csv(baseline)
+        iam_export.check_baseline(baseline, base_rows, Path(IAM_SENT_DIR))
+        rows, notes = iam_export.diff(
+            full,
+            base_rows,
+            current_apps={key for key, _ in specs.values()},
+            allow_mass_remove=args.allow_mass_remove,
+            resolved_emails=frozenset(args.resolved),
+        )
         print(f"对比基线 {baseline}")
+
+    archive = None
+    if args.record:
+        # 存档路径先过守卫再写主输出：守卫失败时不能留下一份没有存档的输出
+        pending = Path(IAM_SENT_DIR) / "pending"
+        archive = pending / time.strftime("%Y%m%d-%H%M%S.csv")
+        n = 1
+        while archive.exists() or (Path(IAM_SENT_DIR) / archive.name).exists():
+            archive = archive.with_name(f"{archive.stem.split('~')[0]}~{n}.csv")
+            n += 1
+        _require_identity_dir(archive.resolve())
+        meta = archive.with_name(archive.name + ".meta.json")
+        _require_identity_dir(meta.resolve())
 
     out = Path(args.out)
     _write_iam_csv(out, rows)
@@ -1184,50 +1238,124 @@ def _cmd_identity_iam_export(args) -> int:
         f"已写入 {out}（权限 600）：set {counts['set']} 条，remove {counts['remove']} 条，"
         f"skip {counts['skip']} 条"
     )
-    if args.record:
+    for note in notes:
+        print(f"  ⚠ {note}")
+    if archive is not None:
         # 存档的是全量状态，不是这次的增量：下次比对要靠它发现删号
-        archive = Path(IAM_SENT_DIR) / time.strftime("%Y%m%d-%H%M%S.csv")
-        n = 1
-        while archive.exists():  # 同一秒内再次存档，不覆盖前一份
-            archive = archive.with_name(f"{archive.stem.split('~')[0]}~{n}.csv")
-            n += 1
-        _write_iam_csv(archive, full)
-        print(f"  已存档为 {archive}：下次用 --baseline latest 只导出变化")
+        _write_iam_csv(archive, iam_export.recorded_state(full, rows, base_rows))
+        # 记下这份存档是对着哪个基线导出的：确认时基线必须没变，否则中间那次的 remove 会丢
+        _write_private(str(meta), {"baseline": baseline.name if baseline else ""})
+        print(
+            f"  已存入待确认 {archive}。IT 确认导入后执行："
+            f"delivery identity iam-export --confirm-sent {archive}"
+        )
     print(
-        "  导入须知：match_by=email 的行只按邮箱回填一次，回填时同时写下 union_id，"
-        "之后只按 union_id 匹配"
+        "  导入须知：match_by=email 的行只按邮箱回填一次，且只用于 IAM 里还没有 union_id 的用户，"
+        "回填时同时写下 union_id；remove（match_by=value）删除当前值恰好等于 value 的那个用户的该键"
     )
     return 0
 
 
-def _cmd_identity_people(args) -> int:
+def _confirm_sent(value: str) -> int:
+    """IT 确认导入后，把 pending 里的存档转为正式基线。"""
+    from .iam_export import ARCHIVE_NAME, archive_order, check_baseline, confirmed_archives
+
+    src = Path(value)
+    sent = Path(IAM_SENT_DIR)
+    pending = sent / "pending"
+    if src.is_symlink() or not src.is_file():
+        raise DeliveryError(f"{src} 不存在或是符号链接")
+    if src.resolve().parent != pending.resolve() or not ARCHIVE_NAME.match(src.name):
+        raise DeliveryError(f"只能确认 {pending} 里 --record 生成的存档")
+    meta_path = src.with_name(src.name + ".meta.json")
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        recorded = str(meta["baseline"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise DeliveryError(f"{src} 缺少存档说明 {meta_path.name}，不能确认") from exc
+    archives = confirmed_archives(sent)
+    latest = archives[-1].name if archives else ""
+    for other in sorted(pending.glob("*.csv.meta.json")):
+        name = other.name[: -len(".meta.json")]
+        if archive_order(Path(name)) >= archive_order(src):
+            continue
+        try:
+            same = json.loads(other.read_text(encoding="utf-8")).get("baseline") == recorded
+        except (OSError, ValueError, AttributeError):
+            same = True
+        if same:
+            raise DeliveryError(
+                f"pending 里还有更早的 {name} 也是对着同一个基线导出的。"
+                "如果两份都发给了 IT：先确认更早的那份，再重新 --baseline latest --record；"
+                "如果更早那份没发，删掉它再确认这份"
+            )
+    if recorded != latest:
+        raise DeliveryError(
+            f"{src.name} 是对着基线「{recorded or '无'}」导出的，"
+            f"但现在的最新基线是「{latest or '无'}」。"
+            "中间有别的存档被确认过，这份的 remove 不完整：请重新 --baseline latest --record"
+        )
+    rows = _read_iam_csv(src)
+    target = sent / src.name
+    check_baseline(target, rows, sent)
+    _require_identity_dir(target.resolve())
+    try:
+        os.link(src.resolve(), target.resolve())  # 目标已存在时失败，不会覆盖
+    except FileExistsError:
+        raise DeliveryError(f"{target} 已存在，不覆盖") from None
+    except OSError as exc:
+        raise DeliveryError(f"确认失败：{type(exc).__name__}（文件系统不支持硬链接？）") from None
+    src.unlink()
+    meta_path.unlink()
+    print(f"已确认 {target}：之后 --baseline latest 以它为基线")
+    return 0
+
+
+def _directory_entries(source: str, *, progress: bool) -> list:
     from .identity import directory
+
+    if source == "feishu":
+        say = (
+            (lambda m: print(f"\r\033[K{m}", end="", file=sys.stderr, flush=True))
+            if progress
+            else None
+        )
+        entries = directory.from_feishu(
+            os.environ.get("DELIVERY_FEISHU_APP_ID", ""),
+            os.environ.get("DELIVERY_FEISHU_APP_SECRET", ""),
+            progress=say,
+        )
+        if progress:
+            print("\r\033[K", end="", file=sys.stderr)
+        return entries
+    if source.startswith("csv:"):
+        return directory.from_csv(source[4:])
+    if source == "none":
+        # 暂时拿不到通讯录：名册里人人 union_id 为空，本人首次登录时按企业邮箱关联
+        return []
+    raise DeliveryError("--directory 只能是 feishu、csv:<路径> 或 none")
+
+
+def _load_manual(path: str) -> Optional[dict]:
+    manual_path = Path(path)
+    if not manual_path.exists():
+        return None
+    try:
+        return json.loads(manual_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DeliveryError(f"读不了人工对应 {manual_path}：{exc}") from exc
+
+
+def _cmd_identity_people(args) -> int:
     from .people import apply_manual, build, parse
 
     try:
         proposal = json.loads(Path(args.proposal).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise DeliveryError(f"读不了映射提案 {args.proposal}：{exc}") from exc
-    if args.directory == "feishu":
-        entries = directory.from_feishu(
-            os.environ.get("DELIVERY_FEISHU_APP_ID", ""),
-            os.environ.get("DELIVERY_FEISHU_APP_SECRET", ""),
-            progress=lambda m: print(f"\r\033[K{m}", end="", file=sys.stderr, flush=True),
-        )
-        print("\r\033[K", end="", file=sys.stderr)
-    elif args.directory.startswith("csv:"):
-        entries = directory.from_csv(args.directory[4:])
-    elif args.directory == "none":
-        # 暂时拿不到通讯录：名册里人人 union_id 为空，本人首次登录时按企业邮箱关联
-        entries = []
-    else:
-        raise DeliveryError("--directory 只能是 feishu、csv:<路径> 或 none")
-    manual_path = Path(args.manual)
-    if manual_path.exists():
-        try:
-            manual = json.loads(manual_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise DeliveryError(f"读不了人工对应 {manual_path}：{exc}") from exc
+    entries = _directory_entries(args.directory, progress=True)
+    manual = _load_manual(args.manual)
+    if manual:
         proposal = apply_manual(proposal, manual)
     data = build(proposal, entries)
     parse(data)  # 自检
@@ -1248,6 +1376,142 @@ def _cmd_identity_people(args) -> int:
     for mail in stats["email_collisions_in_directory"]:
         print(f"  ⚠ 通讯录里多人共用企业邮箱 {mail}，这些人不回填")
     return 0
+
+
+def _review_paths(args) -> dict:
+    """名册审核会写名册和人工记录：路径过不了写盘守卫就不开审核功能。"""
+    try:
+        for path in (args.people, args.manual, args.proposal):
+            _require_identity_dir(Path(path).resolve())
+    except DeliveryError as exc:
+        print(f"  ⚠ 名册审核已关闭：{str(exc).splitlines()[0]}")
+        return {}
+    return {"proposal_path": args.proposal, "manual_path": args.manual}
+
+
+def _cmd_refresh(args) -> int:
+    """定时任务入口：快照 → 提案 → 名册，有异常或变化就发飞书告警。"""
+    from . import alerts, refresh
+
+    report = refresh.RefreshReport()
+    try:
+        code = _refresh_locked(args, report)
+    except Exception as exc:  # noqa: BLE001 — 定时任务里任何失败都要进告警
+        report.problems.append(f"刷新中断：{refresh.brief(exc)}")
+        code = None
+    if code == 75:
+        return 75
+    if sys.stderr.isatty():
+        print("\r\033[K", end="", file=sys.stderr)
+
+    text = report.render()
+    print(text)
+    code = 0 if report.ok else 1
+    if not report.needs_attention or args.no_alert:
+        return code
+    alert_conf = alerts.from_env(os.environ)
+    if alert_conf is None:
+        print(f"  ⚠ 需要告警但没设置 {alerts.ENV_WEBHOOK}（不需要告警加 --no-alert）")
+        return 1
+    try:
+        alerts.send_feishu(text, webhook=alert_conf[0], secret=alert_conf[1])
+        print("已发送飞书告警")
+    except alerts.AlertError as exc:
+        print(f"  ⚠ {exc}")
+        return 1
+    return code
+
+
+def _read_previous(path: str, what: str, errors: list, parse) -> Optional[dict]:
+    """上一份数据：不存在返回 None；存在但读不了或格式不对记进 errors（不能当成第一次运行）。"""
+    file = Path(path)
+    if not file.exists():
+        return None
+    try:
+        data = json.loads(file.read_text(encoding="utf-8"))
+        parse(data)
+    except (OSError, ValueError, DeliveryError) as exc:
+        errors.append(f"上一份{what}读不了：{type(exc).__name__}")
+        return None
+    return data
+
+
+def _refresh_locked(args, report) -> Optional[int]:
+    import fcntl
+
+    from . import refresh
+    from .clouds import aliyun, volcano
+    from .identity import cloudcollect
+    from .identity.ssomap import propose
+    from .inventory_collect import build_snapshot
+
+    interactive = sys.stderr.isatty()
+
+    def say(msg: str) -> None:
+        if interactive:
+            print(f"\r\033[K{msg}", end="", file=sys.stderr, flush=True)
+
+    lock_path = Path(args.people).resolve().parent / ".refresh.lock"
+    _require_identity_dir(lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("上一次刷新还没结束，本次跳过")
+            return 75
+
+        from . import inventory
+        from . import people as people_mod
+
+        errors: list = []
+        previous_people = _read_previous(args.people, "名册", errors, people_mod.parse)
+        baseline_errors: list = []
+        previous_baseline = _read_previous(
+            args.baseline, "比对基线", baseline_errors, inventory.parse
+        )
+        if previous_baseline is None and not baseline_errors:
+            # 第一次跑还没有基线：拿现有快照当起点，避免首轮把所有人报成新增
+            previous_baseline = _read_previous(
+                args.inventory, "权限快照", baseline_errors, inventory.parse
+            )
+        report.problems.extend(baseline_errors)
+        profiles = args.aliyun_profile or ["ALIYUN"]
+
+        def collect_proposal() -> dict:
+            accounts = []
+            for prefix in profiles:
+                accounts += cloudcollect.collect_aliyun(
+                    aliyun.Credentials.from_env(prefix), progress=say
+                )
+            accounts += cloudcollect.collect_volcano(volcano.Credentials.from_env(), progress=say)
+            services = list(args.service) + _load_service_names("identity/services.json")
+            return propose(
+                accounts,
+                domain=args.domain,
+                service_names=services,
+                trust_unverified_when_derivable=args.trust_unverified_when_derivable,
+            ).to_dict()
+
+        refresh.run(
+            collect_snapshot=lambda: build_snapshot(_snapshot_jobs(profiles, ()), progress=say),
+            collect_proposal=collect_proposal,
+            directory=lambda: _directory_entries(args.directory, progress=False),
+            manual=_load_manual(args.manual),
+            previous_baseline=previous_baseline,
+            previous_people=previous_people,
+            write_snapshot=lambda d: _write_private(args.inventory, d),
+            write_baseline=lambda d: _write_private(args.baseline, d),
+            write_proposal=lambda d: _write_private(args.proposal, d),
+            write_people=lambda d: _write_private(args.people, d),
+            carry_over=args.directory == "none",
+            previous_errors=errors,
+            report=report,
+        )
+        return None
+    finally:
+        os.close(lock_fd)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -1279,11 +1543,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 people_path=args.people,
                 admins_path=args.admins,
                 labels_path=args.labels,
+                **_review_paths(args),
                 auth=args.auth,
             )
             return 0
         if args.command == "inventory":
             return _cmd_inventory_collect(args)
+        if args.command == "refresh":
+            return _cmd_refresh(args)
         if args.command == "login":
             return _cmd_login(args)
         if args.command == "doctor":

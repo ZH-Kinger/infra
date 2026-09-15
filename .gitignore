@@ -40,3 +40,9 @@ identity/*
 **/bindings.json
 **/bindings.json.tmp
 **/bindings.log
+**/bindings.json.lock
+**/.bindings.json.*.tmp
+**/.people.json.*.tmp
+**/.manual-links.json.*.tmp
+**/review.log
+**/.refresh.lock

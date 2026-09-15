@@ -14,6 +14,8 @@
   GET  /api/admin/overview   管理员：各云账号统计、告警。
   GET  /api/admin/people     管理员：人员列表，?filter=all|multi|high_risk|unbound|no_account
   GET  /api/admin/people/<key>  管理员：某个人的权限详情。
+  GET  /api/admin/review     管理员：名册审核的人工记录。
+  POST /api/admin/review     管理员：确认 / 驳回 / 分配 / 标记服务号 / 撤销（见 review.py）。
   GET  /auth/login       跳飞书授权页（带 PKCE 与 state）。
                          代理登录模式下 /auth/* 全部 404，登录退出走 oauth2-proxy 的 /oauth2/*。
   GET  /auth/callback    接飞书回调，换 token，建会话。
@@ -39,6 +41,7 @@ from typing import Optional
 
 from . import inventory
 from . import people as people_mod
+from . import review as review_mod
 from .errors import DeliveryError
 from .feishu import FeishuError, FeishuUser, exchange_code, fetch_user
 from .login import _pkce_pair, authorize_url
@@ -309,6 +312,8 @@ _CSP = (
     "connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 )
 _ADMIN_PEOPLE = "/api/admin/people/"
+_ADMIN_REVIEW = "/api/admin/review"
+_REVIEW_MAX_BODY = 4096
 
 
 class Backend:
@@ -328,7 +333,11 @@ class Backend:
         admins_path: Optional[str] = None,
         labels_path: Optional[str] = None,
         platforms: Optional[dict] = None,
+        proposal_path: Optional[str] = None,
+        manual_path: Optional[str] = None,
     ):
+        self.proposal_path = proposal_path
+        self.manual_path = manual_path
         self.inventory_path = inventory_path
         self.people_path = people_path
         self.bindings_path = bindings_path
@@ -396,6 +405,16 @@ class Backend:
             return Labels(self.platforms, accounts)
 
         return self._cached("labels", self._stamp(self.labels_path), build)
+
+    def review_paths(self) -> Optional[review_mod.ReviewPaths]:
+        if not (self.people_path and self.proposal_path and self.manual_path):
+            return None
+        return review_mod.ReviewPaths(
+            proposal=self.proposal_path,
+            manual=self.manual_path,
+            people=self.people_path,
+            bindings=self.bindings_path,
+        )
 
     def role(self, user: FeishuUser) -> str:
         # 只拿企业邮箱做兼容比对；个人联系邮箱不是公司分配的，不能用来认管理员。
@@ -644,10 +663,79 @@ def make_handler(
                         include_pending=True,
                     ),
                 )
+            if path == _ADMIN_REVIEW:
+                if self._require(admin=True) is None:
+                    return None
+                paths = backend.review_paths()
+                if paths is None:
+                    return self._json(200, {"enabled": False, "records": []})
+                return self._json(
+                    200, {"enabled": True, "records": review_mod.records(paths.manual)}
+                )
             return self._json(404, {"error": "没有这个接口"})
+
+        def _same_origin_json(self) -> Optional[str]:
+            """写接口的 CSRF 防护：必须是本站前端发的 JSON 请求。返回拒绝原因。"""
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype != "application/json":
+                return "Content-Type 必须是 application/json"
+            if self.headers.get("X-Panel-Request") != "1":
+                return "缺少 X-Panel-Request 请求头"
+            site = self.headers.get("Sec-Fetch-Site")
+            if site and site not in ("same-origin", "none"):
+                return "跨站请求被拒绝"
+            origin = self.headers.get("Origin")
+            if origin:
+                # 经 nginx / oauth2-proxy 转发后 Host 可能是内部地址：也接受配置的对外地址
+                allowed = {self.headers.get("Host") or "", urllib.parse.urlsplit(base_url).netloc}
+                if urllib.parse.urlsplit(origin).netloc not in allowed - {""}:
+                    return "跨站请求被拒绝"
+            return None
+
+        def _review(self):
+            session = self._require(admin=True)
+            if session is None:
+                return None
+            refused = self._same_origin_json()
+            if refused:
+                return self._json(403, {"error": refused})
+            paths = backend.review_paths()
+            if paths is None:
+                return self._json(404, {"error": "服务端没有配置映射提案和人工记录路径"})
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if length <= 0 or length > _REVIEW_MAX_BODY:
+                return self._json(400, {"error": "请求体为空或过大"})
+            try:
+                payload = json.loads(self.rfile.read(length).decode())
+            except (ValueError, UnicodeDecodeError):
+                return self._json(400, {"error": "请求体不是合法 JSON"})
+            if not isinstance(payload, dict):
+                return self._json(400, {"error": "请求体必须是对象"})
+            user = session.user
+            try:
+                result = review_mod.apply(
+                    paths,
+                    payload,
+                    actor_union_id=user.union_id,
+                    actor_name=user.name,
+                )
+            except review_mod.ReviewError as exc:
+                if exc.status >= 500:
+                    print(f"[review] {exc}", file=sys.stderr)
+                    return self._json(exc.status, {"error": "名册审核暂不可用，请查看服务端日志"})
+                return self._json(exc.status, {"error": str(exc)})
+            except Exception as exc:  # noqa: BLE001 — 任何异常都回 JSON
+                print(f"[review] {type(exc).__name__}: {exc}", file=sys.stderr)
+                return self._json(500, {"error": "名册审核失败，请查看服务端日志"})
+            return self._json(200, result)
 
         def do_POST(self):  # noqa: N802
             path = urllib.parse.urlsplit(self.path).path
+            if path == _ADMIN_REVIEW:
+                return self._review()
             if proxy is not None or path != "/auth/exchange":
                 return self._json(404, {"error": "not found"})
             length = int(self.headers.get("Content-Length") or 0)
@@ -750,6 +838,8 @@ def serve(
     people_path: Optional[str] = None,
     admins_path: Optional[str] = None,
     labels_path: Optional[str] = None,
+    proposal_path: Optional[str] = None,
+    manual_path: Optional[str] = None,
     auth: Optional[str] = None,
     echo=print,
 ) -> None:
@@ -769,6 +859,8 @@ def serve(
         admins_path=admins_path,
         labels_path=labels_path,
         platforms={p.id: p.display for p in registry},
+        proposal_path=proposal_path,
+        manual_path=manual_path,
     )
     handler = make_handler(
         registry,

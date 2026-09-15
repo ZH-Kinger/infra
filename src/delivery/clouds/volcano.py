@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -145,7 +146,7 @@ def call(
     if status == 200 and "Result" in body:
         return body["Result"]
     err = (body.get("ResponseMetadata") or {}).get("Error") or {}
-    code, message = str(err.get("Code") or ""), str(err.get("Message") or "")
+    code, message = str(err.get("Code") or ""), _scrub(str(err.get("Message") or ""))
     blob = f"{code} {message}".lower()
     if any(m in blob for m in _DENIED):
         raise VolcanoDenied(
@@ -153,6 +154,13 @@ def call(
             f"当前凭证缺 `{action}` 的权限。这不是「没有数据」——采集已中断。"
         )
     raise VolcanoError(f"`{action}` 失败 HTTP {status}：{code} {message[:200]}")
+
+
+def _scrub(message: str) -> str:
+    """错误消息会进告警和日志：去掉可能回显的 AccessKey 与签名。"""
+    message = re.sub(r"(Credential=)[^/\s,]+", r"\1<hidden>", message)
+    message = re.sub(r"(Signature=)[0-9a-fA-F]+", r"\1<hidden>", message)
+    return re.sub(r"\bAKLT[A-Za-z0-9+/=_-]{8,}", "<hidden>", message)
 
 
 def paginate(

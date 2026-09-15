@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh cloud permission panel data daily
+
+[Timer]
+# 每天 07:30 和 13:30，上班前和午后各一次
+OnCalendar=*-*-* 07:30:00
+OnCalendar=*-*-* 13:30:00
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

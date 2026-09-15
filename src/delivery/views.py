@@ -251,7 +251,16 @@ def admin_people(
     }[filter]
     picked = [r for r in rows if pick(r)]
     picked.sort(key=lambda r: (-len(r["high_risk"]), -r["account_count"], r["name"]))
-    return {"people": picked, "unlinked_accounts": _unlinked_rows(snapshot, index, labels)}
+    # 名册审核「分配给」的候选：全员（含没有云账号的新人），只给有邮箱的
+    assignable = sorted(
+        ({"name": p.name, "email": p.email.lower()} for p in index.people if p.email),
+        key=lambda x: (x["name"], x["email"]),
+    )
+    return {
+        "people": picked,
+        "unlinked_accounts": _unlinked_rows(snapshot, index, labels),
+        "assignable": assignable,
+    }
 
 
 __all__ = ["FILTERS", "Labels", "admin_overview", "admin_people", "person_detail"]

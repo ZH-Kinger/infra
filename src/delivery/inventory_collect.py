@@ -247,6 +247,8 @@ def build_snapshot(jobs, *, progress: Optional[Progress] = None, now: Callable =
             # 取第一行非空文本；消息为空也必须留下非空 error，否则 parse 会把这个账号
             # 当成「采集完整、没有用户」——正是这个模块要防的情况
             first = next((ln.strip() for ln in str(exc).splitlines() if ln.strip()), "")
+            # 错误会进快照、面板和飞书告警：两家的凭证回显都去掉
+            first = aliyun._scrub(volcano._scrub(first))
             accounts.append(
                 {
                     "platform": platform,

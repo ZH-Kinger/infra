@@ -156,6 +156,12 @@ h2{font-size:.9375rem; font-weight:600; margin:0}
 .search{margin-left:auto; min-width:14rem; padding:.4rem .8rem; border-radius:980px;
         border:1px solid var(--hair-strong); background:var(--surface); color:var(--ink); font-size:.875rem}
 .scroll{overflow-x:auto; -webkit-overflow-scrolling:touch}
+/* 名册审核 */
+.review-actions{display:flex; gap:.4rem; flex-wrap:wrap; align-items:center}
+.search.assign{margin-left:0; min-width:11rem}
+button.btn{border:0; cursor:pointer; font:inherit}
+button.btn.ghost{border:1px solid var(--hair)}
+button.btn:disabled{opacity:.5; cursor:progress}
 table{border-collapse:collapse; width:100%; font-size:.8125rem; font-variant-numeric:tabular-nums}
 th,td{text-align:left; padding:.6rem 1rem; border-top:1px solid var(--hair); vertical-align:top}
 thead th{border-top:0; font-size:.6875rem; font-weight:600; letter-spacing:.04em; color:var(--ink-3);

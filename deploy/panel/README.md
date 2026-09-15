@@ -56,6 +56,7 @@ PANEL_PROXY_SECRET="$(cat proxy_secret)" oauth2-proxy --alpha-config=oauth2-prox
 | `DELIVERY_IAM_USERINFO_URL` | 可选。名册里还没有某人 union_id 时，查 IAM 邮箱做首次关联 |
 | `DELIVERY_IAM_EMAIL_DOMAINS` | 配了 userinfo 就必填，逗号分隔。只接受这些域名、且 `email_verified` 为 true 的邮箱 |
 | `DELIVERY_LOGOUT_URL` | 可选，默认 `/oauth2/sign_out`（只清代理会话，不退出 IAM） |
+| `DELIVERY_BASE_URL` | 面板对外地址，如 `https://<面板域名>`。名册审核等写操作会校验请求的 Origin，nginx 改写了 `Host` 时必须设置，否则写操作一律 403 |
 
 ## 安全要点
 
@@ -66,6 +67,36 @@ PANEL_PROXY_SECRET="$(cat proxy_secret)" oauth2-proxy --alpha-config=oauth2-prox
 - IAM 邮箱只用于名册首次关联，不用于判断权限。查 userinfo 不跟随重定向，避免 token 被带到别的地址。
 - 会话最长 8 小时（`--cookie-expire=8h`）。IAM 停用某人后，他已有的会话最多还能用到过期。
 - 代理模式下面板的 `/auth/*`（飞书登录、CLI 换票）全部关闭。CLI 走 IAM 另做。
+
+## 定时刷新数据
+
+面板读三个文件：权限快照 `identity/inventory.json`、映射提案、人员名册 `identity/people.json`。
+`delivery refresh` 一次跑完三步，适合交给 systemd timer（见 `delivery-refresh.service` / `.timer`）。
+
+```bash
+delivery refresh --trust-unverified-when-derivable   # 和手动生成提案时的选项保持一致
+```
+
+| 情况 | 行为 |
+|---|---|
+| 全部采集成功 | 快照、提案、名册都更新；有新增高危权限、增删子账号、新的未关联账号、没能沿用 union_id 的人时发告警 |
+| 某朵云采集失败 | 快照照写（面板会标出没采全），**名册和提案不重建**，发告警，退出码 1 |
+| 上一份名册或比对基线存在但读不了 | 名册不重建，发告警，退出码 1 |
+| 上一次还没跑完 | 跳过，退出码 75 |
+| 需要告警但没配机器人 / 告警没发出去 | 退出码 1，systemd 日志里能看到 |
+
+变化比对用单独的基线 `identity/inventory.baseline.json`，只有采集成功的平台才更新，
+某朵云临时采集失败期间发生的变化，恢复后照样能报出来。
+
+`--directory` 默认 `none`：不调飞书通讯录，从上一份名册带过来：
+- union_id：邮箱唯一对上、已确认账号非空且完全没变的人才沿用；上一份里重复出现的 union_id 不沿用
+- 「通讯录里多人共用这个邮箱」的标记：照带，否则这一行会变成谁先登录谁认领
+- 只在通讯录里、没有云账号的人：保留
+
+有通讯录权限时用 `--directory feishu`。多个阿里云账号用 `--aliyun-profile` 逐个列出，快照和提案都按这些账号采集。
+
+环境变量：两朵云只读凭证、`DELIVERY_ALERT_WEBHOOK`、`DELIVERY_ALERT_SECRET`（机器人必须开签名校验）。
+告警内容含云账号用户名，只发到管理员所在的内部群。
 
 ## 回退
 

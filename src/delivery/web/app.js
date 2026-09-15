@@ -6,7 +6,7 @@
 //   · 非管理员永远不发 /api/admin/* 请求——不靠后端 403 兜底来「隐藏」页面。
 
 const app = document.getElementById("app");
-const state = { session: null, loginUrl: "", peopleFilter: "all", peopleQuery: "", peopleCache: null };
+const state = { session: null, loginUrl: "", peopleFilter: "all", peopleQuery: "", peopleCache: null, flash: null };
 
 const PLATFORM_CLASS = { aliyun: "aliyun", volcano: "volcano" };
 const FOLD_LIMIT = 8;
@@ -78,6 +78,65 @@ async function api(path) {
     throw new ApiError(resp.status, body.error || fallback[resp.status] || `请求失败（HTTP ${resp.status}）`);
   }
   return body;
+}
+
+// 写接口：带 X-Panel-Request 头和 JSON 类型，服务端据此挡跨站请求
+async function apiPost(path, body) {
+  let resp;
+  try {
+    resp = await fetch(path, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", Accept: "application/json", "X-Panel-Request": "1" },
+      body: JSON.stringify(body),
+      cache: "no-store",
+    });
+  } catch {
+    throw new ApiError(0, "连不上服务，请检查本地服务是否在运行。");
+  }
+  let data = {};
+  try {
+    data = await resp.json();
+  } catch {
+    data = {};
+  }
+  if (!resp.ok) throw new ApiError(resp.status, data.error || `操作失败（HTTP ${resp.status}）`);
+  return data;
+}
+
+// ── 名册审核 ──────────────────────────────────────────────────────────────
+const REVIEW_DONE = {
+  confirm: "已确认对应",
+  reject: "已驳回对应",
+  assign: "已分配账号",
+  service: "已标记为服务号",
+  undo: "已撤销人工记录",
+};
+
+async function review(body, question, button, rerender) {
+  if (question && !window.confirm(question)) return;
+  if (button) button.disabled = true;
+  try {
+    await apiPost("/api/admin/review", body);
+    state.flash = { tone: "good", text: `${REVIEW_DONE[body.op] || "已保存"}：${body.account}` };
+  } catch (err) {
+    if (err.status === 401) {
+      state.session = null;
+      return renderLogin();
+    }
+    state.flash = { tone: "crit", text: err.message };
+  }
+  rerender();
+}
+
+function flashBanner() {
+  const f = state.flash;
+  state.flash = null;
+  return f ? h("div", { class: `banner ${f.tone}`, role: "status" }, f.text) : null;
+}
+
+function accountKey(a) {
+  return `${a.platform}/${a.account}/${a.name}`;
 }
 
 // ── 通用状态视图 ──────────────────────────────────────────────────────────
@@ -356,6 +415,7 @@ function personPage(detail, { admin }) {
   );
 
   nodes.push(incompleteBanner(detail.snapshot_incomplete));
+  if (admin) nodes.push(flashBanner());
 
   if (!admin && detail.binding === "bound_now") {
     nodes.push(h("div", { class: "banner good" }, "已按企业邮箱关联到你的账号并记录 union_id。之后登录只按 union_id 识别。"));
@@ -417,7 +477,7 @@ function personPage(detail, { admin }) {
         "section",
         { class: "group" },
         h("div", { class: "group-label" }, "待确认对应"),
-        h("div", { class: "accounts" }, pending.map(pendingCard)),
+        h("div", { class: "accounts" }, pending.map((item) => pendingCard(item, admin ? person : null))),
       ),
     );
   }
@@ -426,7 +486,36 @@ function personPage(detail, { admin }) {
 
 const PENDING_STATUS = { review: "待人工确认", blocked: "受阻" };
 
-function pendingCard(item) {
+function pendingCard(item, person) {
+  let actions = null;
+  if (person && person.email) {
+    const body = (op) => ({ op, email: person.email, account: accountKey(item) });
+    const who = person.name || person.email;
+    actions = h(
+      "div",
+      { class: "section review-actions" },
+      h(
+        "button",
+        {
+          type: "button",
+          class: "btn small",
+          onclick: (e) => review(body("confirm"), `确认 ${item.name} 是 ${who} 的账号？确认后会进入 IAM 属性表。`, e.currentTarget, route),
+        },
+        "确认是此人",
+      ),
+      h(
+        "button",
+        {
+          type: "button",
+          class: "btn small ghost",
+          onclick: (e) => review(body("reject"), `${item.name} 不是 ${who} 的账号？以后刷新也不再推给此人。`, e.currentTarget, route),
+        },
+        "不是此人",
+      ),
+    );
+  } else if (person) {
+    actions = h("div", { class: "section" }, h("p", { class: "muted" }, "此人没有邮箱，暂不能在面板上处理。"));
+  }
   return h(
     "article",
     { class: "card acct pending" },
@@ -442,6 +531,7 @@ function pendingCard(item) {
       h("span", { class: item.status === "blocked" ? "pill crit" : "pill warn" }, PENDING_STATUS[item.status] || item.status || "待确认"),
     ),
     h("div", { class: "section" }, h("p", { class: "muted" }, "映射尚未确认，不展示这个账号的权限。")),
+    actions,
   );
 }
 
@@ -467,11 +557,14 @@ async function renderAdmin() {
   mount(skeleton());
   let overview;
   let people;
+  let records;
   const retry = () => renderAdmin();
   try {
-    [overview, people] = await Promise.all([
+    [overview, people, records] = await Promise.all([
       api("/api/admin/overview"),
       api(`/api/admin/people?filter=${encodeURIComponent(state.peopleFilter)}`),
+      // 审核数据坏了不能拖垮整个总览页：只是不显示审核功能
+      api("/api/admin/review").catch((err) => ({ enabled: false, records: [], error: err.message })),
     ]);
   } catch (err) {
     const view = errorView(err instanceof ApiError ? err : new ApiError(0, String(err)), retry);
@@ -479,13 +572,14 @@ async function renderAdmin() {
     return;
   }
   state.peopleCache = people;
-  mount(adminPage(overview, people));
+  mount(adminPage(overview, people, records));
 }
 
-function adminPage(overview, people) {
+function adminPage(overview, people, records) {
   const totals = overview.totals || {};
   const nodes = [
     h("header", { class: "masthead" }, h("h1", {}, "人员总览"), snapshotLine(overview.captured_at)),
+    flashBanner(),
     incompleteBanner(overview.snapshot_incomplete),
   ];
   for (const w of overview.warnings || []) nodes.push(h("div", { class: "banner warn" }, w));
@@ -533,8 +627,53 @@ function adminPage(overview, people) {
   );
 
   nodes.push(peopleSection(people));
-  nodes.push(unlinkedSection(people.unlinked_accounts || []));
+  const editable = Boolean(records && records.enabled);
+  if (records && records.error) nodes.push(h("div", { class: "banner warn" }, `名册审核暂不可用：${records.error}`));
+  nodes.push(unlinkedSection(people.unlinked_accounts || [], editable ? people.assignable || [] : null));
+  if (editable) nodes.push(recordsSection(records.records || []));
   return nodes;
+}
+
+const RECORD_KIND = { link: "人工确认给", rejected: "驳回对应", service: "服务号" };
+
+function recordsSection(items) {
+  const rows = items.map((r) =>
+    h(
+      "tr",
+      {},
+      h("td", {}, h("span", { class: "mono" }, r.account)),
+      h("td", {}, h("span", { class: r.kind === "rejected" ? "pill warn" : "pill" }, RECORD_KIND[r.kind] || r.kind)),
+      h("td", {}, r.name ? h("span", {}, r.name, " ") : null, r.email ? h("span", { class: "pmail" }, r.email) : h("span", { class: "muted" }, "—")),
+      h(
+        "td",
+        {},
+        h(
+          "button",
+          {
+            type: "button",
+            class: "btn small ghost",
+            onclick: (e) => review({ op: "undo", account: r.account }, `撤销对 ${r.account} 的人工记录？会回到规则推断的结果。`, e.currentTarget, renderAdmin),
+          },
+          "撤销",
+        ),
+      ),
+    ),
+  );
+  return h(
+    "details",
+    { class: "card fold" },
+    h("summary", {}, "人工记录", h("span", { class: "muted" }, String(items.length))),
+    h(
+      "div",
+      { class: "scroll" },
+      h(
+        "table",
+        {},
+        h("thead", {}, h("tr", {}, h("th", {}, "账号"), h("th", {}, "类型"), h("th", {}, "人员"), h("th", {}, ""))),
+        h("tbody", {}, rows.length ? rows : h("tr", {}, h("td", { colspan: "4", class: "muted" }, "没有"))),
+      ),
+    ),
+  );
 }
 
 function peopleSection(people) {
@@ -650,7 +789,55 @@ function personRow(p) {
   );
 }
 
-function unlinkedSection(items) {
+function unlinkedSection(items, assignable) {
+  const listId = "assignable-people";
+  const actionCell = (a) => {
+    if (!assignable || a.kind === "service") return null;
+    const input = h("input", {
+      class: "search assign",
+      type: "email",
+      list: listId,
+      placeholder: "分配给（邮箱）",
+      "aria-label": `把 ${a.name} 分配给`,
+    });
+    const key = accountKey(a);
+    return h(
+      "td",
+      {},
+      h(
+        "div",
+        { class: "review-actions" },
+        input,
+        h(
+          "button",
+          {
+            type: "button",
+            class: "btn small",
+            onclick: (e) => {
+              const email = input.value.trim().toLowerCase();
+              if (!email) {
+                input.focus();
+                return;
+              }
+              const hit = assignable.find((p) => p.email === email);
+              const who = hit ? `${hit.name}（${email}）` : email;
+              review({ op: "assign", email, account: key }, `把 ${a.name} 分配给 ${who}？分配后会进入 IAM 属性表。`, e.currentTarget, renderAdmin);
+            },
+          },
+          "分配",
+        ),
+        h(
+          "button",
+          {
+            type: "button",
+            class: "btn small ghost",
+            onclick: (e) => review({ op: "service", account: key }, `把 ${a.name} 标记为服务号？服务号不会分配给任何人。`, e.currentTarget, renderAdmin),
+          },
+          "标为服务号",
+        ),
+      ),
+    );
+  };
   const rows = items.map((a) =>
     h(
       "tr",
@@ -660,8 +847,12 @@ function unlinkedSection(items) {
       h("td", {}, a.kind === "service" ? h("span", { class: "pill" }, "服务号") : h("span", { class: "pill warn" }, "待确认")),
       h("td", { class: "num" }, String(a.policy_count ?? "—")),
       h("td", {}, (a.high_risk || []).length ? h("span", { class: "pill crit", title: a.high_risk.join("\n") }, String(a.high_risk.length)) : h("span", { class: "muted" }, "—")),
+      assignable ? actionCell(a) || h("td", {}) : null,
     ),
   );
+  const datalist = assignable
+    ? h("datalist", { id: listId }, assignable.map((p) => h("option", { value: p.email }, p.name || p.email)))
+    : null;
   return h(
     "details",
     { class: "card fold" },
@@ -672,9 +863,10 @@ function unlinkedSection(items) {
       h(
         "table",
         {},
-        h("thead", {}, h("tr", {}, h("th", {}, "平台"), h("th", {}, "用户名"), h("th", {}, "类型"), h("th", { class: "num" }, "权限条数"), h("th", {}, "高危"))),
-        h("tbody", {}, rows.length ? rows : h("tr", {}, h("td", { colspan: "5", class: "muted" }, "没有"))),
+        h("thead", {}, h("tr", {}, h("th", {}, "平台"), h("th", {}, "用户名"), h("th", {}, "类型"), h("th", { class: "num" }, "权限条数"), h("th", {}, "高危"), assignable ? h("th", {}, "处理") : null)),
+        h("tbody", {}, rows.length ? rows : h("tr", {}, h("td", { colspan: assignable ? "6" : "5", class: "muted" }, "没有"))),
       ),
+      datalist,
     ),
   );
 }

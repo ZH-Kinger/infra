@@ -30,9 +30,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime
+import fcntl
 import json
 import os
+import tempfile
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -307,29 +310,22 @@ class PeopleIndex:
         if not self._bindings_path:
             return True
         path = Path(self._bindings_path)
-        data = _read_bindings(path)
-        fp = list(fingerprint(person))
-        for uid, entry in data["bindings"].items():
-            held = {_norm_account(a) for a in entry.get("accounts") or ()}
-            if uid != person.union_id and held & set(fp):
-                return False  # 这组账号（的一部分）已被别的身份认领
-            if uid == person.union_id and sorted(held) != fp:
-                return False  # 本索引已过期：文件里这个人的绑定和我们看到的不一样
-        data["bindings"][person.union_id] = {
-            "accounts": fp,
-            "email": person.email.lower(),
-            "name": person.name,
-            "bound_at": _now(),
-        }
-        payload = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, payload.encode("utf-8"))
-        finally:
-            os.close(fd)
-        tmp.replace(path)
+        with bindings_lock(path):
+            data = _read_bindings(path)
+            fp = list(fingerprint(person))
+            for uid, entry in data["bindings"].items():
+                held = {_norm_account(a) for a in entry.get("accounts") or ()}
+                if uid != person.union_id and held & set(fp):
+                    return False  # 这组账号（的一部分）已被别的身份认领
+                if uid == person.union_id and sorted(held) != fp:
+                    return False  # 本索引已过期：文件里这个人的绑定和我们看到的不一样
+            data["bindings"][person.union_id] = {
+                "accounts": fp,
+                "email": person.email.lower(),
+                "name": person.name,
+                "bound_at": _now(),
+            }
+            write_private_json(path, data)
         # 审计：谁在什么时候凭哪个企业邮箱认领了哪个 union_id。追加写，不改旧行。
         log = path.with_suffix(".log")
         line = f"{_now()}\tbind\tunion_id={person.union_id}\temail={person.email.lower()}\n"
@@ -339,6 +335,30 @@ class PeopleIndex:
         finally:
             os.close(fd)
         return True
+
+
+@contextlib.contextmanager
+def bindings_lock(path: Path):
+    """登录绑定和名册审核都会改 bindings.json：跨线程、跨进程串行化「读 → 检查 → 写」。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path) + ".lock", os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def write_private_json(path: Path, data: Mapping) -> None:
+    """0600、原子替换；临时文件名唯一，并发写不会互相踩。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        os.write(fd, (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+    Path(tmp).chmod(0o600)
+    Path(tmp).replace(path)
 
 
 def _read_bindings(path: Path) -> dict:
@@ -517,12 +537,21 @@ def apply_manual(proposal: Mapping, manual: Optional[Mapping]) -> dict:
 
     列出的账号从提案里所有位置（别人的 links、unlinked、services）摘掉，
     以 confirmed 挂到这个邮箱名下。人工确认优先于任何规则推断。
+
+    另外两类人工记录（面板「名册审核」写入，见 review.py）::
+
+        "rejected": {"aliyun/<UID>/tom2": ["tom@wuji.tech"]}   这个账号不是这些人的
+        "services": ["aliyun/<UID>/ci-bot"]                    这个账号是服务号
+
+    被驳回的对应从那个人名下摘掉；没有别人认领时进 unlinked，原因写「管理员驳回」。
     """
     if not manual:
         return dict(proposal)
     links = manual.get("links") if isinstance(manual, dict) else None
     if not isinstance(links, dict):
         raise PeopleError('manual-links 格式应为 {"links": {邮箱: {"accounts": [...]}}}')
+    rejected = _manual_rejected(manual.get("rejected"))
+    services = _manual_services(manual.get("services"))
     wanted: dict = {}
     names: dict = {}
     for email, spec in links.items():
@@ -544,16 +573,30 @@ def apply_manual(proposal: Mapping, manual: Optional[Mapping]) -> dict:
                 raise PeopleError(f"账号 {item} 在 manual-links 里被分给了多个人")
             wanted[key] = mail
 
+    for key in services:
+        if key in wanted:
+            raise PeopleError(f"账号 {'/'.join(key)} 同时被人工确认给某人和标记为服务号")
+
     def keep(scope, name):
-        return (str(scope or "").strip(), str(name or "").strip()) not in wanted
+        key = (str(scope or "").strip(), str(name or "").strip())
+        return key not in wanted and key not in services
 
     out = dict(proposal)
     people = []
+    dropped: dict = {}
     for row in proposal.get("people") or []:
         row = dict(row)
-        row["links"] = [
-            lk for lk in row.get("links") or [] if keep(lk.get("scope"), lk.get("name"))
-        ]
+        mail = str(row.get("email") or "").strip().lower()
+        kept = []
+        for lk in row.get("links") or []:
+            key = (str(lk.get("scope") or "").strip(), str(lk.get("name") or "").strip())
+            if not keep(*key):
+                continue
+            if mail in rejected.get(key, ()):
+                dropped.setdefault(key, lk)
+                continue
+            kept.append(lk)
+        row["links"] = kept
         people.append(row)
     out["unlinked"] = [
         r for r in proposal.get("unlinked") or [] if keep(r.get("scope"), r.get("name"))
@@ -561,6 +604,28 @@ def apply_manual(proposal: Mapping, manual: Optional[Mapping]) -> dict:
     out["services"] = [
         r for r in proposal.get("services") or [] if keep(r.get("scope"), r.get("name"))
     ]
+    still_linked = {
+        (str(lk.get("scope") or "").strip(), str(lk.get("name") or "").strip())
+        for row in people
+        for lk in row["links"]
+    }
+    listed = {(str(r.get("scope") or ""), str(r.get("name") or "")) for r in out["unlinked"]}
+    for key, lk in sorted(dropped.items()):
+        if key not in still_linked and key not in listed:
+            out["unlinked"].append(
+                {
+                    "scope": key[0],
+                    "name": key[1],
+                    "display_name": str(lk.get("display_name") or ""),
+                    "reason": "管理员驳回了规则推断的对应",
+                }
+            )
+    listed_services = {
+        (str(r.get("scope") or ""), str(r.get("name") or "")) for r in out["services"]
+    }
+    for key in sorted(services):
+        if key not in listed_services:
+            out["services"].append({"scope": key[0], "name": key[1]})
     by_email = {str(r.get("email") or "").strip().lower(): r for r in people}
     for (scope, name), mail in sorted(wanted.items()):
         target = by_email.get(mail)
@@ -579,6 +644,34 @@ def apply_manual(proposal: Mapping, manual: Optional[Mapping]) -> dict:
         )
     out["people"] = [r for r in people if r.get("links")]
     return out
+
+
+def _manual_key(item, what: str) -> tuple:
+    parts = [x.strip() for x in str(item).split("/")]
+    if len(parts) != 3 or not all(parts):
+        raise PeopleError(f"manual-links 的 {what} 里 {item!r} 应形如 平台/账号ID/用户名")
+    return (f"{parts[0]}/{parts[1]}", parts[2])
+
+
+def _manual_rejected(value) -> dict:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise PeopleError('manual-links 的 rejected 应为 {"平台/账号ID/用户名": [邮箱, ...]}')
+    out = {}
+    for item, emails in value.items():
+        if not isinstance(emails, list) or not all(isinstance(e, str) for e in emails):
+            raise PeopleError(f"manual-links 的 rejected 里 {item!r} 应为邮箱数组")
+        out[_manual_key(item, "rejected")] = {e.strip().lower() for e in emails if e.strip()}
+    return out
+
+
+def _manual_services(value) -> set:
+    if value is None:
+        return set()
+    if not isinstance(value, list):
+        raise PeopleError("manual-links 的 services 应为账号数组")
+    return {_manual_key(item, "services") for item in value}
 
 
 def build(proposal: Mapping, directory: Iterable[DirectoryEntry] = ()) -> dict:
@@ -685,6 +778,130 @@ def build(proposal: Mapping, directory: Iterable[DirectoryEntry] = ()) -> dict:
             "email_collisions_in_directory": sorted(dup),
         },
     }
+
+
+def person_row(person: Person) -> dict:
+    """Person → 名册里的一行（people.json 格式）。"""
+    return {
+        "union_id": person.union_id,
+        "name": person.name,
+        "email": person.email,
+        "employee_no": person.employee_no,
+        "email_collision": person.email_collision,
+        "accounts": [
+            {"platform": r.platform, "account": r.account, "name": r.name} for r in person.accounts
+        ],
+        "pending": [
+            {"platform": r.platform, "account": r.account, "name": r.name, "status": r.status}
+            for r in person.pending
+        ],
+    }
+
+
+def _row_fingerprint(row: Mapping) -> tuple:
+    return tuple(
+        sorted(
+            _norm_account(f"{a.get('platform')}/{a.get('account')}/{a.get('name')}")
+            for a in row.get("accounts") or []
+        )
+    )
+
+
+def carry_identities(
+    new: dict, previous: Iterable[Mapping], *, allow_delta: Iterable[str] = ()
+) -> dict:
+    """不调通讯录重建名册时，把上一份名册里的身份信息带过来。就地修改 `new`。
+
+    带什么、不带什么（和首次登录绑定一样宁可不带）：
+      · email_collision：上一份里标了「通讯录多人共用此邮箱」的，新名册同邮箱的行照样标上。
+        不带的话这一行会变成可按邮箱认领，谁先登录谁拿走
+      · union_id：邮箱唯一对上、原来的已确认账号非空、且账号完全相同（或差别只在
+        allow_delta 里，给面板审核用）才带；上一份里出现多次的 union_id 一律不带
+      · 只在通讯录里、没有任何云账号的人：原样保留，不然会从名册里消失
+
+    返回统计：carried / lost（上一份有、新名册里没带上的 union_id 对应的人）/ duplicates。
+    """
+    rows = [dict(r) for r in previous if isinstance(r, Mapping)]
+    delta = {_norm_account(a) for a in allow_delta}
+    counts: dict = {}
+    for r in rows:
+        uid = str(r.get("union_id") or "")
+        if uid:
+            counts[uid] = counts.get(uid, 0) + 1
+    duplicates = sorted(u for u, n in counts.items() if n > 1)
+    collisions = {
+        str(r.get("email") or "").strip().lower()
+        for r in rows
+        if r.get("email_collision") is True and r.get("email")
+    }
+    by_email: dict = {}
+    for r in rows:
+        mail = str(r.get("email") or "").strip().lower()
+        uid = str(r.get("union_id") or "")
+        if mail and uid and uid not in duplicates:
+            by_email.setdefault(mail, []).append(r)
+
+    used = {row["union_id"] for row in new["people"] if row.get("union_id")}
+    carried = 0
+    for row in new["people"]:
+        mail = str(row.get("email") or "").strip().lower()
+        if mail in collisions:
+            row["email_collision"] = True
+        if row.get("union_id") or row.get("email_collision"):
+            continue
+        olds = by_email.get(mail, [])
+        if len(olds) != 1:
+            continue
+        old = olds[0]
+        uid = str(old["union_id"])
+        old_fp, new_fp = _row_fingerprint(old), _row_fingerprint(row)
+        if uid in used or not old_fp:
+            continue
+        if old_fp != new_fp and not (set(old_fp) ^ set(new_fp)) <= delta:
+            continue
+        row["union_id"] = uid
+        row["employee_no"] = row.get("employee_no") or str(old.get("employee_no") or "")
+        used.add(uid)
+        carried += 1
+
+    emails = {str(r.get("email") or "").strip().lower() for r in new["people"]}
+    for r in rows:
+        uid = str(r.get("union_id") or "")
+        mail = str(r.get("email") or "").strip().lower()
+        if (
+            uid
+            and uid not in duplicates
+            and uid not in used
+            and not r.get("accounts")
+            and not r.get("pending")
+            and mail not in emails
+        ):
+            new["people"].append(
+                {
+                    "union_id": uid,
+                    "name": str(r.get("name") or ""),
+                    "email": mail,
+                    "employee_no": str(r.get("employee_no") or ""),
+                    "accounts": [],
+                    "pending": [],
+                }
+            )
+            used.add(uid)
+            if mail:
+                emails.add(mail)
+
+    lost = sorted(
+        str(r.get("name") or r.get("email") or r["union_id"])
+        for r in rows
+        if r.get("union_id") and r["union_id"] not in used and r["union_id"] not in duplicates
+    )
+    new["people"].sort(key=lambda p: (p["name"], p["email"]))
+    new["stats"]["people"] = len(new["people"])
+    new["stats"]["with_union_id"] = sum(1 for p in new["people"] if p["union_id"])
+    new["stats"]["with_cloud_account"] = sum(
+        1 for p in new["people"] if p["accounts"] or p["pending"]
+    )
+    return {"carried": carried, "lost": lost, "duplicates": duplicates}
 
 
 def _display_of(row: Mapping) -> str:

@@ -21,13 +21,19 @@ from pathlib import Path
 from unittest import mock
 
 from delivery import cli
-from delivery.cli import IAM_CSV_HEADER, _iam_diff, _read_iam_csv, _require_identity_dir, main
+from delivery.cli import IAM_CSV_HEADER, _read_iam_csv, _require_identity_dir, main
 from delivery.errors import DeliveryError
+from delivery.iam_export import diff as iam_diff
 
 ALI = "aliyun/1000000000000001"
 VOLC = "volcano/2000000001"
 ATTRS = {ALI: "aliyun_username", VOLC: "volcano_username"}
 A_APP, V_APP = "aliyun_username", "volcano_username"
+
+
+def _iam_diff(current, baseline, **kw):
+    kw.setdefault("current_apps", {A_APP, V_APP})
+    return iam_diff(current, baseline, **kw)[0]
 
 
 def ali(name, status=None):
@@ -207,27 +213,41 @@ class FullExportTests(_Repo):
         self.assertEqual(self.export(), 0)
         self.assertFalse((self.id_dir / "iam-sent").exists())
 
-    def test_formula_prefix_is_escaped_on_write(self):
+    def test_formula_like_values_are_skipped_not_escaped(self):
+        """value 决定 SSO 进哪个号，不能加转义前缀改动它；以公式字符开头的一律 skip。"""
         self.write_people(
             roster(
                 person("甲", "a@wuji.tech", [ali("=HYPERLINK(1)")], union_id="on_A"),
                 person("乙", "b@wuji.tech", [ali("-b"), volc("+v")], union_id="on_B"),
+                person("=丙", "=c@wuji.tech", [ali("carl")], union_id="on_C"),
             )
         )
         self.assertEqual(self.export(), 0)
         raw = (self.id_dir / "out.csv").read_text(encoding="utf-8-sig")
-        self.assertIn("'=HYPERLINK(1)", raw)
-        self.assertIn("'-b", raw)
-        self.assertIn("'+v", raw)
-        # 读回（作基线）时去掉转义前缀
-        values = {r["value"] for r in _read_iam_csv(self.id_dir / "out.csv")}
-        self.assertEqual(values, {"=HYPERLINK(1)", "-b", "+v"})
+        self.assertNotIn("HYPERLINK", raw)
+        rows = _read_iam_csv(self.id_dir / "out.csv")
+        self.assertEqual(
+            sorted((r["name"], r["action"]) for r in rows),
+            [("=丙", "skip"), ("乙", "skip"), ("乙", "skip"), ("甲", "skip")],
+        )
+        # 邮箱是匹配依据，同样不转义：以公式字符开头就 skip 并清空
+        self.assertNotIn("=c@wuji.tech", raw)
+        # 只供核对的列照常转义，读回时还原
+        self.assertIn("'=丙", raw)
 
 
 # ── 增量 ──────────────────────────────────────────────────────────────────
 
 
 class IncrementalExportTests(_Repo):
+    def export_base(self):
+        """走完整流程：全量导出存入 pending，再确认成基线。"""
+        with mock.patch.object(cli.time, "strftime", return_value="20260101-000000.csv"):
+            code = self.export("--record", out="identity/full.csv")
+        if code:
+            return code
+        return self.export("--confirm-sent", "identity/iam-sent/pending/20260101-000000.csv")
+
     BASE = roster(
         person("不变", "a@wuji.tech", [ali("alice")], union_id="on_A"),
         person("改名", "b@wuji.tech", [ali("bob")], union_id="on_B"),
@@ -250,88 +270,92 @@ class IncrementalExportTests(_Repo):
 
     def test_diff_actions(self):
         self.write_people(self.BASE)
-        self.assertEqual(self.export(out="identity/base.csv"), 0)
+        self.assertEqual(self.export_base(), 0)
         self.write_people(self.NOW)
-        self.assertEqual(self.export("--baseline", "identity/base.csv"), 0)
+        self.assertEqual(self.export("--baseline", "latest"), 0)
         self.assertIn("对比基线", self.stdout)
-        rows = by_key(read_rows(self.id_dir / "out.csv"))
-        got = {k: (r["action"], r["value"]) for k, r in rows.items()}
+        rows = read_rows(self.id_dir / "out.csv")
+        got = sorted((r["email"], r["app"], r["action"], r["value"]) for r in rows)
         self.assertEqual(
             got,
-            {
-                ("b@wuji.tech", A_APP): ("set", "bob2"),  # 改名
-                ("c@wuji.tech", A_APP): ("remove", "carol"),  # 删号，value 保留旧值
-                ("e@wuji.tech", A_APP): ("remove", "erin"),
-                ("e@wuji.tech", V_APP): ("set", "Erin"),  # 新增一个号
-                ("h@wuji.tech", A_APP): ("remove", "hank"),  # 现在是 skip：原值要撤掉
-                ("g@wuji.tech", A_APP): ("set", "gus"),  # 新人
-            },
+            sorted(
+                [
+                    ("b@wuji.tech", A_APP, "set", "bob2"),  # 改名
+                    ("c@wuji.tech", A_APP, "remove", "carol"),  # 删号，value 保留旧值
+                    ("d@wuji.tech", A_APP, "remove", "dave"),  # 补 union_id：先按值删
+                    ("d@wuji.tech", A_APP, "set", "dave"),  # 再按 union_id 写回
+                    ("e@wuji.tech", A_APP, "remove", "erin"),
+                    ("e@wuji.tech", V_APP, "set", "Erin"),  # 新增一个号
+                    ("h@wuji.tech", A_APP, "remove", "hank"),  # 现在是 skip：原值要撤掉
+                    ("g@wuji.tech", A_APP, "set", "gus"),  # 新人
+                ]
+            ),
         )
-        # 未变化（含只是补上 union_id 的 d）不输出；skip 不进增量
-        self.assertNotIn(("a@wuji.tech", A_APP), rows)
-        self.assertNotIn(("d@wuji.tech", A_APP), rows)
-        self.assertFalse(any(r["action"] == "skip" for r in rows.values()))
-        c = rows[("c@wuji.tech", A_APP)]
-        self.assertEqual(
-            (c["feishu_union_id"], c["match_by"], c["problem"]), ("on_C", "feishu_union_id", "")
-        )
-        # 基线里没有 union_id、现在有了：remove 行补上 union_id
-        e = rows[("e@wuji.tech", A_APP)]
-        self.assertEqual((e["feishu_union_id"], e["match_by"]), ("on_E", "feishu_union_id"))
-        self.assertIn("set 3 条，remove 3 条，skip 0 条", self.stdout)
+        # remove 全部排在 set 前面；skip 不进增量；remove 按值定位
+        actions = [r["action"] for r in rows]
+        self.assertEqual(actions, sorted(actions, key=lambda a: a != "remove"))
+        self.assertFalse(any(r["action"] == "skip" for r in rows))
+        self.assertTrue(all(r["match_by"] == "value" for r in rows if r["action"] == "remove"))
+        c = next(r for r in rows if r["email"] == "c@wuji.tech")
+        self.assertEqual(c["feishu_union_id"], "on_C")
+        self.assertIn("set 4 条，remove 4 条，skip 0 条", self.stdout)
 
     def test_same_state_yields_empty_diff(self):
         self.write_people(self.NOW)
-        self.assertEqual(self.export(out="identity/base.csv"), 0)
-        self.assertEqual(self.export("--baseline", "identity/base.csv"), 0)
+        self.assertEqual(self.export_base(), 0)
+        self.assertEqual(self.export("--baseline", "latest"), 0)
         self.assertEqual(read_rows(self.id_dir / "out.csv"), [])
 
     def test_formula_value_round_trip_is_not_a_change(self):
         self.write_people(roster(person("甲", "a@wuji.tech", [ali("=cmd")], union_id="on_A")))
-        self.assertEqual(self.export(out="identity/base.csv"), 0)
-        self.assertEqual(self.export("--baseline", "identity/base.csv"), 0)
+        self.assertEqual(self.export_base(), 0)
+        self.assertEqual(self.export("--baseline", "latest"), 0)
         self.assertEqual(read_rows(self.id_dir / "out.csv"), [])
 
     def test_diff_unit_gains_union_id_matches_by_email(self):
         base = [row("", "D@wuji.tech", A_APP, "dave")]
         now = [row("on_D", "d@wuji.tech", A_APP, "dave")]
-        self.assertEqual(_iam_diff(now, base), [])
-        self.assertEqual(_iam_diff(now, base + [row("", "x@wuji.tech", A_APP, "x", "skip")]), [])
+        expected = [("", "remove"), ("on_D", "set")]
+        got = [(r["feishu_union_id"], r["action"]) for r in _iam_diff(now, base)]
+        self.assertEqual(got, expected)
+        extra = base + [row("", "x@wuji.tech", A_APP, "x", "skip")]
+        got = [(r["feishu_union_id"], r["action"]) for r in _iam_diff(now, extra)]
+        self.assertEqual(got, expected)
 
     def test_missing_baseline_file_rc2(self):
         self.write_people(self.NOW)
-        self.assertEqual(self.export("--baseline", "identity/nope.csv"), 2)
+        self.assertEqual(self.export("--baseline", "identity/iam-sent/nope.csv"), 2)
         self.assertFalse((self.id_dir / "out.csv").exists())
 
     def test_baseline_with_wrong_header_rc2(self):
         self.write_people(self.NOW)
-        (self.id_dir / "old.csv").write_text(
+        (self.id_dir / "iam-sent").mkdir()
+        (self.id_dir / "iam-sent" / "old.csv").write_text(
             "feishu_union_id,email,name,aliyun_username,match_by,problem\n"
             "on_A,a@wuji.tech,不变,alice,feishu_union_id,\n",
             encoding="utf-8",
         )
-        self.assertEqual(self.export("--baseline", "identity/old.csv"), 2)
+        self.assertEqual(self.export("--baseline", "identity/iam-sent/old.csv"), 2)
         self.assertFalse((self.id_dir / "out.csv").exists())
 
     def test_diff_email_reuse_with_same_value_is_a_change(self):
-        """已知 bug（cli.py _iam_diff.find）：两边都有 union_id 但不同，
-        只因邮箱相同就回落按邮箱对上。
-        邮箱 p@ 从老员工 on_P 复用给新人 on_Q，号 peter 也转给了 Q：diff 为空 →
-        IT 既不给 on_Q 写 peter，也不撤 on_P 的 peter（老员工 SSO 仍进这个号）。
-        期望：on_Q set + on_P remove。"""
+        """邮箱 p@ 从老员工 on_P 复用给新人 on_Q，号 peter 也转给了 Q：
+        on_Q set + on_P remove。on_P 在当前名册里整体消失，需显式允许。"""
         base = [row("on_P", "p@wuji.tech", A_APP, "peter")]
         now = [row("on_Q", "p@wuji.tech", A_APP, "peter")]
-        got = {(r["feishu_union_id"], r["action"]) for r in _iam_diff(now, base)}
+        got = {
+            (r["feishu_union_id"], r["action"])
+            for r in _iam_diff(now, base, allow_mass_remove=True)
+        }
         self.assertEqual(got, {("on_Q", "set"), ("on_P", "remove")})
 
     def test_remove_is_not_redirected_to_another_union_id(self):
-        """已知 bug（cli.py _iam_diff 删号分支「现在有了 union_id 就补上」）：不看基线行自己
-        是否已有 union_id，同邮箱的另一个人（邮箱复用）会把 remove 抢走：
-        基线 on_P/p@/aliyun=peter，现在 p@ 属于 on_Q（只有火山号）→ remove 行变成 on_Q，
-        on_P 的 peter 永远撤不掉。"""
+        """同邮箱的另一个人（邮箱复用）不能把 remove 抢走。"""
         base = [row("on_P", "p@wuji.tech", A_APP, "peter")]
         now = [row("on_Q", "p@wuji.tech", V_APP, "q")]
-        removed = [r for r in _iam_diff(now, base) if r["action"] == "remove"]
+        removed = [
+            r for r in _iam_diff(now, base, allow_mass_remove=True) if r["action"] == "remove"
+        ]
         self.assertEqual([r["feishu_union_id"] for r in removed], ["on_P"])
 
 
@@ -339,15 +363,89 @@ class RecordAndLatestTests(_Repo):
     def _strftime(self, *names):
         return mock.patch.object(cli.time, "strftime", side_effect=list(names))
 
-    def test_record_archives_0600_copy(self):
+    def test_record_goes_to_pending_until_confirmed(self):
         self.write_people(roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P")))
         with self._strftime("20260915-100000.csv"):
             self.assertEqual(self.export("--record"), 0)
-        archive = self.id_dir / "iam-sent" / "20260915-100000.csv"
+        archive = self.id_dir / "iam-sent" / "pending" / "20260915-100000.csv"
         self.assertTrue(archive.exists())
         self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
         self.assertEqual(archive.read_bytes(), (self.id_dir / "out.csv").read_bytes())
-        self.assertIn("已存档", self.stdout)
+        self.assertIn("待确认", self.stdout)
+        # 没确认之前 latest 找不到
+        self.assertEqual(self.export("--baseline", "latest"), 2)
+        self.assertEqual(self.export("--confirm-sent", str(archive)), 0)
+        self.assertTrue((self.id_dir / "iam-sent" / "20260915-100000.csv").exists())
+        self.assertFalse(archive.exists())
+        self.assertEqual(self.export("--baseline", "latest"), 0)
+        self.assertEqual(read_rows(self.id_dir / "out.csv"), [])
+
+    def test_b1_full_record_refused_once_baseline_exists(self):
+        self.write_people(roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P")))
+        pending = self.id_dir / "iam-sent" / "pending"
+        with self._strftime("20260915-100000.csv"):
+            self.assertEqual(self.export("--record"), 0)
+        self.assertEqual(self.export("--confirm-sent", str(pending / "20260915-100000.csv")), 0)
+        self.assertEqual(self.export("--record"), 2)
+        self.assertIn("--baseline latest", self.stderr)
+
+    def test_b1_confirm_refused_when_baseline_moved_on(self):
+        self.write_people(roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P")))
+        pending = self.id_dir / "iam-sent" / "pending"
+        with self._strftime("20260915-100000.csv"):
+            self.assertEqual(self.export("--record"), 0)
+        self.assertEqual(self.export("--confirm-sent", str(pending / "20260915-100000.csv")), 0)
+        # 两份都对着 100000 导出；先确认第一份，第二份就过期了
+        with self._strftime("20260916-100000.csv"):
+            self.assertEqual(self.export("--baseline", "latest", "--record"), 0)
+        with self._strftime("20260917-100000.csv"):
+            self.assertEqual(self.export("--baseline", "latest", "--record"), 0)
+        self.assertEqual(self.export("--confirm-sent", str(pending / "20260916-100000.csv")), 0)
+        self.assertEqual(self.export("--confirm-sent", str(pending / "20260917-100000.csv")), 2)
+
+    def test_n3_two_pending_on_same_baseline_cannot_both_confirm(self):
+        self.write_people(roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P")))
+        pending = self.id_dir / "iam-sent" / "pending"
+        with self._strftime("20260915-100000.csv"):
+            self.assertEqual(self.export("--record"), 0)
+        self.assertEqual(self.export("--confirm-sent", str(pending / "20260915-100000.csv")), 0)
+        with self._strftime("20260916-100000.csv"):
+            self.assertEqual(self.export("--baseline", "latest", "--record"), 0)
+        with self._strftime("20260917-100000.csv"):
+            self.assertEqual(self.export("--baseline", "latest", "--record"), 0)
+        # 先确认较新的那份：更早的同基线存档还在，拒绝
+        self.assertEqual(self.export("--confirm-sent", str(pending / "20260917-100000.csv")), 2)
+        self.assertIn("更早", self.stderr)
+
+    def test_m1_out_into_sent_dir_refused_and_odd_names_ignored(self):
+        self.write_people(roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P")))
+        (self.id_dir / "iam-sent").mkdir()
+        self.assertEqual(self.export(out="identity/iam-sent/inc.csv"), 2)
+        header = ",".join(IAM_CSV_HEADER)
+        (self.id_dir / "iam-sent" / "zz-inc.csv").write_text(header + "\n", encoding="utf-8")
+        self.assertEqual(self.export("--baseline", "latest"), 2)
+
+    def test_m4_confirm_refuses_symlink_and_flag_combos(self):
+        self.write_people(roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P")))
+        pending = self.id_dir / "iam-sent" / "pending"
+        with self._strftime("20260915-100000.csv"):
+            self.assertEqual(self.export("--record"), 0)
+        link = pending / "20260915-100001.csv"
+        link.symlink_to(pending / "20260915-100000.csv")
+        self.assertEqual(self.export("--confirm-sent", str(link)), 2)
+        target = str(pending / "20260915-100000.csv")
+        self.assertEqual(self.export("--confirm-sent", target, "--record"), 2)
+        self.assertTrue((pending / "20260915-100000.csv").exists())
+
+    def test_confirm_only_pending_files(self):
+        self.write_people(roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P")))
+        self.assertEqual(self.export(), 0)
+        self.assertEqual(self.export("--confirm-sent", "identity/out.csv"), 2)
+
+    def test_output_of_incremental_cannot_be_baseline(self):
+        self.write_people(roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P")))
+        self.assertEqual(self.export(), 0)
+        self.assertEqual(self.export("--baseline", "identity/out.csv"), 2)
 
     def test_latest_uses_newest_archive(self):
         sent = self.id_dir / "iam-sent"
@@ -384,8 +482,10 @@ class RecordAndLatestTests(_Repo):
                 person("乙", "b@wuji.tech", [ali("bob")], union_id="on_B"),
             )
         )
+        pending = self.id_dir / "iam-sent" / "pending"
         with self._strftime("20260915-100000.csv"):
             self.assertEqual(self.export("--record"), 0)
+        self.assertEqual(self.export("--confirm-sent", str(pending / "20260915-100000.csv")), 0)
         self.write_people(
             roster(
                 person("甲", "a@wuji.tech", [ali("alice")], union_id="on_A"),
@@ -395,6 +495,7 @@ class RecordAndLatestTests(_Repo):
         )
         with self._strftime("20260916-100000.csv"):
             self.assertEqual(self.export("--baseline", "latest", "--record"), 0)
+        self.assertEqual(self.export("--confirm-sent", str(pending / "20260916-100000.csv")), 0)
         # 甲删号
         self.write_people(
             roster(
@@ -402,7 +503,9 @@ class RecordAndLatestTests(_Repo):
                 person("新人", "g@wuji.tech", [ali("gus")], union_id="on_G"),
             )
         )
-        self.assertEqual(self.export("--baseline", "latest"), 0)
+        # 甲整个人从名册里消失：默认拒绝（可能是名册生成出了问题），确认后显式允许
+        self.assertEqual(self.export("--baseline", "latest"), 2)
+        self.assertEqual(self.export("--baseline", "latest", "--allow-mass-remove"), 0)
         rows = by_key(read_rows(self.id_dir / "out.csv"))
         self.assertEqual(rows.get(("a@wuji.tech", A_APP), {}).get("action"), "remove")
 
@@ -429,7 +532,7 @@ class GitGuardTests(_Repo):
         self.write_people(roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P")))
         self.assertEqual(self.export("--record"), 0)
         self.assertTrue((self.id_dir / "out.csv").exists())
-        self.assertEqual(len(list((self.id_dir / "iam-sent").glob("*.csv"))), 1)
+        self.assertEqual(len(list((self.id_dir / "iam-sent" / "pending").glob("*.csv"))), 1)
 
     def test_c3_git_dir_env_pointing_elsewhere_does_not_change_verdict(self):
         other = Path(tempfile.mkdtemp()).resolve()
