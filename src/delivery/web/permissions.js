@@ -70,6 +70,7 @@ export function permissionRoutes(ctx) {
     const accountBar = h("div", { class: "segmented", role: "tablist", "aria-label": "云账号" });
     const tools = h("div", { class: "apply-tools" });
     const summary = h("p", { class: "apply-summary muted", "aria-live": "polite" });
+    const staleNote = h("div", { class: "banner warn", hidden: true }, "这个云账号的权限列表最近一次没更新成功，下面是之前的列表，可能缺少新加的策略。可以照常申请，开通前会再核对。");
     const list = h("div", { class: "apply-list" });
     const bar = h("div", { class: "select-bar", role: "region", "aria-label": "已选权限", hidden: true });
     let shown = PAGE;
@@ -209,6 +210,7 @@ export function permissionRoutes(ctx) {
       }
       const all = acc.policies || [];
       const hits = all.filter(matches);
+      staleNote.hidden = !acc.stale;
       const owned = all.filter((p) => p.state === "owned").length;
       const parts = [`共 ${all.length} 项`, `你已拥有 ${owned} 项`];
       if (hits.length !== all.length) parts.push(`符合条件 ${hits.length} 项`);
@@ -312,7 +314,7 @@ export function permissionRoutes(ctx) {
       renderList();
     }
     renderAll();
-    return [head, accountBar, h("div", { class: "apply-panel" }, tools, summary), list, bar];
+    return [head, accountBar, staleNote, h("div", { class: "apply-panel" }, tools, summary), list, bar];
   }
 
   // ── 申请表单 ────────────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+import sys
 import time
 from dataclasses import asdict
 from datetime import datetime
@@ -133,6 +134,7 @@ class Flows:
         policy_snapshot: Optional[Callable[[], Optional[dict]]] = None,
         policy_rules: Optional[Callable[[], policies_mod.Rules]] = None,
         current_policies: Optional[policies_mod.CurrentPolicies] = None,
+        notify: Optional[Callable[[str, dict], None]] = None,
         clock: Callable[[], float] = time.time,
     ):
         self.store = store
@@ -145,6 +147,7 @@ class Flows:
         self._policy_snapshot = policy_snapshot or (lambda: None)
         self._policy_rules = policy_rules or policies_mod.Rules
         self._current_policies = current_policies
+        self._notify = notify
         self._clock = clock
         self._last_sync: dict = {}
 
@@ -275,10 +278,13 @@ class Flows:
             "account": account,
             "cloud_user": user,
             "error": "",
+            "stale": False,
             "total": 0,
             "policies": [],
         }
         entry = policies_mod.account_entry(data, platform, account)
+        # 最近一次采集失败、沿用的是之前的列表：照常能申请，页面上提示可能不是最新
+        out["stale"] = bool(entry and entry.get("stale"))
         items = policies_mod.directory(data, platform, account)
         if items is None:
             out["error"] = "权限列表还没采集" if entry is None else "权限列表暂时不可用"
@@ -587,7 +593,7 @@ class Flows:
             return ticket
         if status != STATUS_APPROVED:
             to = t.REJECTED if status == "REJECTED" else t.WITHDRAWN
-            return self.store.update(
+            ticket = self.store.update(
                 ticket_id,
                 actor="feishu",
                 expect=[t.PENDING],
@@ -595,6 +601,7 @@ class Flows:
                 event="approval_" + status.lower(),
                 fields={"approval": {"instance_code": code, "status": status}},
             )
+            return self._emit("rejected" if to == t.REJECTED else "withdrawn", ticket)
         ticket = self.store.update(
             ticket_id,
             actor="feishu",
@@ -606,7 +613,7 @@ class Flows:
         )
         if ticket["kind"] == catalog_mod.KIND_CREDENTIAL:
             valid_until = now + ticket["template"]["valid_days"] * 86400
-            return self.store.update(
+            ticket = self.store.update(
                 ticket_id,
                 actor="system",
                 expect=[t.APPROVED],
@@ -617,6 +624,7 @@ class Flows:
                     "valid_until_ts": valid_until,
                 },
             )
+            return self._emit("claimable", ticket)
         return self.execute(ticket_id, actor="system")
 
     def _maybe_expire(self, ticket: dict) -> dict:
@@ -705,7 +713,7 @@ class Flows:
                     to=t.EXECUTING,
                     event="execute_start",
                 )
-                return self.store.update(
+                failed = self.store.update(
                     ticket_id,
                     actor=actor,
                     expect=[t.EXECUTING],
@@ -713,6 +721,7 @@ class Flows:
                     event="execute_failed",
                     note=describe_error(exc) or "",
                 )
+                return self._emit("failed", failed)
             raise
         # 先占住状态再写云：两个人同时点「重试」只会有一个真的执行
         self.store.update(
@@ -735,7 +744,7 @@ class Flows:
                 expires = now + days * 86400
                 fields.update(expires_at=t.now_iso(lambda: expires), expires_at_ts=expires)
         except Exception as exc:  # noqa: BLE001 — 任何异常都要落到「开通失败」，不能卡在「开通中」
-            return self.store.update(
+            failed = self.store.update(
                 ticket_id,
                 actor=actor,
                 expect=[t.EXECUTING],
@@ -743,7 +752,8 @@ class Flows:
                 event="execute_failed",
                 note=describe_error(exc) or type(exc).__name__,
             )
-        return self.store.update(
+            return self._emit("failed", failed)
+        done = self.store.update(
             ticket_id,
             actor=actor,
             expect=[t.EXECUTING],
@@ -752,6 +762,7 @@ class Flows:
             note=result,
             fields=fields,
         )
+        return self._emit("done", done)
 
     def recover_stuck(
         self, ticket_id: str = "", *, actor: str, min_age: float = _STUCK_AFTER
@@ -779,7 +790,7 @@ class Flows:
                 continue
             executing = status == t.EXECUTING
             try:
-                self.store.update(
+                updated = self.store.update(
                     ticket["id"],
                     actor=actor,
                     expect=[status],
@@ -789,6 +800,8 @@ class Flows:
                 )
             except t.TicketError:
                 continue  # 别的进程刚处理完
+            if executing:
+                self._emit("failed", updated)
             out.append(f"{ticket['id']}：{'开通' if executing else '提交'}中断，已标为失败")
         if ticket_id and not out:
             raise FlowError("这张申请单刚被处理过，请刷新", 409)
@@ -811,16 +824,19 @@ class Flows:
                     valid_until = _ts(ticket.get("updated_at")) + (
                         ticket["template"]["valid_days"] * 86400
                     )
-                    after = self.store.update(
-                        ticket["id"],
-                        actor="system",
-                        expect=[t.APPROVED],
-                        to=t.CLAIMABLE,
-                        event="claimable",
-                        fields={
-                            "valid_until": t.now_iso(lambda v=valid_until: v),
-                            "valid_until_ts": valid_until,
-                        },
+                    after = self._emit(
+                        "claimable",
+                        self.store.update(
+                            ticket["id"],
+                            actor="system",
+                            expect=[t.APPROVED],
+                            to=t.CLAIMABLE,
+                            event="claimable",
+                            fields={
+                                "valid_until": t.now_iso(lambda v=valid_until: v),
+                                "valid_until_ts": valid_until,
+                            },
+                        ),
                     )
                 else:
                     after = self.execute(ticket["id"], actor="system")
@@ -836,6 +852,70 @@ class Flows:
                 out.append(
                     f"{ticket['id']}：审批通过后停住的单子已接着处理（{t.LABELS.get(status)}）"
                 )
+        return out
+
+    # ── 通知 ──────────────────────────────────────────────────────────────
+    def _emit(self, event: str, ticket: dict) -> dict:
+        """状态已经写进申请单之后再通知。通知失败只打日志，不改申请单、不记事件。"""
+        if self._notify is not None:
+            try:
+                self._notify(event, ticket)
+            except Exception as exc:  # noqa: BLE001 — 通知永远不能影响申请单
+                reason = describe_error(exc) or type(exc).__name__
+                print(f"[notify] {ticket.get('id')} {event} 发送失败：{reason}", file=sys.stderr)
+        return ticket
+
+    def remind_expiring(self, days: int = 3) -> list:
+        """有期限的权限在 days 天内到期：提醒申请人一次（记 expiry_reminded 事件，不重复提醒）。
+
+        没开通知时什么都不做，也不记事件：以后开了通知，快到期的单子还能收到提醒。
+        """
+        # 只能发到管理员群（比如这次拿不到飞书令牌）时不提醒，也不记事件，下次再试
+        if self._notify is None or not getattr(self._notify, "reaches_applicant", True):
+            return []
+        now = self._clock()
+        out = []
+        for ticket in self.store.all():
+            expires = float(ticket.get("expires_at_ts") or 0)
+            done_at = float(ticket.get("done_at_ts") or 0)
+            if (
+                ticket.get("kind") != catalog_mod.KIND_PERMISSION
+                or ticket.get("status") != t.DONE
+                or not now < expires <= now + days * 86400
+                # 本来就只开了几天的权限：开通消息里已经写了到期时间，不再紧接着提醒
+                or (done_at and expires - done_at <= days * 86400)
+                or any(e.get("event") == "expiry_reminded" for e in ticket.get("events") or [])
+            ):
+                continue
+            try:
+                # 先记事件再发：并发的两次定时任务只会有一次发出去
+                updated = self.store.update(
+                    ticket["id"],
+                    actor="system",
+                    expect=[t.DONE],
+                    event="expiry_reminded",
+                    note="已提醒申请人即将到期",
+                )
+            except t.TicketError:
+                continue
+            if sum(e.get("event") == "expiry_reminded" for e in updated.get("events") or []) > 1:
+                continue
+            try:
+                self._notify("expiring", updated)
+            except Exception as exc:  # noqa: BLE001 — 发送失败只记一笔，不改状态
+                reason = describe_error(exc) or type(exc).__name__
+                print(f"[notify] {ticket['id']} expiring 发送失败：{reason}", file=sys.stderr)
+                with contextlib.suppress(t.TicketError):
+                    self.store.update(
+                        ticket["id"],
+                        actor="system",
+                        expect=[t.DONE],
+                        event="expiry_remind_failed",
+                        note="到期提醒没有发出去",
+                    )
+                out.append(f"{ticket['id']}：到期提醒发送失败")
+                continue
+            out.append(f"{ticket['id']}：已提醒即将到期")
         return out
 
     # ── 到期回收 ──────────────────────────────────────────────────────────
@@ -915,7 +995,7 @@ class Flows:
             )
         note = "；".join(parts) or "无需回收"
         try:
-            self.store.update(
+            revoked = self.store.update(
                 ticket["id"],
                 actor="system",
                 expect=[t.DONE],
@@ -925,6 +1005,7 @@ class Flows:
             )
         except t.TicketError:
             return f"{ticket['id']}：已由其他进程处理"
+        self._emit("revoked", revoked)
         return f"{ticket['id']}：{note}"
 
     def _run(self, tpl: catalog_mod.Template, ticket: dict) -> str:

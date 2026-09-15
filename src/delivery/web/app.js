@@ -295,7 +295,37 @@ function policyList(policies, highRisk) {
   return wrap;
 }
 
-function accountCard(acct) {
+// 这个子账号上通过申请开通、还没到期的权限（按到期时间排序），带续期入口
+function grantsSection(acct, requests) {
+  const now = Date.now();
+  const grants = (requests || [])
+    .filter((r) => r.status === "done" && r.kind === "permission" && r.expires_at && new Date(r.expires_at).getTime() > now)
+    .filter((r) => r.template.platform === acct.platform && r.template.account === acct.account && (!r.payload || !r.payload.cloud_user || r.payload.cloud_user === acct.name))
+    .sort((a, b) => new Date(a.expires_at) - new Date(b.expires_at));
+  if (!grants.length) return null;
+  const soon = now + 7 * 86400 * 1000;
+  return h(
+    "div",
+    { class: "section" },
+    h("div", { class: "section-label" }, "申请开通的权限", h("span", { class: "muted" }, String(grants.length))),
+    h(
+      "ul",
+      { class: "grant-list" },
+      grants.map((r) => {
+        const expiring = new Date(r.expires_at).getTime() < soon;
+        return h(
+          "li",
+          {},
+          h("a", { class: r.template.id === "policy" ? "grant-name mono" : "grant-name", href: `#request=${encodeURIComponent(r.id)}` }, requestTitle(r)),
+          h("span", { class: expiring ? "pill warn" : "pill" }, `${new Date(r.expires_at).toLocaleDateString("zh-CN")} 到期`),
+          h("a", { class: "linkbtn", href: r.template.id === "policy" ? "#permissions" : `#apply=${encodeURIComponent(r.template.id)}` }, "续期"),
+        );
+      }),
+    ),
+  );
+}
+
+function accountCard(acct, requests) {
   const gone = acct.in_snapshot === false;
   const highRisk = acct.high_risk || [];
   const head = h(
@@ -328,6 +358,8 @@ function accountCard(acct) {
         ),
       );
     }
+    const grants = grantsSection(acct, requests);
+    if (grants) sections.push(grants);
     sections.push(
       h(
         "div",
@@ -437,7 +469,7 @@ function personPage(detail, { admin }) {
         "section",
         { class: "group" },
         h("div", { class: "group-head" }, h("div", { class: "group-label" }, "云账号"), admin ? null : h("a", { class: "linkbtn push", href: "#permissions" }, "申请更多权限 →")),
-        h("div", { class: "accounts" }, accounts.map(accountCard)),
+        h("div", { class: "accounts" }, accounts.map((a) => accountCard(a, admin ? null : detail.requests))),
       ),
     );
   }

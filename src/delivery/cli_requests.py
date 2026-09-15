@@ -286,6 +286,7 @@ def _creds(args) -> int:
 
 
 def _sweep(args) -> int:
+    from . import notify as notify_mod
     from . import people as people_mod
     from . import policies as policies_mod
     from . import review as review_mod
@@ -306,15 +307,20 @@ def _sweep(args) -> int:
     app_id = os.environ.get("DELIVERY_FEISHU_APP_ID", "")
     secret = os.environ.get("DELIVERY_FEISHU_APP_SECRET", "")
     approval = None
-    # 飞书不可用（密钥轮换、接口故障、审批配置写坏）只影响同步审批；到期回收不依赖飞书，照常执行
+    token_fn = None
+    # 飞书不可用（密钥轮换、接口故障、审批配置写坏）只影响审批同步和通知；到期回收照常执行
     try:
         config = ApprovalConfig.load(args.approval)
-        if config is not None and app_id and secret:
+        wants_notify = os.environ.get(notify_mod.ENV_NOTIFY) == "1"
+        if app_id and secret and (config is not None or wants_notify):
             token = tenant_token(app_id, secret)
-            approval = FeishuApproval(config, lambda: token)
+            token_fn = lambda: token  # noqa: E731
+            if config is not None:
+                approval = FeishuApproval(config, token_fn)
     except Exception as exc:  # noqa: BLE001
         problems += 1
         print(f"飞书审批不可用，本次跳过审批同步：{_brief(exc)}")
+    notify = notify_mod.from_env(os.environ, token=token_fn)
     bindings = str(Path(args.people).with_name("bindings.json"))
     paths = review_mod.ReviewPaths(
         proposal=args.proposal, manual=args.manual, people=args.people, bindings=bindings
@@ -332,6 +338,7 @@ def _sweep(args) -> int:
         add_manual_link=link,
         policy_snapshot=lambda: policies_mod.load(policies_path),
         policy_rules=lambda: policies_mod.load_rules(rules_path),
+        notify=notify,
     )
     # 每一步、每张单子都隔离：一张单子出错不能挡住后面的到期回收
     for ticket in flows.store.all():
@@ -349,6 +356,7 @@ def _sweep(args) -> int:
         lambda: flows.recover_stuck(actor="system"),
         flows.resume_approved if approval is not None else list,
         flows.revoke_expired,
+        flows.remind_expiring,
     )
     for step in steps:
         try:

@@ -56,6 +56,8 @@ _EVENT_LABELS = {
     "policies_checked": "核对原有策略",
     "revoked": "到期回收",
     "revoke_failed": "到期回收失败",
+    "expiry_remind_failed": "到期提醒没有发出去",
+    "expiry_reminded": "提醒即将到期",
 }
 #: 这些事件的 note 是云接口 / 飞书接口的原始错误，只给管理员看；员工看到的是下面的说明
 _ERROR_NOTES = {

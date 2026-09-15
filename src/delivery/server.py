@@ -44,6 +44,7 @@ from typing import Callable, Optional
 
 from . import assets as assets_mod
 from . import inventory
+from . import notify as notify_mod
 from . import people as people_mod
 from . import policies as policies_mod
 from . import review as review_mod
@@ -368,7 +369,9 @@ class Backend:
         assets_path: Optional[str] = None,
         policies_path: Optional[str] = None,
         policy_rules_path: Optional[str] = None,
+        notify: Optional[Callable[[str, dict], None]] = None,
     ):
+        self._notify = notify
         self.assets_path = assets_path
         self.policies_path = policies_path
         self.policy_rules_path = policy_rules_path
@@ -526,6 +529,7 @@ class Backend:
                 policy_snapshot=self.policies,
                 policy_rules=self.policy_rules,
                 current_policies=self.current_policies,
+                notify=self._notify,
             )
         return self._flows
 
@@ -1082,6 +1086,10 @@ def serve(
     app_secret = os.environ.get("DELIVERY_FEISHU_APP_SECRET", "")
     base_url = os.environ.get("DELIVERY_BASE_URL") or f"http://localhost:{port}"
     bindings_path = str(Path(people_path).with_name("bindings.json")) if people_path else None
+    token = _tenant_token_cache(app_id, app_secret) if app_id and app_secret else None
+    notify = notify_mod.from_env(os.environ, token=token)
+    if notify is not None:
+        echo("申请状态通知：已开启（DELIVERY_NOTIFY=1）")
     backend = Backend(
         inventory_path=inventory_path,
         people_path=people_path,
@@ -1097,7 +1105,8 @@ def serve(
         assets_path=assets_path,
         policies_path=policies_path,
         policy_rules_path=policy_rules_path,
-        feishu_token=_tenant_token_cache(app_id, app_secret) if app_id and app_secret else None,
+        feishu_token=token,
+        notify=notify,
     )
     handler = make_handler(
         registry,

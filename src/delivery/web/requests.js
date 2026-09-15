@@ -13,6 +13,7 @@ const KIND_INFO = {
   credential: { title: "访问凭证", desc: "申请临时 AccessKey，给脚本和 CLI 用，到期自动失效。" },
   account: { title: "开账号", desc: "在还没有账号的云上开一个子账号。" },
 };
+const KIND_KEY_LABEL = { permission: "权限包", policy: "权限策略", credential: "访问凭证", account: "开账号" };
 const RISK = { low: ["低风险", "good"], medium: ["中风险", "warn"], high: ["高风险", "crit"] };
 const STATUS_TONE = {
   pending_approval: "accent",
@@ -526,9 +527,45 @@ export function requestRoutes(ctx) {
       ),
     );
     const listSlot = h("div", { class: "list-slot" });
+    // 管理员单子多：按类型和云再筛一层
+    const facets = { kind: "all", platform: "all" };
+    const facetRow = h("div", { class: "chip-rows" });
+    function renderFacets() {
+      const base = requests.filter(pick);
+      const kinds = [...new Set(base.map(kindKey))];
+      const platforms = [...new Set(base.map((r) => r.template.platform))];
+      const row = (label, key, entries) =>
+        h(
+          "div",
+          { class: "chip-row", role: "group", "aria-label": label },
+          h("span", { class: "chip-label" }, label),
+          entries.map(([value, text]) =>
+            h(
+              "button",
+              {
+                type: "button",
+                class: facets[key] === value ? "chip active" : "chip",
+                "aria-pressed": facets[key] === value ? "true" : "false",
+                onclick: () => {
+                  facets[key] = value;
+                  renderFacets();
+                  renderRows();
+                },
+              },
+              text,
+              h("span", { class: "chip-n" }, String(value === "all" ? base.length : base.filter((r) => (key === "kind" ? kindKey(r) : r.template.platform) === value).length)),
+            ),
+          ),
+        );
+      facetRow.replaceChildren(
+        kinds.length > 1 ? row("类型", "kind", [["all", "全部"], ...kinds.map((k) => [k, KIND_KEY_LABEL[k] || k])]) : null,
+        platforms.length > 1 ? row("云", "platform", [["all", "全部"], ...platforms.map((p) => [p, PLATFORM_NAME[p] || p])]) : null,
+      );
+      facetRow.hidden = !facetRow.childElementCount;
+    }
     function renderRows() {
       const q = search.value.trim().toLowerCase();
-      const shown = requests.filter(pick).filter((r) => !q || [r.id, requestTitle(r), r.summary, r.kind_label, r.status_label, r.applicant && r.applicant.name, r.applicant && r.applicant.email].join(" ").toLowerCase().includes(q));
+      const shown = requests.filter(pick).filter((r) => (facets.kind === "all" || kindKey(r) === facets.kind) && (facets.platform === "all" || r.template.platform === facets.platform)).filter((r) => !q || [r.id, requestTitle(r), r.summary, r.kind_label, r.status_label, r.applicant && r.applicant.name, r.applicant && r.applicant.email].join(" ").toLowerCase().includes(q));
       if (!shown.length) {
         listSlot.replaceChildren(
           h(
@@ -544,9 +581,17 @@ export function requestRoutes(ctx) {
       listSlot.replaceChildren(h("div", { class: "card list" }, shown.map((r) => requestRow(r, admin))));
     }
     search.addEventListener("input", renderRows);
+    if (admin) {
+      renderFacets();
+      nodes.push(facetRow);
+    }
     renderRows();
     nodes.push(listSlot);
     return nodes;
+  }
+
+  function kindKey(r) {
+    return r.template.id === "policy" ? "policy" : r.kind;
   }
 
   function requestRow(r, admin) {
@@ -555,7 +600,7 @@ export function requestRoutes(ctx) {
     return h(
       "a",
       { class: "row", href },
-      h("div", { class: "row-main" }, h("div", { class: "row-title" }, platformTag(r.template.platform), h("span", { class: "title-break" }, requestTitle(r)), h("span", { class: "muted" }, r.kind_label)), h("div", { class: "row-sub" }, admin ? `${r.applicant.name || r.applicant.email} · ` : "", r.summary)),
+      h("div", { class: "row-main" }, h("div", { class: "row-title" }, platformTag(r.template.platform), h("span", { class: "title-break" }, requestTitle(r)), h("span", { class: "muted" }, r.kind_label)), h("div", { class: "row-sub" }, admin ? h("b", { class: "row-who" }, r.applicant.name || r.applicant.email || "未知申请人") : null, admin ? " · " : null, r.summary)),
       h("div", { class: "row-side" }, statusPill(r), cta, h("span", { class: "muted", title: r.created_at }, ago(r.created_at))),
     );
   }

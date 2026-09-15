@@ -118,7 +118,8 @@ server.py ── HTTP 接口、角色校验、CSRF
 | 云账号资产（两家资源中心；员工看数量，管理员看明细） | 已完成 |
 | `delivery` CLI：`request` / `creds` / `assets` / `requests sweep` / `approval widgets` | 已完成 |
 | 真实云上联调（执行身份、资源中心、飞书审批定义） | 待准备配置后实测 |
-| 公司 IAM 模式下的 CLI 登录、飞书审批回调、执行失败告警 | 后续 |
+| 状态通知：申请人飞书私信（开通、可领取、失败、未通过、即将到期、到期收回），开通失败告警到管理员群（`notify.py`，`DELIVERY_NOTIFY=1`） | 已完成 |
+| 公司 IAM 模式下的 CLI 登录、飞书审批回调 | 后续 |
 
 ## 8. 代码地图
 
@@ -132,5 +133,6 @@ server.py ── HTTP 接口、角色校验、CSRF
 | `requests_api.py` | 申请相关 HTTP 接口与员工视角裁剪 |
 | `assets.py` | 资源中心采集与视图 |
 | `policies.py` | 权限策略目录采集、申请规则（禁用、风险、天数） |
+| `notify.py` | 申请状态通知：申请人飞书私信卡片、开通失败管理员告警 |
 | `cli_requests.py` | CLI 子命令 |
 | `web/core.js` · `web/requests.js` · `web/assets.js` | 前端公共工具、申请页面、资产页面 |
