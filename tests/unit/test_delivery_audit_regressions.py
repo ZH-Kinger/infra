@@ -242,12 +242,25 @@ if __name__ == "__main__":
 class IamExportTests(unittest.TestCase):
     """名册 → IAM 属性表：属性值直接决定 SSO 进哪个号，宁可空着也不能填错。"""
 
+    def setUp(self):
+        import os
+
+        # 导出只允许写进「工作目录/identity」：测试在临时目录里当仓库根
+        self._cwd = Path.cwd()
+        self.root = Path(tempfile.mkdtemp())
+        os.chdir(self.root)
+
+    def tearDown(self):
+        import os
+
+        os.chdir(self._cwd)
+
     def test_export_rules(self):
         import csv
 
         from delivery.cli import main
 
-        d = Path(tempfile.mkdtemp()) / "identity"
+        d = self.root / "identity"
         d.mkdir()
         acct = "aliyun/1000000000000001"
         (d / "people.json").write_text(
@@ -287,10 +300,47 @@ class IamExportTests(unittest.TestCase):
         self.assertEqual(rows["p@wuji.tech"]["match_by"], "feishu_union_id")
         self.assertIn("存量回填", rows["d@wuji.tech"]["match_by"])
 
+    def test_key_and_suffix_spec_exports_full_nameid(self):
+        import csv
+
+        from delivery.cli import main
+
+        d = self.root / "identity"
+        d.mkdir()
+        (d / "people.json").write_text(
+            json.dumps(roster(row("彼得", "p@wuji.tech", [ACC_P], union_id="on_P"))),
+            encoding="utf-8",
+        )
+        (d / "attrs.json").write_text(
+            json.dumps(
+                {
+                    "_note": "说明",
+                    "aliyun/1000000000000001": {"key": "aliyun-main", "suffix": "@corp.example"},
+                }
+            )
+        )
+        out = d / "out.csv"
+        rc = main(
+            [
+                "identity",
+                "iam-export",
+                "--people",
+                str(d / "people.json"),
+                "--attributes",
+                str(d / "attrs.json"),
+                "--out",
+                str(out),
+            ]
+        )
+        self.assertEqual(rc, 0)
+        rows = list(csv.DictReader(out.open(encoding="utf-8-sig")))
+        self.assertEqual(rows[0]["aliyun-main"], "peter@corp.example")
+
     def test_refuses_to_write_outside_identity_dir(self):
         from delivery.cli import main
 
-        d = Path(tempfile.mkdtemp())
+        d = self.root / "src" / "delivery" / "identity"  # 路径里有 identity 但不在根目录下
+        d.mkdir(parents=True)
         (d / "people.json").write_text(json.dumps(roster()), encoding="utf-8")
         (d / "attrs.json").write_text(json.dumps({"aliyun/1": "a"}))
         rc = main(
@@ -311,7 +361,7 @@ class IamExportTests(unittest.TestCase):
     def test_duplicate_attribute_names_are_rejected(self):
         from delivery.cli import main
 
-        d = Path(tempfile.mkdtemp()) / "identity"
+        d = self.root / "identity"
         d.mkdir()
         (d / "people.json").write_text(json.dumps(roster()), encoding="utf-8")
         (d / "attrs.json").write_text(json.dumps({"aliyun/1": "a", "aliyun/2": "a"}))

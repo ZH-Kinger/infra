@@ -780,9 +780,25 @@ def _cmd_identity_ssomap(args) -> int:
 
 
 def _require_identity_dir(out: Path) -> None:
-    """含员工身份的文件只允许写进 identity/（整个目录 gitignore）。仓库是公开镜像的源头。"""
-    if "identity" not in out.resolve().parent.parts:
-        raise DeliveryError(f"{out} 不在 identity/ 目录下：这类文件含员工身份，只允许写到那里")
+    """含员工身份的文件只允许写进仓库根目录的 identity/（整个目录 gitignore）。
+
+    只认两个根：当前工作目录、本包所在仓库（src 布局下 cli.py 往上三级）。
+    不能只看路径里有没有叫 identity 的目录——`src/delivery/identity/` 就在源码包里，不被忽略。
+    """
+    target = out.resolve()
+    roots = {Path.cwd().resolve(), Path(__file__).resolve().parents[2]}
+    if not any(_is_under(target, root / "identity") for root in roots):
+        raise DeliveryError(
+            f"{out} 不在仓库根目录的 identity/ 下：这类文件含员工身份，只允许写到那里"
+        )
+
+
+def _is_under(path: Path, base: Path) -> bool:
+    try:
+        path.relative_to(base)
+    except ValueError:
+        return False
+    return True
 
 
 def _write_private(path: str, data: dict) -> Path:
@@ -856,7 +872,22 @@ def _cmd_identity_iam_export(args) -> int:
     if not isinstance(attrs, dict) or not attrs:
         raise DeliveryError(f"{attr_file} 必须是非空对象")
 
-    columns = list(attrs.values())
+    # 值可以是列名字符串，或 {"key": 应用标识, "suffix": NameID 后缀}。
+    # 后缀写进导出值里（完整 NameID），IAM 侧表达式就不必按账号拼接域名。
+    specs = {}
+    for scope, spec in attrs.items():
+        if scope.startswith("_"):
+            continue
+        if isinstance(spec, str):
+            specs[scope] = (spec, "")
+        elif isinstance(spec, dict) and isinstance(spec.get("key"), str) and spec["key"]:
+            suffix = spec.get("suffix") or ""
+            if not isinstance(suffix, str):
+                raise DeliveryError(f"{attr_file} 里 {scope} 的 suffix 必须是字符串")
+            specs[scope] = (spec["key"], suffix)
+        else:
+            raise DeliveryError(f'{attr_file} 里 {scope} 的配置应为字符串或 {{"key": ...}}')
+    columns = [key for key, _ in specs.values()]
     if len(set(columns)) != len(columns):
         raise DeliveryError(f"{attr_file} 里有两个云账号用了同一个属性名，值会互相覆盖")
     buf = io.StringIO()
@@ -876,15 +907,23 @@ def _cmd_identity_iam_export(args) -> int:
         for ref in person.accounts:
             by_scope.setdefault(ref.scope, []).append(ref.name)
         for scope, names in by_scope.items():
-            column = attrs.get(scope)
+            spec = specs.get(scope)
+            column = spec[0] if spec else None
             if column is None:
                 problems.append(f"{scope} 未配置属性名")
             elif len(names) > 1:
                 problems.append(f"{scope} 下有多个号 {'/'.join(sorted(names))}，需先定保留哪个")
             else:
-                values[column] = names[0]
+                values[column] = names[0] + spec[1]
         if person.pending:
             problems.append(f"另有 {len(person.pending)} 个待确认对应未导出")
+        if not person.union_id and (person.email_collision or index.claim_blocked(person)):
+            # 这两类人 IAM 只能按邮箱回填，而邮箱本身有歧义 / 面板已判定对不上：宁可空着
+            values = {}
+            problems.append(
+                "通讯录里多人共用此邮箱" if person.email_collision else "登录绑定与名册对不上"
+            )
+            problems.append("不导出属性，需管理员核对后补 union_id")
         if not values:
             skipped += 1
         else:
@@ -912,6 +951,10 @@ def _cmd_identity_iam_export(args) -> int:
         os.close(fd)
     tmp.replace(out)
     print(f"已写入 {out}（权限 600）：{exported} 人有可导入的属性，{skipped} 人没有")
+    print(
+        "  导入须知：match_by=email 的行只允许按邮箱回填一次，回填时同时写下 union_id，"
+        "之后只按 union_id 匹配；不要反复按邮箱重导这份表"
+    )
     missing_uid = sum(1 for p in index.people if p.accounts and not p.union_id)
     if missing_uid:
         print(

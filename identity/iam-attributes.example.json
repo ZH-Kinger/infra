@@ -1,4 +1,10 @@
 {
-  "aliyun/<阿里云主账号UID>": "aliyun_username",
-  "volcano/<火山主账号ID>": "volcano_username"
+  "_note": "云账号 → IAM 属性 cloud_accounts 里的 key；阿里云 suffix 用该主账号默认域名，拼出完整 RAM 账号（UPN）",
+  "aliyun/<阿里云主账号UID>": {
+    "key": "aliyun-main",
+    "suffix": "@<主账号UID>.onaliyun.com"
+  },
+  "volcano/<火山主账号ID>": {
+    "key": "volcano-main"
+  }
 }

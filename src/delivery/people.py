@@ -82,6 +82,13 @@ class Person:
         return self.union_id or f"email:{self.email.lower()}"
 
 
+def _norm_account(value: str) -> str:
+    """`平台/账号/用户名` 只把用户名转小写，与 fingerprint 一致。"""
+    platform, _, rest = str(value).partition("/")
+    account, _, name = rest.partition("/")
+    return f"{platform}/{account}/{name.lower()}"
+
+
 def fingerprint(person: Person) -> tuple:
     """这个人名下**已确认**云账号的指纹：用来确认「绑定时的那个人」和「现在名册里这一行」是同一个人。
 
@@ -196,6 +203,11 @@ class PeopleIndex:
         with self._lock:
             return tuple(self._people)
 
+    def claim_blocked(self, person: Person) -> bool:
+        """这个人名下是否有账号卡在一条对不上的历史绑定里。"""
+        with self._lock:
+            return bool(set(fingerprint(person)) & self._blocked_accounts)
+
     def by_key(self, key: str) -> Optional[Person]:
         with self._lock:
             if key.startswith("email:"):
@@ -293,7 +305,7 @@ class PeopleIndex:
         data = _read_bindings(path)
         fp = list(fingerprint(person))
         for uid, entry in data["bindings"].items():
-            held = {str(a).lower() for a in entry.get("accounts") or ()}
+            held = {_norm_account(a) for a in entry.get("accounts") or ()}
             if uid != person.union_id and held & set(fp):
                 return False  # 这组账号（的一部分）已被别的身份认领
             if uid == person.union_id and sorted(held) != fp:
@@ -440,7 +452,7 @@ def _apply_bindings(people: list, bound: Mapping, warnings: list) -> tuple:
     blocked_accounts = set()
     by_uid = {p.union_id: p for p in people if p.union_id}
     for uid, entry in bound.items():
-        fp = tuple(sorted(str(a).lower() for a in entry.get("accounts") or ()))
+        fp = tuple(sorted(_norm_account(a) for a in entry.get("accounts") or ()))
         who = str(entry.get("name") or uid)
         if uid in by_uid:
             if fingerprint(by_uid[uid]) != fp:
