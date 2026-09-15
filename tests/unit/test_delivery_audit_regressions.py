@@ -378,3 +378,105 @@ class IamExportTests(unittest.TestCase):
             ]
         )
         self.assertEqual(rc, 2)
+
+
+class ExportGuardFollowupTests(unittest.TestCase):
+    """第四轮审计 A1–A4。"""
+
+    def setUp(self):
+        import os
+
+        self._cwd = Path.cwd()
+        self.root = Path(tempfile.mkdtemp())
+        os.chdir(self.root)
+
+    def tearDown(self):
+        import os
+
+        os.chdir(self._cwd)
+
+    def _export(self, people, attrs):
+        from delivery.cli import main
+
+        d = self.root / "identity"
+        d.mkdir(exist_ok=True)
+        (d / "people.json").write_text(json.dumps(people, ensure_ascii=False), encoding="utf-8")
+        (d / "attrs.json").write_text(json.dumps(attrs))
+        out = d / "out.csv"
+        rc = main(
+            [
+                "identity",
+                "iam-export",
+                "--people",
+                str(d / "people.json"),
+                "--attributes",
+                str(d / "attrs.json"),
+                "--out",
+                str(out),
+            ]
+        )
+        return rc, out
+
+    def test_a1_subdirectory_cwd_cannot_write_into_unignored_identity(self):
+        import os
+        import subprocess
+
+        from delivery.cli import _require_identity_dir
+        from delivery.errors import DeliveryError
+
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)  # noqa: S603,S607
+        sub = self.root / "src" / "delivery"
+        sub.mkdir(parents=True)
+        os.chdir(sub)
+        with self.assertRaises(DeliveryError):
+            _require_identity_dir(sub / "identity" / "x.json")
+        with self.assertRaises(DeliveryError):
+            _require_identity_dir(Path("identity/x.json"))
+        _require_identity_dir(self.root / "identity" / "x.json")  # 仓库根目录的 identity/ 允许
+
+    def test_a2_duplicate_union_id_rows_are_not_exported(self):
+        import csv
+
+        acct = "aliyun/1000000000000001"
+        rc, out = self._export(
+            roster(
+                row("甲", "a@wuji.tech", [ACC_P], union_id="on_D"),
+                row("乙", "b@wuji.tech", [ACC_Q], union_id="on_D"),
+            ),
+            {acct: {"key": "aliyun-main", "suffix": "@1000000000000001.onaliyun.com"}},
+        )
+        self.assertEqual(rc, 0)
+        rows = list(csv.DictReader(out.open(encoding="utf-8-sig")))
+        self.assertTrue(all(r["aliyun-main"] == "" for r in rows))
+        self.assertTrue(all("重复" in r["problem"] for r in rows))
+
+    def test_a3_suffix_without_at_is_rejected(self):
+        rc, _ = self._export(
+            roster(row("彼得", "p@wuji.tech", [ACC_P], union_id="on_P")),
+            {"aliyun/1000000000000001": {"key": "aliyun-main", "suffix": "corp.example"}},
+        )
+        self.assertEqual(rc, 2)
+
+    def test_a3_username_with_at_is_not_suffixed(self):
+        import csv
+
+        rc, out = self._export(
+            roster(row("彼得", "p@wuji.tech", [ACC_P | {"name": "p@x"}], union_id="on_P")),
+            {"aliyun/1000000000000001": {"key": "aliyun-main", "suffix": "@corp.example"}},
+        )
+        self.assertEqual(rc, 0)
+        r = next(csv.DictReader(out.open(encoding="utf-8-sig")))
+        self.assertEqual(r["aliyun-main"], "")
+        self.assertIn("已含 @", r["problem"])
+
+    def test_a4_row_without_union_id_and_email_is_not_exported(self):
+        import csv
+
+        rc, out = self._export(
+            roster(row("无名", "", [ACC_P])),
+            {"aliyun/1000000000000001": "aliyun-main"},
+        )
+        self.assertEqual(rc, 0)
+        r = next(csv.DictReader(out.open(encoding="utf-8-sig")))
+        self.assertEqual(r["aliyun-main"], "")
+        self.assertIn("无法匹配", r["problem"])

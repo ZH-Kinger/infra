@@ -780,17 +780,50 @@ def _cmd_identity_ssomap(args) -> int:
 
 
 def _require_identity_dir(out: Path) -> None:
-    """含员工身份的文件只允许写进仓库根目录的 identity/（整个目录 gitignore）。
+    """含员工身份的文件只允许写进**仓库根目录**的 identity/（整个目录 gitignore）。
 
-    只认两个根：当前工作目录、本包所在仓库（src 布局下 cli.py 往上三级）。
-    不能只看路径里有没有叫 identity 的目录——`src/delivery/identity/` 就在源码包里，不被忽略。
+    `.gitignore` 的 `identity/*` 只匹配仓库根目录那一层——`src/identity/`、
+    `src/delivery/identity/` 都不被忽略。所以按「目标所在的 git 工作树」判根，
+    不能拿当前工作目录当根（在子目录里跑命令就绕过了）：
+      · 目标在某个 git 工作树里 → 必须在该工作树顶层的 identity/ 下
+      · 目标落在本包所在仓库里（git 不可用时的兜底）→ 必须在该仓库的 identity/ 下
+      · 都不是（例如测试用的临时目录）→ 必须在当前工作目录的 identity/ 下
     """
     target = out.resolve()
-    roots = {Path.cwd().resolve(), Path(__file__).resolve().parents[2]}
-    if not any(_is_under(target, root / "identity") for root in roots):
+    repo = Path(__file__).resolve().parents[2]
+    top = _git_toplevel(target.parent)
+    if top is not None:
+        root = top
+    elif _is_under(target, repo):
+        root = repo
+    else:
+        root = Path.cwd().resolve()
+    if not _is_under(target, root / "identity"):
         raise DeliveryError(
             f"{out} 不在仓库根目录的 identity/ 下：这类文件含员工身份，只允许写到那里"
         )
+
+
+def _git_toplevel(start: Path) -> Optional[Path]:
+    """start 所在 git 工作树的顶层目录；不在工作树里或没有 git 时返回 None。"""
+    import subprocess
+
+    probe = start
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent  # 目标目录可能还没建
+    try:
+        done = subprocess.run(  # noqa: S603 — 固定参数，不拼接外部输入
+            ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0 or not done.stdout.strip():
+        return None
+    return Path(done.stdout.strip()).resolve()
 
 
 def _is_under(path: Path, base: Path) -> bool:
@@ -884,6 +917,16 @@ def _cmd_identity_iam_export(args) -> int:
             suffix = spec.get("suffix") or ""
             if not isinstance(suffix, str):
                 raise DeliveryError(f"{attr_file} 里 {scope} 的 suffix 必须是字符串")
+            if suffix and (not suffix.startswith("@") or "@" in suffix[1:] or len(suffix) < 2):
+                raise DeliveryError(f"{attr_file} 里 {scope} 的 suffix 必须形如 @域名：{suffix!r}")
+            platform, _, account = scope.partition("/")
+            expected = f"@{account}.onaliyun.com"
+            if platform == "aliyun" and suffix and suffix != expected:
+                print(
+                    f"  注意：{scope} 的 suffix 是 {suffix}，不是该账号默认域名 {expected}；"
+                    "确认这是它的域名别名，否则 SSO 会找不到用户",
+                    file=sys.stderr,
+                )
             specs[scope] = (spec["key"], suffix)
         else:
             raise DeliveryError(f'{attr_file} 里 {scope} 的配置应为字符串或 {{"key": ...}}')
@@ -914,10 +957,19 @@ def _cmd_identity_iam_export(args) -> int:
             elif len(names) > 1:
                 problems.append(f"{scope} 下有多个号 {'/'.join(sorted(names))}，需先定保留哪个")
             else:
-                values[column] = names[0] + spec[1]
+                if spec[1] and "@" in names[0]:
+                    problems.append(f"{scope} 的用户名 {names[0]} 已含 @，不能再拼后缀")
+                else:
+                    values[column] = names[0] + spec[1]
         if person.pending:
             problems.append(f"另有 {len(person.pending)} 个待确认对应未导出")
-        if not person.union_id and (person.email_collision or index.claim_blocked(person)):
+        if person.union_id and index.is_blocked_uid(person.union_id):
+            values = {}
+            problems.append("名册里 union_id 重复，不导出属性，需管理员核对")
+        elif not person.union_id and not person.email:
+            values = {}
+            problems.append("既没有 union_id 也没有邮箱，IAM 无法匹配，不导出属性")
+        elif not person.union_id and (person.email_collision or index.claim_blocked(person)):
             # 这两类人 IAM 只能按邮箱回填，而邮箱本身有歧义 / 面板已判定对不上：宁可空着
             values = {}
             problems.append(

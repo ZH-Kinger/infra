@@ -203,6 +203,11 @@ class PeopleIndex:
         with self._lock:
             return tuple(self._people)
 
+    def is_blocked_uid(self, union_id: str) -> bool:
+        """这个 union_id 是否被停用（名册里重复，或登录绑定与名册对不上）。"""
+        with self._lock:
+            return union_id in self._blocked
+
     def claim_blocked(self, person: Person) -> bool:
         """这个人名下是否有账号卡在一条对不上的历史绑定里。"""
         with self._lock:
