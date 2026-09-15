@@ -433,6 +433,42 @@ def apply(
         os.close(lock_fd)
 
 
+def add_link(paths: ReviewPaths, email: str, account: str, *, actor: str) -> None:
+    """开账号申请执行成功后：把新账号人工对应给申请人。名册在下一次刷新时生效。
+
+    账号已经有人工记录（对应给别人、驳回、服务号）时拒绝，不覆盖。
+    """
+    account = account_key(account)
+    email = email.strip().lower()
+    paths.lock.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(paths.lock, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        manual = load_manual(paths.manual)
+        owner = _manual_owner(manual, account)
+        if (
+            (owner and owner != email)
+            or account in manual["rejected"]
+            or account in manual["services"]
+        ):
+            raise ReviewError(
+                f"账号 {account} 已有人工记录，未自动对应，请管理员在名册审核里处理", 409
+            )
+        spec = manual["links"].setdefault(email, {"name": "", "accounts": []})
+        spec["accounts"] = sorted({*spec.get("accounts", []), account})
+        people_mod.apply_manual({"people": [], "unlinked": [], "services": []}, manual)
+        people_mod.write_private_json(Path(paths.manual), manual)
+    finally:
+        os.close(lock_fd)
+    try:
+        _append_log(
+            paths.log,
+            {"actor": actor, "op": "link_new_account", "account": account, "email": email},
+        )
+    except OSError as exc:
+        print(f"[review] 审计日志写入失败：{type(exc).__name__}", file=sys.stderr)
+
+
 def records(path: str) -> list:
     """人工记录的扁平列表，给面板「撤销」用。"""
     manual = load_manual(path)

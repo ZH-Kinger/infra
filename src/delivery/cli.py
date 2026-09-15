@@ -185,6 +185,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--manual", default="identity/manual-links.json", help="人工记录，名册审核写入这里"
     )
     srv.add_argument(
+        "--tickets", default="identity/tickets.json", help="申请单存储（开账号、权限、访问凭证）"
+    )
+    srv.add_argument("--assets", default="identity/assets.json", help="云账号资产快照")
+    srv.add_argument("--templates", default="identity/request-templates.json", help="申请模板目录")
+    srv.add_argument(
+        "--approval", default="identity/approval.json", help="飞书审批定义与表单控件配置"
+    )
+    srv.add_argument(
         "--labels",
         default="identity/accounts.json",
         help='云账号显示名，形如 {"aliyun/<UID>": "主账号"}',
@@ -255,6 +263,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="identity/manual-links.json",
         help="人工确认的对应（优先于规则推断），格式见 people.apply_manual",
     )
+
+    from . import cli_requests
+
+    cli_requests.add_parsers(commands)
 
     rf = commands.add_parser(
         "refresh", help="定时任务：采集权限快照、生成映射提案、重建人员名册，异常时飞书告警"
@@ -1389,6 +1401,26 @@ def _review_paths(args) -> dict:
     return {"proposal_path": args.proposal, "manual_path": args.manual}
 
 
+def _request_paths(args) -> dict:
+    """申请单含员工信息，模板和审批配置含云账号 ID，资产快照含资源明细：
+    路径过不了写盘守卫（必须在 gitignored 的 identity/ 下）就不开对应功能。"""
+    out = {}
+    try:
+        for path in (args.tickets, args.templates, args.approval):
+            _require_identity_dir(Path(path).resolve())
+        out.update(
+            tickets_path=args.tickets, templates_path=args.templates, approval_path=args.approval
+        )
+    except DeliveryError as exc:
+        print(f"  ⚠ 云账号申请已关闭：{str(exc).splitlines()[0]}")
+    try:
+        _require_identity_dir(Path(args.assets).resolve())
+        out["assets_path"] = args.assets
+    except DeliveryError as exc:
+        print(f"  ⚠ 云账号资产已关闭：{str(exc).splitlines()[0]}")
+    return out
+
+
 def _cmd_refresh(args) -> int:
     """定时任务入口：快照 → 提案 → 名册，有异常或变化就发飞书告警。"""
     from . import alerts, refresh
@@ -1544,6 +1576,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 admins_path=args.admins,
                 labels_path=args.labels,
                 **_review_paths(args),
+                **_request_paths(args),
                 auth=args.auth,
             )
             return 0
@@ -1551,6 +1584,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return _cmd_inventory_collect(args)
         if args.command == "refresh":
             return _cmd_refresh(args)
+        if args.command in ("request", "creds", "requests", "approval", "assets"):
+            from . import cli_requests
+
+            return cli_requests.dispatch(args)
         if args.command == "login":
             return _cmd_login(args)
         if args.command == "doctor":

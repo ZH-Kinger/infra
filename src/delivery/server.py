@@ -15,6 +15,8 @@
   GET  /api/admin/people     管理员：人员列表，?filter=all|multi|high_risk|unbound|no_account
   GET  /api/admin/people/<key>  管理员：某个人的权限详情。
   GET  /api/admin/review     管理员：名册审核的人工记录。
+  /api/requests/*            员工：云账号申请（开账号、权限、访问凭证），见 requests_api.py。
+  /api/admin/requests/*      管理员：全部申请、重试开通、关闭。
   POST /api/admin/review     管理员：确认 / 驳回 / 分配 / 标记服务号 / 撤销（见 review.py）。
   GET  /auth/login       跳飞书授权页（带 PKCE 与 state）。
                          代理登录模式下 /auth/* 全部 404，登录退出走 oauth2-proxy 的 /oauth2/*。
@@ -37,15 +39,21 @@ import time
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
+from . import assets as assets_mod
 from . import inventory
 from . import people as people_mod
 from . import review as review_mod
+from . import tickets as tickets_mod
+from .approval import ApprovalConfig, FeishuApproval
+from .catalog import load as load_catalog
 from .errors import DeliveryError
 from .feishu import FeishuError, FeishuUser, exchange_code, fetch_user
+from .flows import Flows
 from .login import _pkce_pair, authorize_url
 from .people import BIND_NONE, BIND_UNION_ID
+from .provision import executor_from_env
 from .proxy_auth import (
     AUTH_FEISHU,
     AUTH_MODES,
@@ -55,6 +63,7 @@ from .proxy_auth import (
     ProxyIdentity,
 )
 from .registry import PlatformRegistry
+from .requests_api import Caller, RequestsApi
 from .roles import ROLE_ADMIN, Admins, load_admins
 from .views import FILTERS, Labels, admin_overview, admin_people, person_detail
 
@@ -305,6 +314,9 @@ _STATIC = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/app.css": ("app.css", "text/css; charset=utf-8"),
+    "/core.js": ("core.js", "text/javascript; charset=utf-8"),
+    "/requests.js": ("requests.js", "text/javascript; charset=utf-8"),
+    "/assets.js": ("assets.js", "text/javascript; charset=utf-8"),
 }
 #: 页面只加载同源资源。前端不拼 innerHTML，这条 CSP 是第二道闸。
 _CSP = (
@@ -313,6 +325,14 @@ _CSP = (
 )
 _ADMIN_PEOPLE = "/api/admin/people/"
 _ADMIN_REVIEW = "/api/admin/review"
+
+
+def _is_requests_path(path: str) -> bool:
+    return any(
+        path == p or path.startswith(p + "/") for p in ("/api/requests", "/api/admin/requests")
+    )
+
+
 _REVIEW_MAX_BODY = 4096
 
 
@@ -335,7 +355,22 @@ class Backend:
         platforms: Optional[dict] = None,
         proposal_path: Optional[str] = None,
         manual_path: Optional[str] = None,
+        tickets_path: Optional[str] = None,
+        templates_path: Optional[str] = None,
+        approval_path: Optional[str] = None,
+        feishu_token: Optional[Callable[[], str]] = None,
+        executor: Optional[Callable[[str, str], object]] = None,
+        approval_transport=None,
+        assets_path: Optional[str] = None,
     ):
+        self.assets_path = assets_path
+        self.tickets_path = tickets_path
+        self.templates_path = templates_path
+        self.approval_path = approval_path
+        self._feishu_token = feishu_token
+        self._executor = executor or executor_from_env
+        self._approval_transport = approval_transport
+        self._flows: Optional[Flows] = None
         self.proposal_path = proposal_path
         self.manual_path = manual_path
         self.inventory_path = inventory_path
@@ -406,6 +441,57 @@ class Backend:
 
         return self._cached("labels", self._stamp(self.labels_path), build)
 
+    def assets(self):
+        return self._cached(
+            "assets", self._stamp(self.assets_path), lambda: assets_mod.load(self.assets_path)
+        )
+
+    def catalog(self):
+        return self._cached(
+            "catalog", self._stamp(self.templates_path), lambda: load_catalog(self.templates_path)
+        )
+
+    def approval(self) -> Optional[FeishuApproval]:
+        def build():
+            config = ApprovalConfig.load(self.approval_path)
+            if config is None or self._feishu_token is None:
+                return None
+            kw = {"transport": self._approval_transport} if self._approval_transport else {}
+            return FeishuApproval(config, self._feishu_token, **kw)
+
+        return self._cached("approval", self._stamp(self.approval_path), build)
+
+    def flows(self) -> Optional[Flows]:
+        if not self.tickets_path:
+            return None
+        if self._flows is None:
+            paths = self.review_paths()
+
+            def link(email: str, account: str, ticket_id: str) -> None:
+                if paths is not None:
+                    review_mod.add_link(paths, email, account, actor=f"request:{ticket_id}")
+
+            self._flows = Flows(
+                store=tickets_mod.TicketStore(self.tickets_path),
+                catalog=self.catalog,
+                approval=self.approval,
+                roster=self.people,
+                executor=self._executor,
+                add_manual_link=link,
+                current_groups=self.current_groups,
+            )
+        return self._flows
+
+    def current_groups(self, platform: str, account: str, name: str) -> Optional[set]:
+        """权限快照里这个子账号当前所在的用户组；快照没有或这个云账号没采全时返回 None（未知）。"""
+        snap = self.snapshot()
+        if snap is None or any(i.startswith(f"{platform}/{account}：") for i in snap.incomplete):
+            return None
+        user = snap.user(platform, account, name)
+        if user is None:
+            return None
+        return {g.name for g in snap.groups_of(user)} | set(user.groups)
+
     def review_paths(self) -> Optional[review_mod.ReviewPaths]:
         if not (self.people_path and self.proposal_path and self.manual_path):
             return None
@@ -442,6 +528,7 @@ def make_handler(
 ):
     """proxy 不为空即代理登录模式：只认 oauth2-proxy 注入的请求头，飞书登录路由关闭。"""
     backend = backend or Backend(platforms={p.id: p.display for p in registry})
+    requests_api = RequestsApi(backend.flows)
 
     class Handler(http.server.BaseHTTPRequestHandler):
         server_version = "delivery-dev"
@@ -469,6 +556,11 @@ def make_handler(
             if proxy is not None:
                 user = proxy.user(self.headers)
                 return _WebSession(user=user) if user is not None else None
+            bearer = self.headers.get("Authorization") or ""
+            if bearer.startswith("Bearer "):
+                # CLI：delivery login 换来的会话令牌，不走 Cookie
+                session = store.sessions.get(bearer[len("Bearer ") :].strip())
+                return session if session is not None and not session.expired else None
             raw = self.headers.get("Cookie")
             if not raw:
                 return None
@@ -663,6 +755,22 @@ def make_handler(
                         include_pending=True,
                     ),
                 )
+            if _is_requests_path(path):
+                return self._requests("GET", path, None)
+            if path in ("/api/assets", "/api/admin/assets"):
+                admin = path == "/api/admin/assets"
+                session = self._require(admin=admin)
+                if session is None:
+                    return None
+                labels = backend.labels()
+                scopes = None
+                if not admin:
+                    person = backend.people().resolve(union_id=session.user.union_id).person
+                    scopes = {(r.platform, r.account) for r in (person.accounts if person else ())}
+                return self._json(
+                    200,
+                    assets_mod.summary_view(backend.assets(), scopes=scopes, labels=labels.account),
+                )
             if path == _ADMIN_REVIEW:
                 if self._require(admin=True) is None:
                     return None
@@ -692,6 +800,62 @@ def make_handler(
                     return "跨站请求被拒绝"
             return None
 
+        def _json_body(self, *, allow_empty: bool = False):
+            """读 JSON 请求体。返回 (dict, None) 或 (None, 已发送的错误响应)。"""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if length == 0 and allow_empty:
+                return {}, None
+            if length <= 0 or length > _REVIEW_MAX_BODY:
+                return None, self._json(400, {"error": "请求体为空或过大"})
+            try:
+                payload = json.loads(self.rfile.read(length).decode())
+            except (ValueError, UnicodeDecodeError):
+                return None, self._json(400, {"error": "请求体不是合法 JSON"})
+            if not isinstance(payload, dict):
+                return None, self._json(400, {"error": "请求体必须是对象"})
+            return payload, None
+
+        def _requests(self, method: str, path: str, body):
+            admin = path.startswith("/api/admin/")
+            session = self._require(admin=admin)
+            if session is None:
+                return None
+            if method == "POST":
+                refused = self._same_origin_json()
+                if refused:
+                    return self._json(403, {"error": refused})
+                body, sent = self._json_body(allow_empty=True)
+                if body is None:
+                    return sent
+            user = session.user
+            if not user.union_id:
+                # 申请单按 union_id 归属：没有 union_id 的登录者会匹配到别人的空 union_id 单子
+                return self._json(403, {"error": "登录信息里没有 union_id，不能使用申请功能"})
+            # 只用企业邮箱（名册按它对应新账号）：个人联系邮箱不能拿来认领公司账号
+            try:
+                person = backend.people().resolve(union_id=user.union_id).person
+            except DeliveryError:
+                person = None
+            email = person.email if person and person.email else user.enterprise_email
+            caller = Caller(
+                union_id=user.union_id,
+                name=user.name,
+                email=email,
+                open_id=user.open_id,
+                user_id=user.user_id,
+                admin=backend.role(user) == ROLE_ADMIN,
+            )
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                status, payload = requests_api.handle(method, path, query, body, caller)
+            except Exception as exc:  # noqa: BLE001 — 任何异常都回 JSON，细节只进服务端日志
+                print(f"[requests] {type(exc).__name__}: {exc}", file=sys.stderr)
+                return self._json(500, {"error": "申请服务出错，请联系管理员查看服务端日志"})
+            return self._json(status, payload)
+
         def _review(self):
             session = self._require(admin=True)
             if session is None:
@@ -702,18 +866,9 @@ def make_handler(
             paths = backend.review_paths()
             if paths is None:
                 return self._json(404, {"error": "服务端没有配置映射提案和人工记录路径"})
-            try:
-                length = int(self.headers.get("Content-Length") or 0)
-            except ValueError:
-                length = -1
-            if length <= 0 or length > _REVIEW_MAX_BODY:
-                return self._json(400, {"error": "请求体为空或过大"})
-            try:
-                payload = json.loads(self.rfile.read(length).decode())
-            except (ValueError, UnicodeDecodeError):
-                return self._json(400, {"error": "请求体不是合法 JSON"})
-            if not isinstance(payload, dict):
-                return self._json(400, {"error": "请求体必须是对象"})
+            payload, sent = self._json_body()
+            if payload is None:
+                return sent
             user = session.user
             try:
                 result = review_mod.apply(
@@ -736,6 +891,8 @@ def make_handler(
             path = urllib.parse.urlsplit(self.path).path
             if path == _ADMIN_REVIEW:
                 return self._review()
+            if _is_requests_path(path):
+                return self._requests("POST", path, None)
             if proxy is not None or path != "/auth/exchange":
                 return self._json(404, {"error": "not found"})
             length = int(self.headers.get("Content-Length") or 0)
@@ -829,6 +986,23 @@ def make_handler(
     return Handler
 
 
+def _tenant_token_cache(app_id: str, app_secret: str) -> Callable[[], str]:
+    """飞书 tenant_access_token 有效期 2 小时：缓存 90 分钟，过期再换。"""
+    from .identity.directory import tenant_token
+
+    state = {"token": "", "at": 0.0}
+    lock = threading.Lock()
+
+    def get() -> str:
+        with lock:
+            if not state["token"] or time.time() - state["at"] > 90 * 60:
+                state["token"] = tenant_token(app_id, app_secret)
+                state["at"] = time.time()
+            return state["token"]
+
+    return get
+
+
 def serve(
     *,
     host: str = "127.0.0.1",
@@ -840,6 +1014,10 @@ def serve(
     labels_path: Optional[str] = None,
     proposal_path: Optional[str] = None,
     manual_path: Optional[str] = None,
+    tickets_path: Optional[str] = None,
+    templates_path: Optional[str] = None,
+    approval_path: Optional[str] = None,
+    assets_path: Optional[str] = None,
     auth: Optional[str] = None,
     echo=print,
 ) -> None:
@@ -861,6 +1039,11 @@ def serve(
         platforms={p.id: p.display for p in registry},
         proposal_path=proposal_path,
         manual_path=manual_path,
+        tickets_path=tickets_path,
+        templates_path=templates_path,
+        approval_path=approval_path,
+        assets_path=assets_path,
+        feishu_token=_tenant_token_cache(app_id, app_secret) if app_id and app_secret else None,
     )
     handler = make_handler(
         registry,

@@ -98,6 +98,63 @@ delivery refresh --trust-unverified-when-derivable   # 和手动生成提案时�
 环境变量：两朵云只读凭证、`DELIVERY_ALERT_WEBHOOK`、`DELIVERY_ALERT_SECRET`（机器人必须开签名校验）。
 告警内容含云账号用户名，只发到管理员所在的内部群。
 
+## 云账号申请（开账号、云账号权限、访问凭证）
+
+设计与安全规则见 [docs/cloud-access-platform.md](../../docs/cloud-access-platform.md)。上线前按顺序准备：
+
+1. **飞书审批**：在飞书审批后台建一个审批定义，表单放 4 个控件：申请单号（单行文本）、申请类型（单行文本）、
+   申请内容（多行文本）、申请理由（多行文本），审批人按公司流程配。面板的飞书应用要有
+   `approval:approval` 权限。查控件 ID，填进 `identity/approval.json`（格式见 `identity/approval.example.json`）：
+
+   ```bash
+   delivery approval widgets --code <审批定义编号>
+   ```
+
+   公司 IAM 登录时，oauth2-proxy 要把 `feishu_user_id` 传给面板（示例配置已包含），否则无法以员工身份发起审批。
+
+2. **申请模板**：`identity/request-templates.json`（格式见 `identity/request-templates.example.json`）。
+   员工只能从这里选，模板里写死用户组、角色和时长上限。加载时逐项校验，写错会拒绝加载。
+
+3. **执行身份**：每个云账号一个，只给开号、加组、扮演模板角色这几个动作。阿里云策略示例见
+   `executor-policy.aliyun.example.json`（把用户组和角色收窄到模板里用到的）。环境变量：
+
+   | 平台 | 变量 |
+   |---|---|
+   | 阿里云 | `DELIVERY_EXEC_ALIYUN_<UID>_ACCESS_KEY_ID` / `_ACCESS_KEY_SECRET` |
+   | 火山 | `DELIVERY_EXEC_VOLCANO_<账号ID>_ACCESS_KEY` / `_SECRET_KEY` |
+
+   每次写云前会先确认凭证属于目标云账号，配错账号时直接失败（火山确认不了归属时同样失败）。
+   凭证文件权限 600，只放在面板服务器上。
+
+   注意影响范围：示例里 `CreateLoginProfile` / `UpdateLoginProfile` 作用于 `user/*`，
+   执行身份泄露时可以重置任何 RAM 用户的控制台密码（包括管理员）。能统一新账号前缀时，
+   把 Resource 收窄到该前缀；模板里的角色要把「最大会话时间」设到不小于模板的 `max_hours`。
+
+4. **资产**：两家控制台分别开通「资源中心」，给权限快照用的只读身份加资源中心只读权限。
+
+5. **定时任务**：在 `delivery-refresh.service` 之外再加两条（同一个 EnvironmentFile）：
+
+   ```bash
+   delivery requests sweep     # 同步飞书审批、到期回收权限、标记过期凭证、开账号后对应到名册（建议每 10 分钟）
+   delivery assets collect     # 采集资产快照（每天一次）
+   ```
+
+   审批通过后，员工或管理员打开申请单时也会实时同步，定时任务是兜底。
+   「开通中 / 提交中」超过 30 分钟没有进展的单子，定时任务会标成失败（管理后台也可以手动处理），
+   请先核对云上和飞书里的实际状态再重试或关闭。
+
+CLI（`delivery login` 之后）：
+
+```bash
+delivery request templates
+delivery request new aliyun-oss-read --user <你的子账号> --days 30 --reason "..."
+delivery request list
+eval "$(delivery creds <申请单号>)"     # 临时凭证写进当前 shell，官方 aliyun / ve CLI 直接可用
+delivery assets
+```
+
+CLI 走面板的会话令牌，目前只支持飞书登录模式；公司 IAM（代理）模式下 CLI 登录另做。
+
 ## 回退
 
 去掉 `DELIVERY_AUTH=proxy`，重新配飞书应用环境变量，访问面板端口即可。

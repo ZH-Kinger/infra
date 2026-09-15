@@ -1,0 +1,41 @@
+{
+  "schema": "wuji-request-templates@1",
+  "templates": [
+    {
+      "id": "aliyun-oss-read",
+      "kind": "permission",
+      "platform": "aliyun",
+      "account": "1000000000000001",
+      "title": "OSS 只读",
+      "category": "存储",
+      "description": "读取训练数据桶，不能写入和删除。",
+      "groups": ["grp-oss-readonly"],
+      "max_days": 90,
+      "risk": "low"
+    },
+    {
+      "id": "aliyun-dev-sts",
+      "kind": "credential",
+      "platform": "aliyun",
+      "account": "1000000000000001",
+      "title": "开发环境临时凭证",
+      "description": "本地脚本访问 OSS 用，只读。",
+      "role_arn": "acs:ram::1000000000000001:role/dev-readonly",
+      "max_hours": 4,
+      "valid_days": 7,
+      "risk": "low"
+    },
+    {
+      "id": "volcano-new-user",
+      "kind": "account",
+      "platform": "volcano",
+      "account": "2000000001",
+      "title": "火山引擎子账号",
+      "description": "新同事开通火山控制台。",
+      "groups": ["grp-default"],
+      "username_pattern": "^[a-z][a-z0-9.-]{1,31}$",
+      "console_login": true,
+      "risk": "medium"
+    }
+  ]
+}

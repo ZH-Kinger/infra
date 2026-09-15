@@ -4,20 +4,27 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>云权限面板</title>
+  <title>云账号平台</title>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
   <header class="topbar">
     <div class="topbar-inner">
-      <span class="brand">云权限面板</span>
-      <nav class="tabs" id="tabs" hidden>
-        <a class="tab" data-tab="me" href="#me">我的权限</a>
-        <a class="tab" data-tab="admin" href="#admin" id="tab-admin" hidden>人员总览</a>
+      <span class="brand">云账号平台<span class="brand-space" id="brand-space" hidden>管理后台</span></span>
+      <nav class="tabs" id="tabs-user" aria-label="员工导航" hidden>
+        <a class="tab" data-tab="me" href="#me">我的云账号</a>
+        <a class="tab" data-tab="apply" href="#apply">申请</a>
+        <a class="tab" data-tab="requests" href="#requests">我的申请</a>
+        <a class="tab" data-tab="assets" href="#assets">资产</a>
+      </nav>
+      <nav class="tabs" id="tabs-admin" aria-label="管理后台导航" hidden>
+        <a class="tab" data-tab="admin-requests" href="#admin/requests">申请与开通</a>
+        <a class="tab" data-tab="admin" href="#admin">人员与名册</a>
+        <a class="tab" data-tab="admin-assets" href="#admin/assets">云资产</a>
       </nav>
       <div class="who" id="who" hidden>
+        <a class="space-switch" id="space-switch" href="#admin/requests" hidden>管理后台</a>
         <span class="who-name" id="who-name"></span>
-        <span class="pill" id="who-role"></span>
         <a id="logout" href="/auth/logout">退出</a>
       </div>
     </div>

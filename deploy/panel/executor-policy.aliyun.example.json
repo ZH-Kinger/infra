@@ -1,0 +1,29 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ram:GetUser",
+        "ram:CreateUser",
+        "ram:ListGroupsForUser",
+        "ram:CreateLoginProfile",
+        "ram:UpdateLoginProfile"
+      ],
+      "Resource": "acs:ram:*:<主账号UID>:user/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["ram:AddUserToGroup", "ram:RemoveUserFromGroup"],
+      "Resource": [
+        "acs:ram:*:<主账号UID>:group/grp-oss-readonly",
+        "acs:ram:*:<主账号UID>:group/grp-default"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "acs:ram:*:<主账号UID>:role/dev-readonly"
+    }
+  ]
+}

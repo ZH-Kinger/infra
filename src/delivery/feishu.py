@@ -36,6 +36,9 @@ class FeishuUser:
     #: 而这两件事一个要找管理员改权限、一个要去管理后台开开关。
     enterprise_email: str = ""
     contact_email: str = ""
+    #: 租户内的 user_id。公司 IAM 登录时从 wuji scope 的 feishu_user_id 来；飞书应用登录时
+    #: 用 open_id 就够，这里留空。发起飞书审批要用其中之一。
+    user_id: str = ""
 
     @property
     def identity(self) -> str:

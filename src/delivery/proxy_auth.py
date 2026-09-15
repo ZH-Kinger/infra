@@ -69,6 +69,7 @@ H_SECRET = "X-Panel-Proxy-Secret"  # noqa: S105  请求头名
 H_UNION_ID = "X-Panel-Union-Id"
 H_NAME = "X-Panel-Name"
 H_TOKEN = "X-Panel-Access-Token"  # noqa: S105
+H_FEISHU_USER_ID = "X-Panel-Feishu-User-Id"
 
 LOGIN_URL = "/oauth2/start?rd=%2F"
 DEFAULT_LOGOUT_URL = "/oauth2/sign_out"
@@ -225,8 +226,11 @@ class ProxyIdentity:
         if not _UNION_ID.match(union_id):
             return None
         name = _header_text((headers.get(H_NAME) or "").strip())
+        user_id = (headers.get(H_FEISHU_USER_ID) or "").strip()
+        if not _UNION_ID.match(user_id):
+            user_id = ""  # 只用于以本人身份发起飞书审批，格式不对就当没有
         # 不带邮箱：管理员只认 union_id；名册关联需要邮箱时由调用方显式调 email()
-        return FeishuUser(open_id="", union_id=union_id, name=name)
+        return FeishuUser(open_id="", union_id=union_id, name=name, user_id=user_id)
 
     def email(self, headers: Mapping, union_id: str) -> str:
         """名册首次关联用的企业邮箱。只在名册里查不到这个 union_id 时调用。"""

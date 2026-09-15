@@ -5,104 +5,13 @@
 //   · 身份和权限数据只存在内存里，不写 localStorage / sessionStorage。
 //   · 非管理员永远不发 /api/admin/* 请求——不靠后端 403 兜底来「隐藏」页面。
 
-const app = document.getElementById("app");
+import { ApiError, api, apiPost, clear, h, mount, platformTag, safePath } from "./core.js";
+import { renderAssets } from "./assets.js";
+import { requestRoutes } from "./requests.js";
+
 const state = { session: null, loginUrl: "", peopleFilter: "all", peopleQuery: "", peopleCache: null, flash: null };
 
-const PLATFORM_CLASS = { aliyun: "aliyun", volcano: "volcano" };
 const FOLD_LIMIT = 8;
-
-// ── DOM 小工具 ────────────────────────────────────────────────────────────
-function h(tag, props, ...children) {
-  const el = document.createElement(tag);
-  for (const [key, value] of Object.entries(props || {})) {
-    if (value === undefined || value === null || value === false) continue;
-    if (key === "class") el.className = value;
-    else if (key === "dataset") Object.assign(el.dataset, value);
-    else if (key.startsWith("on")) el.addEventListener(key.slice(2), value);
-    else if (key === "hidden") el.hidden = Boolean(value);
-    else el.setAttribute(key, value === true ? "" : String(value));
-  }
-  for (const child of children.flat()) {
-    if (child === undefined || child === null || child === false) continue;
-    el.append(child instanceof Node ? child : document.createTextNode(String(child)));
-  }
-  return el;
-}
-
-function clear(el) {
-  while (el.firstChild) el.removeChild(el.firstChild);
-}
-
-function mount(...nodes) {
-  clear(app);
-  app.append(...nodes.flat().filter(Boolean));
-}
-
-// 只接受同源相对路径，防止接口被篡改后塞进 javascript: 之类的链接。
-function safePath(value, fallback) {
-  return typeof value === "string" &&
-    value.startsWith("/") &&
-    !value.startsWith("//") &&
-    !value.includes("\\")
-    ? value
-    : fallback;
-}
-
-// ── 请求 ─────────────────────────────────────────────────────────────────
-class ApiError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
-
-async function api(path) {
-  let resp;
-  try {
-    resp = await fetch(path, {
-      credentials: "same-origin",
-      headers: { Accept: "application/json" },
-      cache: "no-store",
-    });
-  } catch {
-    throw new ApiError(0, "连不上服务，请检查本地服务是否在运行。");
-  }
-  let body = {};
-  try {
-    body = await resp.json();
-  } catch {
-    body = {};
-  }
-  if (!resp.ok) {
-    const fallback = { 401: "登录已失效。", 403: "没有权限查看这个页面。", 404: "没有找到。" };
-    throw new ApiError(resp.status, body.error || fallback[resp.status] || `请求失败（HTTP ${resp.status}）`);
-  }
-  return body;
-}
-
-// 写接口：带 X-Panel-Request 头和 JSON 类型，服务端据此挡跨站请求
-async function apiPost(path, body) {
-  let resp;
-  try {
-    resp = await fetch(path, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json", Accept: "application/json", "X-Panel-Request": "1" },
-      body: JSON.stringify(body),
-      cache: "no-store",
-    });
-  } catch {
-    throw new ApiError(0, "连不上服务，请检查本地服务是否在运行。");
-  }
-  let data = {};
-  try {
-    data = await resp.json();
-  } catch {
-    data = {};
-  }
-  if (!resp.ok) throw new ApiError(resp.status, data.error || `操作失败（HTTP ${resp.status}）`);
-  return data;
-}
 
 // ── 名册审核 ──────────────────────────────────────────────────────────────
 const REVIEW_DONE = {
@@ -181,18 +90,23 @@ async function load(fetcher, render) {
 }
 
 // ── 顶栏与路由 ────────────────────────────────────────────────────────────
-function renderTopbar() {
+function renderTopbar(space = "user") {
   const s = state.session;
   const authed = Boolean(s && s.authenticated);
-  document.getElementById("tabs").hidden = !authed;
+  const isAdmin = authed && s.role === "admin";
+  document.getElementById("tabs-user").hidden = !authed || space !== "user";
+  document.getElementById("tabs-admin").hidden = !isAdmin || space !== "admin";
   document.getElementById("who").hidden = !authed;
+  document.body.classList.toggle("admin-space", isAdmin && space === "admin");
+  const brand = document.getElementById("brand-space");
+  brand.hidden = !(isAdmin && space === "admin");
   if (!authed) return;
   document.getElementById("who-name").textContent = s.name || "未命名";
-  const role = document.getElementById("who-role");
-  role.textContent = s.role === "admin" ? "管理员" : "成员";
-  role.className = s.role === "admin" ? "pill accent" : "pill";
+  const switcher = document.getElementById("space-switch");
+  switcher.hidden = !isAdmin;
+  switcher.textContent = space === "admin" ? "回到员工视图" : "管理后台";
+  switcher.setAttribute("href", space === "admin" ? "#me" : "#admin/requests");
   document.getElementById("logout").setAttribute("href", safePath(s.logout_url, "/auth/logout"));
-  document.getElementById("tab-admin").hidden = s.role !== "admin";
 }
 
 function markTab(name) {
@@ -203,36 +117,53 @@ function markTab(name) {
   }
 }
 
+function decode(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return "";
+  }
+}
+
 function parseHash() {
   const raw = location.hash.replace(/^#/, "");
-  if (raw.startsWith("person=")) {
-    let key = "";
-    try {
-      key = decodeURIComponent(raw.slice("person=".length));
-    } catch {
-      key = "";
-    }
-    return { page: "person", key };
+  const [path, query = ""] = raw.split("?");
+  if (path.startsWith("person=")) return { page: "person", key: decode(path.slice(7)), space: "admin" };
+  if (path.startsWith("admin/request=")) return { page: "admin-request", key: decode(path.slice(14)), space: "admin" };
+  if (path === "admin/requests") return { page: "admin-requests", filter: query || "open", space: "admin" };
+  if (path === "admin/assets") return { page: "admin-assets", space: "admin" };
+  if (path === "assets") return { page: "assets", space: "user" };
+  if (path === "admin") return { page: "admin", space: "admin" };
+  if (path.startsWith("request=")) {
+    const [id, flag] = path.slice(8).split("&");
+    return { page: "request", key: decode(id), fresh: flag === "new=1", space: "user" };
   }
-  return { page: raw === "admin" ? "admin" : "me" };
+  if (path === "requests") return { page: "requests", filter: query || "open", space: "user" };
+  if (path === "apply") return { page: "apply", space: "user" };
+  if (path.startsWith("apply=")) return { page: "apply", key: decode(path.slice(6)), space: "user" };
+  return { page: "me", space: "user" };
 }
+
+const pages = requestRoutes({ load, errorView, route: () => route() });
 
 function route() {
   if (!state.session || !state.session.authenticated) return renderLogin();
   const isAdmin = state.session.role === "admin";
-  const { page, key } = parseHash();
-  if ((page === "admin" || page === "person") && !isAdmin) {
+  const { page, key, filter, fresh, space } = parseHash();
+  if (space === "admin" && !isAdmin) {
+    renderTopbar("user");
     markTab("me");
     return mount(
       h(
         "div",
         { class: "card empty" },
         h("h2", {}, "没有权限"),
-        h("p", {}, "人员总览只对管理员开放。"),
-        h("a", { class: "btn small", href: "#me" }, "回到我的权限"),
+        h("p", {}, "管理后台只对管理员开放。"),
+        h("a", { class: "btn small", href: "#me" }, "回到我的云账号"),
       ),
     );
   }
+  renderTopbar(space);
   if (page === "admin") {
     markTab("admin");
     return renderAdmin();
@@ -243,6 +174,34 @@ function route() {
       () => api(`/api/admin/people/${encodeURIComponent(key)}`),
       (detail) => mount(personPage(detail, { admin: true })),
     );
+  }
+  if (page === "admin-assets") {
+    markTab("admin-assets");
+    return renderAssets({ load }, { admin: true });
+  }
+  if (page === "assets") {
+    markTab("assets");
+    return renderAssets({ load }, { admin: false });
+  }
+  if (page === "admin-requests") {
+    markTab("admin-requests");
+    return pages.renderAdminList(filter);
+  }
+  if (page === "admin-request" && key) {
+    markTab("admin-requests");
+    return pages.renderDetail(key, { admin: true });
+  }
+  if (page === "apply") {
+    markTab("apply");
+    return pages.renderApply(key);
+  }
+  if (page === "requests") {
+    markTab("requests");
+    return pages.renderMine(filter);
+  }
+  if (page === "request" && key) {
+    markTab("requests");
+    return pages.renderDetail(key, { admin: false, fresh });
   }
   markTab("me");
   return load(() => api("/api/me"), (detail) => mount(personPage(detail, { admin: false })));
@@ -294,10 +253,6 @@ function incompleteBanner(items) {
 }
 
 // ── 个人详情（我的权限 / 管理员看某人共用） ────────────────────────────────
-function platformTag(platform, display, extraClass) {
-  const cls = ["plat", PLATFORM_CLASS[platform] || "", extraClass || ""].join(" ").trim();
-  return h("span", { class: cls }, display || platform || "未知平台");
-}
 
 function policyList(policies, highRisk) {
   const risky = new Set(highRisk || []);
@@ -400,7 +355,7 @@ function personPage(detail, { admin }) {
   if (admin) {
     titleRow.append(h("a", { class: "btn ghost small", href: "#admin" }, "← 返回人员总览"));
   }
-  titleRow.append(h("h1", {}, admin ? person.name || "未命名" : "我的权限"));
+  titleRow.append(h("h1", {}, admin ? person.name || "未命名" : "我的云账号"));
   if (admin && detail.binding !== "union_id") {
     titleRow.append(h("span", { class: "pill warn" }, "未绑定 union_id"));
   }

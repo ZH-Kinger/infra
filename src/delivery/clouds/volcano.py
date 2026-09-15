@@ -69,8 +69,9 @@ class Credentials:
 Transport = Callable[[str, dict], tuple]
 
 
-def _http(url: str, headers: dict) -> tuple:
-    req = urllib.request.Request(url, headers=headers, method="GET")  # noqa: S310
+def _http(url: str, headers: dict, data: Optional[bytes] = None) -> tuple:
+    method = "POST" if data is not None else "GET"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)  # noqa: S310
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # noqa: S310
             return resp.getcode(), json.loads(resp.read().decode() or "{}")
@@ -95,14 +96,23 @@ def canonical_query(params: dict) -> str:
     )
 
 
-def sign(*, params: dict, secret: str, region: str, service: str, xdate: str) -> str:
+def sign(
+    *,
+    params: dict,
+    secret: str,
+    region: str,
+    service: str,
+    xdate: str,
+    host: str = HOST,
+    method: str = "GET",
+    body_hash: str = _EMPTY_SHA256,
+) -> str:
+    # host 必须是实际请求的域名：STS 走 sts.volcengineapi.com，签错域名直接 SignatureDoesNotMatch
     datestamp = xdate[:8]
-    headers = {"host": HOST, "x-content-sha256": _EMPTY_SHA256, "x-date": xdate}
+    headers = {"host": host, "x-content-sha256": body_hash, "x-date": xdate}
     signed = "host;x-content-sha256;x-date"
     canon_headers = "".join(f"{k}:{headers[k]}\n" for k in signed.split(";"))
-    canon_req = "\n".join(
-        ["GET", "/", canonical_query(params), canon_headers, signed, _EMPTY_SHA256]
-    )
+    canon_req = "\n".join([method, "/", canonical_query(params), canon_headers, signed, body_hash])
     scope = f"{datestamp}/{region}/{service}/request"
     to_sign = "\n".join(
         ["HMAC-SHA256", xdate, scope, hashlib.sha256(canon_req.encode()).hexdigest()]
@@ -119,33 +129,46 @@ def call(
     *,
     creds: Credentials,
     region: str = DEFAULT_REGION,
+    host: str = HOST,
+    body: Optional[dict] = None,
     transport: Optional[Transport] = None,
 ) -> dict:
+    """`body` 不为空时发 POST JSON（资源中心这类新接口），否则 GET 查询串。"""
     send = transport or _http
     query = dict(params or {})
     query.update({"Action": action, "Version": version})
     xdate = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    data = json.dumps(body).encode() if body is not None else None
+    body_hash = hashlib.sha256(data).hexdigest() if data is not None else _EMPTY_SHA256
     signature = sign(
         params=query,
         secret=creds.secret_access_key,
         region=region,
         service=service,
         xdate=xdate,
+        host=host,
+        method="POST" if data is not None else "GET",
+        body_hash=body_hash,
     )
     scope = f"{xdate[:8]}/{region}/{service}/request"
     headers = {
-        "host": HOST,
+        "host": host,
         "x-date": xdate,
-        "x-content-sha256": _EMPTY_SHA256,
+        "x-content-sha256": body_hash,
         "Authorization": (
             f"HMAC-SHA256 Credential={creds.access_key_id}/{scope}, "
             f"SignedHeaders=host;x-content-sha256;x-date, Signature={signature}"
         ),
     }
-    status, body = send(f"https://{HOST}/?{canonical_query(query)}", headers)
-    if status == 200 and "Result" in body:
-        return body["Result"]
-    err = (body.get("ResponseMetadata") or {}).get("Error") or {}
+    url = f"https://{host}/?{canonical_query(query)}"
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+        status, resp = send(url, headers, data)
+    else:
+        status, resp = send(url, headers)
+    if status == 200 and "Result" in resp:
+        return resp["Result"]
+    err = (resp.get("ResponseMetadata") or {}).get("Error") or {}
     code, message = str(err.get("Code") or ""), _scrub(str(err.get("Message") or ""))
     blob = f"{code} {message}".lower()
     if any(m in blob for m in _DENIED):

@@ -44,6 +44,11 @@ injectRequestHeaders:
     values:
       - claimSource:
           claim: name
+  # 面板以员工本人身份发起飞书审批要用（wuji scope 的 feishu_user_id）
+  - name: X-Panel-Feishu-User-Id
+    values:
+      - claimSource:
+          claim: feishu_user_id
   # 面板只在名册里还没有这个 union_id 时，用它查 IAM userinfo 拿邮箱做首次关联。
   # 全员 union_id 回填完后删掉这一段，面板就不再收到 access token
   - name: X-Panel-Access-Token
@@ -66,4 +71,4 @@ providers:
       # 会话主键用 union_id：没有邮箱的员工也能登录，IAM 没给 union_id 的直接拒绝
       emailClaim: feishu_union_id
       audienceClaims: [aud]
-    additionalClaims: [feishu_union_id, name]
+    additionalClaims: [feishu_union_id, feishu_user_id, name]
