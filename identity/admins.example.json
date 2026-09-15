@@ -1,0 +1,5 @@
+{
+  "_note": "看板管理员名单示例。真实名单放 identity/admins.json（已 gitignore，含员工邮箱，不进公开仓库）。空名单 = 没有人是管理员。",
+  "emails": ["someone@example.com"],
+  "union_ids": []
+}

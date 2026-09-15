@@ -1,0 +1,41 @@
+{
+  "id": "aliyun",
+  "display": "阿里云",
+  "short": "阿里云",
+  "console_url": "https://signin.aliyun.com",
+  "accounts": [
+    "default",
+    "1949"
+  ],
+  "capabilities": {
+    "auth": "oidc",
+    "iac": "terraform",
+    "plan": "native",
+    "inventory": "api",
+    "login": "sso",
+    "apply": true,
+    "policy_as_code": true,
+    "require_approval": true,
+    "status": "verified"
+  },
+  "sso_enabled": false,
+  "scopes": {
+    "foundation": {
+      "apply": true,
+      "require_approval": true
+    },
+    "workspace": {
+      "apply": true,
+      "require_approval": false,
+      "quota_gated": true
+    }
+  },
+  "adapter": {
+    "kind": "terraform",
+    "root": "infra/envs/{env}/aliyun"
+  },
+  "notes": [
+    "RAM 用户 SSO 的 NameID 必须精确等于 RAM 用户名；开 SSO 前身份表的重名必须清零。",
+    "OSS 桶要做 CPFS 数据流动必须打 cpfs-dataflow=true 标签，缺标签报的是误导性的 Bucket.AccessDenied。"
+  ]
+}

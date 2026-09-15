@@ -1,0 +1,7 @@
+{
+  "_note": "不走 SSO 的服务号用户名。复制为 identity/services.json 后填写真实名单（该文件已 gitignore）",
+  "names": [
+    "example-service-account",
+    "ci-deployer"
+  ]
+}

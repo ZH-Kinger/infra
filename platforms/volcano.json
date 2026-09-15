@@ -1,0 +1,41 @@
+{
+  "id": "volcano",
+  "display": "火山引擎",
+  "short": "火山引擎",
+  "console_url": "https://console.volcengine.com",
+  "accounts": [
+    "default"
+  ],
+  "capabilities": {
+    "auth": "oidc",
+    "iac": "terraform",
+    "plan": "native",
+    "inventory": "api",
+    "login": "sso",
+    "apply": false,
+    "policy_as_code": true,
+    "require_approval": true,
+    "status": "pending-verification"
+  },
+  "sso_enabled": false,
+  "scopes": {
+    "foundation": {
+      "apply": false,
+      "require_approval": true
+    },
+    "workspace": {
+      "apply": false,
+      "require_approval": false,
+      "quota_gated": true
+    }
+  },
+  "adapter": {
+    "kind": "terraform",
+    "root": "infra/envs/{env}/volcano"
+  },
+  "notes": [
+    "auth=oidc 来自文档检索（CreateOIDCProvider / AssumeRoleWithOIDC），尚未真机验证。",
+    "apply 先置 false：OIDC 真机跑通后再翻开，跑不通则降级为 static-secret。",
+    "官方 Terraform provider 活跃度远高于 Pulumi 版（1693 vs 170 commits），Pulumi 版是 TF 的桥接下游。"
+  ]
+}

@@ -1,0 +1,124 @@
+# 多平台投递的入口。真正的流程在 `_delivery.yml`，这里只负责**选平台**。
+#
+# 两条路径刻意不同：
+#   · PR：对改动到的层做**全平台预览**，矩阵从 platforms/ 动态生成——新增平台
+#     不用改这里，而且一朵云挂不阻塞另一朵（fail-fast: false）。
+#   · 手动：只选一个平台执行，`execute` 必须显式勾选。下拉列表是静态的（GitHub
+#     不支持动态 choice），代价是新增平台要在这里补一行——换来的是不用手敲平台名。
+#     敲错也不会静默：_delivery.yml 的 describe Job 会以「未知平台」失败。
+
+name: deliver
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - "platforms/**"
+      - ".github/workflows/_delivery.yml"
+      - ".github/workflows/deliver.yml"
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 目标平台
+        required: true
+        type: choice
+        options: [aliyun, volcano]
+      scope:
+        description: 变更范围。foundation=固定资产(管理员) / workspace=日常资源(用户)
+        required: true
+        type: choice
+        options: [workspace, foundation]
+      layer:
+        description: 分层目录。access=身份与权限 / platform=算力与存储
+        required: true
+        type: choice
+        options: [access, platform]
+      stack_dir:
+        description: >-
+          Terraform 目录，留空按约定推导。既有阿里云布局是 infra/envs/<env>/<layer>，
+          不符合默认约定，所以阿里云要显式填。
+        default: ""
+        type: string
+      env:
+        description: 环境
+        default: prod
+        type: choice
+        options: [dev, prod]
+      account:
+        description: 账号标识（阿里云可选 default / 1949）
+        default: default
+        type: string
+      execute:
+        description: 勾选后才真正 apply；不勾只出预览
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  # PR 路径：动态矩阵，只做预览
+  discover:
+    name: 枚举可投递平台
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      any: ${{ steps.gen.outputs.any }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: gen
+        run: |
+          set -eu
+          # 只挑 iac=terraform 的：CLI / SSH 型平台走的是 inventory 对账，
+          # 不经过 terraform plan 这条路。筛选规则在 CLI 里，可测。
+          matrix=$(PYTHONPATH=src python3 -m delivery.cli matrix --iac terraform)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          if [ "$matrix" = '{"include":[]}' ]; then
+            echo "any=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "any=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  preview:
+    name: 预览 ${{ matrix.platform }}
+    needs: discover
+    if: needs.discover.outputs.any == 'true'
+    strategy:
+      fail-fast: false          # 一朵云的 plan 挂掉不该拦住另一朵
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    uses: ./.github/workflows/_delivery.yml
+    with:
+      platform: ${{ matrix.platform }}
+      scope: foundation          # PR 预览只看固定资产：日常资源是按人申请的，不属于仓库状态
+      layer: access
+      # 指向仓库里**真实存在**的目录。原来写的是 layer: network，而仓库里
+      # 根本没有 network 层——这种错在加上目录存在性检查之前是静默的：
+      # terraform init 会在换过临时身份之后才报「没有配置文件」。
+      stack_dir: ${{ matrix.platform == 'aliyun' && 'infra/envs/dev/access' || '' }}
+      env: dev
+      environment: development
+      execute: false
+    secrets: inherit
+
+  # 手动路径：单平台，可执行
+  deliver:
+    name: 投递 ${{ inputs.platform }}
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/_delivery.yml
+    with:
+      platform: ${{ inputs.platform }}
+      scope: ${{ inputs.scope }}
+      layer: ${{ inputs.layer }}
+      # 阿里云的既有布局是 infra/envs/<env>/<layer>（隐含阿里云、全是管理员层），
+      # 和默认约定 infra/<scope>/<platform>/<env>/<layer> 不一样。这里显式给出，
+      # 而不是把「阿里云要特殊处理」这件事留成隐式知识。
+      stack_dir: ${{ inputs.stack_dir != '' && inputs.stack_dir || (inputs.platform == 'aliyun' && format('infra/envs/{0}/{1}', inputs.env, inputs.layer) || '') }}
+      env: ${{ inputs.env }}
+      account: ${{ inputs.account }}
+      # access 层的审批人与基础设施层刻意分开：权限变更不该和改个桶走同一批人
+      # 固定资产的审批人与日常资源刻意分开；scope 说不用审批时 _delivery.yml 会跳过挂载
+      environment: ${{ inputs.env == 'prod' && inputs.scope == 'foundation' && 'production-access' || (inputs.env == 'prod' && 'production' || 'development') }}
+      execute: ${{ inputs.execute }}
+    secrets: inherit

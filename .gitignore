@@ -8,6 +8,8 @@ dist/
 build/
 *.egg-info/
 .env
+.env.local
+.env.*.local
 
 # Terraform: never commit state, plans, or resolved variable values.
 .terraform/
@@ -28,3 +30,13 @@ backend.hcl
 
 # Local agent settings.
 .claude/settings.local.json
+
+# 身份数据含员工邮箱与云账号。origin（ZH-Kinger/infra）是公开仓库，
+# 一次推送就等于公开全员名单，所以真实数据一律不进 git，仓库里只放 *.example.json。
+# identity/ 默认全部忽略：名册、快照、绑定、IT 导出的对照表都含员工身份。只放行示例文件
+identity/*
+!identity/*.example.json
+# serve --people 指到别处时，绑定文件会落在名册旁边
+**/bindings.json
+**/bindings.json.tmp
+**/bindings.log

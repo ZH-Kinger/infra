@@ -1,0 +1,6 @@
+{
+  "aliyun/default": {},
+  "volcano/default": {
+    "someone@example.com": "cloud-username"
+  }
+}

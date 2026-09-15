@@ -1,0 +1,64 @@
+{
+  "id": "jiuzhang",
+  "display": "九章智算云 (Alaya New)",
+  "short": "九章",
+  "console_url": "https://www.alayanew.com",
+  "accounts": [
+    "default"
+  ],
+  "capabilities": {
+    "auth": "static-secret",
+    "iac": "none",
+    "plan": "dryrun",
+    "inventory": "cli",
+    "login": "bind",
+    "apply": false,
+    "policy_as_code": false,
+    "require_approval": true,
+    "status": "verified"
+  },
+  "sso_enabled": false,
+  "scopes": {
+    "foundation": {
+      "apply": false,
+      "require_approval": true
+    },
+    "workspace": {
+      "apply": false,
+      "require_approval": false,
+      "quota_gated": true
+    }
+  },
+  "adapter": {
+    "kind": "cli",
+    "binary": "aladdin",
+    "spec_command": [
+      "spec",
+      "-o",
+      "json"
+    ],
+    "json_flags": [
+      "-o",
+      "json"
+    ],
+    "confirm_flag": "--yes",
+    "profile_flag": "--profile",
+    "prefer_flag": "--prefer-openapi",
+    "forbidden": [
+      "alab create"
+    ],
+    "depends_on": {
+      "TrainingInstance": [
+        "NASInstance"
+      ]
+    }
+  },
+  "notes": [
+    "平台自身的 SSO 是 Casdoor（cookie 里有 casdoor_session），但那是厂商的实例，我们无权接飞书。",
+    "AK/SK 签发必须浏览器 Cookie 引导，文档明说自动化登录不可行 —— 所以只能绑定一次、系统代跑。",
+    "alab create 给空 payload 也会建出真实付费实例，adapter 层硬禁。",
+    "删除有顺序约束：Training 先删任务再删它引用的 NAS。",
+    "cci instance set-auto-release 是平台原生 TTL 回收，不要自己造轮询回收。",
+    "配了 openapi_endpoint 却没有 AK/SK 会导致整个配置加载失败，CI 里要先预检这对组合。"
+  ]
+}

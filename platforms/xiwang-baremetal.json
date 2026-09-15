@@ -1,0 +1,39 @@
+{
+  "id": "xiwang-baremetal",
+  "display": "曦望 裸金属 (泰国)",
+  "short": "曦望",
+  "console_url": "",
+  "accounts": [
+    "default"
+  ],
+  "capabilities": {
+    "auth": "ssh-key",
+    "iac": "none",
+    "plan": "none",
+    "inventory": "ssh",
+    "login": "cert",
+    "apply": false,
+    "policy_as_code": false,
+    "require_approval": true,
+    "status": "verified"
+  },
+  "sso_enabled": false,
+  "scopes": {
+    "foundation": {
+      "apply": false,
+      "require_approval": true
+    }
+  },
+  "adapter": {
+    "kind": "ssh",
+    "probe": [
+      "nvidia-smi",
+      "df",
+      "uptime"
+    ]
+  },
+  "notes": [
+    "plan=none ⇒ apply 恒为 false：没有可信预览，只做清单与对账。",
+    "SSH 执行复用已加固的 marker 模式（固定 host key + RejectPolicy + 私钥不落盘）。"
+  ]
+}

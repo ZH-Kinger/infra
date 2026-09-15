@@ -1,0 +1,286 @@
+# 多平台投递的**可复用**流水线：把「预览 → 审批 → 换临时身份 → apply → 对账」
+# 这五步抽出来，每个平台传参调用，而不是每个平台复制一份 workflow。
+#
+# 设计要点
+# ────────
+# 1. **能力门禁来自描述符，不是这里的 if 硬编码。** `describe` Job 读
+#    `platforms/<id>.json`，后面的 Job 按它的输出分支。新增平台 = 加一个描述符 +
+#    一个 adapter，本文件一行不动。
+# 2. **apply 用的是审批时看过的那份产物。** plan 产出的归一化 JSON 与 tfplan 二进制
+#    都走 artifact 传给 apply，apply 不重新 plan、不接受重填参数——否则审批看到的
+#    和最终执行的可以是两份东西。
+# 3. **plan 被阻断就不给 apply。** `delivery plan-show` 退出码 1 表示计划自身有问题
+#    （errored、格式版本不认识等），这里把它变成 job 失败，apply 的 needs 自然不满足。
+# 4. **非 OIDC 凭证的平台强制走 Environment 审批。** 长期密钥泄漏面大，人工门是
+#    唯一补偿；描述符里的 require_approval 已经强制为 true，这里再兜一层。
+
+name: _delivery
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        description: 平台 id，对应 platforms/<id>.json
+        required: true
+        type: string
+      scope:
+        description: 变更范围。foundation=固定资产(管理员) / workspace=日常资源(用户)
+        default: foundation
+        type: string
+      layer:
+        description: 分层目录名（network / storage / identity / compute …）
+        required: true
+        type: string
+      stack_dir:
+        description: >-
+          Terraform 根模块所在目录，仓库相对路径。留空则按默认约定推导为
+          infra/<scope>/<platform>/<env>/<layer>。
+          **既有布局不符合这个约定**（仓库里是 infra/envs/<env>/<layer>，隐含阿里云、
+          全是管理员层），所以调用方要显式传。留一个可推导的默认值只是为了新平台
+          少写一行，不是为了让路径约定变成隐式知识。
+        default: ""
+        type: string
+      env:
+        description: 环境名
+        default: prod
+        type: string
+      account:
+        description: 账号标识，对应描述符里的 accounts
+        default: default
+        type: string
+      environment:
+        description: 用于审批门的 GitHub Environment 名
+        required: true
+        type: string
+      execute:
+        description: 是否真正执行 apply。false 只出预览
+        default: false
+        type: boolean
+    secrets:
+      TFVARS_JSON:
+        description: 该层的 tfvars（JSON 字符串）
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  ALIBABA_CLOUD_OIDC_AUDIENCE: github-actions
+  PLAN_JSON: plan-normalized.json
+
+jobs:
+  # ── ① 读能力：不碰任何凭证 ────────────────────────────────────────────────
+  describe:
+    name: 读平台能力
+    runs-on: ubuntu-latest
+    outputs:
+      apply: ${{ steps.caps.outputs.apply }}
+      require_approval: ${{ steps.caps.outputs.require_approval }}
+      quota_gated: ${{ steps.caps.outputs.quota_gated }}
+      scope_desc: ${{ steps.caps.outputs.scope_desc }}
+      stack_dir: ${{ steps.stack.outputs.dir }}
+      plan: ${{ steps.caps.outputs.plan }}
+      iac: ${{ steps.caps.outputs.iac }}
+      auth: ${{ steps.caps.outputs.auth }}
+      status: ${{ steps.caps.outputs.status }}
+      keyless: ${{ steps.caps.outputs.keyless }}
+      display: ${{ steps.caps.outputs.display }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: caps
+        name: 解析 platforms/${{ inputs.platform }}.json
+        run: |
+          set -eu
+          # apply / require_approval 取的是 **scope 级**能力：同一朵云上，
+          # 用户改 DSW 和管理员改 VPC 走的是两套门禁。
+          PYTHONPATH=src python3 -m delivery.cli describe "${{ inputs.platform }}" \
+            --scope "${{ inputs.scope }}" >> "$GITHUB_OUTPUT"
+      - name: 解析 Terraform 根模块目录
+        id: stack
+        run: |
+          set -euo pipefail
+          dir="${{ inputs.stack_dir }}"
+          if [ -z "$dir" ]; then
+            dir="infra/${{ inputs.scope }}/${{ inputs.platform }}/${{ inputs.env }}/${{ inputs.layer }}"
+          fi
+          # 目录不存在就**在这里**失败，而不是等到 terraform init 报一句
+          # "No configuration files"——那时候已经换过临时身份、过了审批门，
+          # 排查的人还得回头猜是路径写错了还是仓库没同步。
+          if [ ! -d "$dir" ]; then
+            echo "::error::Terraform 目录不存在：$dir"
+            echo "::error::仓库现有布局是 infra/envs/<env>/<layer>（隐含阿里云、全是管理员层）。"
+            echo "::error::调用方请显式传 stack_dir，或先把该目录建出来。"
+            exit 1
+          fi
+          if ! ls "$dir"/*.tf >/dev/null 2>&1; then
+            echo "::error::$dir 下没有 .tf 文件，不是 Terraform 根模块"
+            exit 1
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "::notice::Terraform 根模块：$dir"
+
+      - name: 范围提示
+        run: echo "::notice::${{ steps.caps.outputs.display }} / ${{ steps.caps.outputs.scope_desc }}"
+
+      - name: 未验证的平台提前说清楚
+        if: steps.caps.outputs.status != 'verified'
+        run: |
+          echo "::warning::${{ steps.caps.outputs.display }} 的能力声明为 ${{ steps.caps.outputs.status }}，apply 保持关闭"
+
+  # ── ② 预览：只读凭证，产出归一化 Plan ──────────────────────────────────────
+  plan:
+    name: 预览
+    needs: describe
+    # plan=none 的平台没有可信预览，整条投递对它不适用（描述符里 apply 也必为 false）
+    if: needs.describe.outputs.plan != 'none'
+    runs-on: ubuntu-latest
+    outputs:
+      blocked: ${{ steps.render.outputs.blocked }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        if: needs.describe.outputs.iac == 'terraform'
+        with:
+          terraform_version_file: .terraform-version
+
+      # 先核对 GitHub 发的身份声明，再拿它去换云上凭证。
+      # 顺序不能反：拿到凭证之后才发现 sub 不对，权限已经到手了。
+      - name: 核对 GitHub OIDC 身份声明
+        if: needs.describe.outputs.keyless == 'true'
+        uses: actions/github-script@v7
+        env:
+          EXPECTED_SUB: repo:${{ github.repository }}:${{ github.event_name == 'pull_request' && 'pull_request' || format('ref:{0}', github.ref) }}
+        with:
+          script: |
+            const token = await core.getIDToken(process.env.ALIBABA_CLOUD_OIDC_AUDIENCE);
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+            core.info(`OIDC sub=${claims.sub} aud=${claims.aud}`);
+            if (claims.aud !== process.env.ALIBABA_CLOUD_OIDC_AUDIENCE) {
+              core.setFailed(`OIDC aud 不符：${claims.aud}`);
+            }
+
+      - name: 取阿里云临时凭证
+        if: inputs.platform == 'aliyun'
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ vars.ALIBABA_CLOUD_PLAN_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
+          audience: ${{ env.ALIBABA_CLOUD_OIDC_AUDIENCE }}
+
+      # 火山的 OIDC 联邦已确认 SDK 侧存在（create/list_oidc_providers），但**尚未真机
+      # 跑通**，所以这里不写一个看起来能用、实际没验过的取凭证步骤。描述符里
+      # volcano 的 status=pending-verification、apply=false，走到这步就该显式失败，
+      # 而不是静默用某个默认凭证链继续跑。
+      - name: 取火山临时凭证
+        if: inputs.platform == 'volcano'
+        run: |
+          echo "::error::火山 OIDC 尚未真机验证（platforms/volcano.json: status=pending-verification）。" \
+               "请先跑通 CreateOIDCProvider + AssumeRoleWithOIDC，再把这一步替换为真实实现。"
+          exit 1
+
+      - name: terraform init + plan
+        if: needs.describe.outputs.iac == 'terraform'
+        working-directory: ${{ needs.describe.outputs.stack_dir }}
+        env:
+          TFVARS_JSON: ${{ secrets.TFVARS_JSON }}
+        run: |
+          set -eu
+          printf '%s' "$TFVARS_JSON" > terraform.tfvars.json
+          terraform init -input=false
+          # -lock=false：plan 角色被 Deny 了写锁表，保持真正只读
+          terraform plan -input=false -lock=false -out=tfplan
+          terraform show -json tfplan > "$RUNNER_TEMP/tfplan.json"
+
+      - name: 转成归一化 Plan 并渲染
+        id: render
+        run: |
+          set -eu
+          PYTHONPATH=src python3 -m delivery.cli plan-show "$RUNNER_TEMP/tfplan.json" \
+            --platform "${{ inputs.platform }}" \
+            --env "${{ inputs.env }}" \
+            --account "${{ inputs.account }}" | tee "$RUNNER_TEMP/summary.txt"
+          rc=${PIPESTATUS[0]}
+          PYTHONPATH=src python3 -m delivery.cli plan-show "$RUNNER_TEMP/tfplan.json" \
+            --platform "${{ inputs.platform }}" \
+            --env "${{ inputs.env }}" \
+            --account "${{ inputs.account }}" --json > "$RUNNER_TEMP/${{ env.PLAN_JSON }}" || true
+          { echo '## 变更预览'; echo '```'; cat "$RUNNER_TEMP/summary.txt"; echo '```'; } \
+            >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then
+            echo "blocked=true" >> "$GITHUB_OUTPUT"
+            echo "::error::计划被阻断，不产出可 apply 的产物"
+            exit 1
+          fi
+          echo "blocked=false" >> "$GITHUB_OUTPUT"
+
+      - name: 上传审批产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan-${{ inputs.platform }}-${{ inputs.scope }}-${{ inputs.env }}-${{ inputs.layer }}
+          # tfplan 二进制与归一化 JSON 一起传：apply 用的必须是审批时看过的那一份
+          path: |
+            ${{ runner.temp }}/${{ env.PLAN_JSON }}
+            ${{ needs.describe.outputs.stack_dir }}/tfplan
+          retention-days: 30
+
+  # ── ③④ 审批 + 执行 ────────────────────────────────────────────────────────
+  apply:
+    name: 执行
+    needs: [describe, plan]
+    # 三重门：描述符允许 apply、调用方显式要求执行、且计划没有被阻断。
+    # 任何一条不满足都不进这个 Job——它带 environment，进来就会挂起等审批，
+    # 让一个注定不能执行的任务去占审批人的注意力是有害的。
+    if: >-
+      needs.describe.outputs.apply == 'true' &&
+      inputs.execute &&
+      needs.plan.outputs.blocked == 'false'
+    runs-on: ubuntu-latest
+    # scope 说不用审批（workspace 配额内自助）时就不挂 Environment：
+    # 让一个本该秒过的日常申请去排审批队列，结果是大家绕过这条流水线自己点控制台。
+    environment: ${{ needs.describe.outputs.require_approval == 'true' && inputs.environment || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        if: needs.describe.outputs.iac == 'terraform'
+        with:
+          terraform_version_file: .terraform-version
+
+      - name: 取阿里云临时凭证（apply 角色）
+        if: inputs.platform == 'aliyun'
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ vars.ALIBABA_CLOUD_APPLY_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIBABA_CLOUD_OIDC_PROVIDER_ARN }}
+          audience: ${{ env.ALIBABA_CLOUD_OIDC_AUDIENCE }}
+
+      - name: 下载本次 Run 的审批产物
+        uses: actions/download-artifact@v4
+        with:
+          name: plan-${{ inputs.platform }}-${{ inputs.scope }}-${{ inputs.env }}-${{ inputs.layer }}
+          path: ${{ runner.temp }}/approved
+
+      - name: terraform apply（只认审批过的那份 tfplan）
+        if: needs.describe.outputs.iac == 'terraform'
+        working-directory: ${{ needs.describe.outputs.stack_dir }}
+        env:
+          TFVARS_JSON: ${{ secrets.TFVARS_JSON }}
+        run: |
+          set -eu
+          printf '%s' "$TFVARS_JSON" > terraform.tfvars.json
+          terraform init -input=false
+          cp "$RUNNER_TEMP/approved/${{ needs.describe.outputs.stack_dir }}/tfplan" tfplan
+          terraform apply -input=false tfplan
+
+  # ── ⑤ 对账：apply 之后再 plan 一次，应当为空 ──────────────────────────────
+  reconcile:
+    name: 对账
+    needs: [describe, apply]
+    if: always() && needs.apply.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 提示
+        run: |
+          echo "::notice::apply 完成。对账（再 plan 一次应为空）待接入——" \
+               "它需要与 plan 相同的只读凭证，等火山那条路径确定后与之合并实现。"

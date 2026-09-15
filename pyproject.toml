@@ -17,12 +17,17 @@ dev = ["ruff>=0.9", "pre-commit>=4.0"]
 
 [project.scripts]
 dataset-sink = "dataset_sink.cli:main"
+delivery = "delivery.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# 面板前端是纯静态文件，要随包安装，否则 pip install 后 / 返回「前端文件缺失」
+[tool.setuptools.package-data]
+delivery = ["web/*.html", "web/*.css", "web/*.js"]
 
 [tool.ruff]
 line-length = 100
