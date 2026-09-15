@@ -618,6 +618,41 @@ class PolicyOptionsTests(unittest.TestCase):
         empty = Caller("", "x", "", "", "", admin=False)
         self.assertEqual(api.handle("GET", "/api/policies", {}, None, empty)[0], 403)
 
+    def test_admin_rules_overview_only_for_admins(self):
+        env = Env()
+        api = RequestsApi(lambda: env.flows, account_label=lambda p, a: "阿里云主账号")
+        admin = Caller("on_admin", "管理员", "", "ou_a", "", admin=True)
+        status, data = api.handle("GET", "/api/admin/policies", {}, None, admin)
+        self.assertEqual(status, 200)
+        acc = data["accounts"][0]
+        self.assertEqual(acc["account_label"], "阿里云主账号")
+        rows = {p["name"]: p for p in acc["policies"]}
+        self.assertFalse(rows["AdministratorAccess"]["open"])
+        self.assertTrue(rows["AdministratorAccess"]["reason"])
+        self.assertFalse(rows["team-data-reader"]["open"])  # 自定义策略默认不开放
+        self.assertTrue(rows["AliyunOSSReadOnlyAccess"]["open"])
+        self.assertEqual(rows["AliyunOSSReadOnlyAccess"]["max_days"], 180)
+        self.assertIn("AliyunRAM*", data["rules"]["deny_families"])
+        self.assertFalse(data["rules"]["allow_custom"])
+        # 不开放的排在前面，方便对照
+        self.assertFalse(acc["policies"][0]["open"])
+        employee = Caller("on_li", "李四", "li.si@wuji.tech", "ou_li", "", admin=False)
+        self.assertEqual(api.handle("GET", "/api/admin/policies", {}, None, employee)[0], 403)
+        self.assertEqual(api.handle("POST", "/api/admin/policies", {}, {}, admin)[0], 405)
+        # 不能借前缀绕进申请单接口
+        ticket = env.submit(OSS_READ)
+        for path in (
+            f"/api/admin/policies/{ticket['id']}",
+            f"/api/admin/policies/{ticket['id']}/close",
+        ):
+            self.assertEqual(api.handle("POST", path, {}, {}, admin)[0], 404)
+        self.assertEqual(
+            api.handle("GET", f"/api/admin/other/{ticket['id']}", {}, None, admin)[0], 404
+        )
+        self.assertEqual(
+            api.handle("GET", f"/api/admin/requests/{ticket['id']}", {}, None, admin)[0], 200
+        )
+
     def test_backend_current_policies_from_snapshot(self):
         from delivery.server import Backend
 

@@ -133,6 +133,7 @@ function parseHash() {
   if (path.startsWith("admin/request=")) return { page: "admin-request", key: decode(path.slice(14)), space: "admin" };
   if (path === "admin/requests") return { page: "admin-requests", filter: query || "open", space: "admin" };
   if (path === "admin/assets") return { page: "admin-assets", space: "admin" };
+  if (path === "admin/policies") return { page: "admin-policies", space: "admin" };
   if (path === "assets") return { page: "assets", space: "user" };
   if (path === "admin") return { page: "admin", space: "admin" };
   if (path.startsWith("request=")) {
@@ -177,6 +178,10 @@ function route() {
       () => api(`/api/admin/people/${encodeURIComponent(key)}`),
       (detail) => mount(personPage(detail, { admin: true })),
     );
+  }
+  if (page === "admin-policies") {
+    markTab("admin-policies");
+    return permissionPages.renderAdminPolicies();
   }
   if (page === "admin-assets") {
     markTab("admin-assets");

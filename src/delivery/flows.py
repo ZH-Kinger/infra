@@ -271,6 +271,57 @@ class Flows:
             "accounts": accounts,
         }
 
+    def policy_rules_overview(self) -> dict:
+        """管理后台：每个已采集云账号里，哪些策略对员工开放、哪些不开放（和原因），以及当前规则。
+
+        只读。给管理员对照真实策略列表检查禁用清单有没有漏网的高风险策略。
+        """
+        rules = self._policy_rules()
+        data = self._policy_snapshot()
+        accounts = []
+        for acc in (data or {}).get("accounts") or []:
+            item = {
+                "platform": str(acc.get("platform") or ""),
+                "account": str(acc.get("account") or ""),
+                "error": str(acc.get("error") or ""),
+                "stale": bool(acc.get("stale")),
+                "policies": [],
+            }
+            items = acc.get("policies")
+            for p in items if isinstance(items, list) else []:
+                if not isinstance(p, dict):
+                    continue
+                ptype, name = str(p.get("type") or ""), str(p.get("name") or "")
+                denied = rules.denied(ptype, name)
+                item["policies"].append(
+                    {
+                        "type": ptype,
+                        "name": name,
+                        "description": str(p.get("description") or ""),
+                        "service": str(p.get("service") or ""),
+                        "risk": rules.risk_of(ptype, name),
+                        "max_days": rules.max_days_of(ptype, name),
+                        "open": not denied,
+                        "reason": denied,
+                    }
+                )
+            item["policies"].sort(
+                key=lambda r: (r["open"], r["service"].lower(), r["name"].lower())
+            )
+            accounts.append(item)
+        return {
+            "captured_at": str((data or {}).get("captured_at") or ""),
+            "rules": {
+                "deny": list(rules.deny),
+                "deny_families": list(policies_mod.DEFAULT_DENY_FAMILIES),
+                "allow": list(rules.allow),
+                "allow_custom": rules.allow_custom,
+                "max_days": dict(rules.max_days),
+                "max_per_request": rules.max_per_request,
+            },
+            "accounts": accounts,
+        }
+
     def _policy_account(self, mine: dict, data, rules, tickets: list, now: float) -> dict:
         platform, account, user = mine["platform"], mine["account"], mine["name"]
         out = {

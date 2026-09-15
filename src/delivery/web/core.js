@@ -23,6 +23,12 @@ export function h(tag, props, ...children) {
   return el;
 }
 
+// 替换元素的全部子节点：和 h() 一样展开数组、跳过 null / false（原生 replaceChildren 会把 null 写成文字 "null"）
+export function fill(el, ...children) {
+  el.replaceChildren(...children.flat(Infinity).filter((c) => c !== null && c !== undefined && c !== false));
+  return el;
+}
+
 export function clear(el) {
   while (el.firstChild) el.removeChild(el.firstChild);
 }

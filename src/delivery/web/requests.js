@@ -5,7 +5,7 @@
 //   · 不能申请的模板照样展示，但置灰并写明原因，而不是让人找不到。
 //   · 凭证和密码只在领取那一刻显示，离开页面就没了；页面上明确提示这一点。
 
-import { ApiError, PLATFORM_NAME, ago, api, apiPost, copyButton, fmtTime, h, mount, openDrawer, platformTag, requestTitle, safeHttps } from "./core.js";
+import { ago, api, ApiError, apiPost, copyButton, fill, fmtTime, h, mount, openDrawer, PLATFORM_NAME, platformTag, requestTitle, safeHttps } from "./core.js";
 
 const KIND_ORDER = ["permission", "credential", "account"];
 const KIND_INFO = {
@@ -114,7 +114,7 @@ export function requestRoutes(ctx) {
     const list = h("div", { class: "apply-list" });
 
     function renderTabs() {
-      kindTabs.replaceChildren(
+      fill(kindTabs,
         ...KIND_ORDER.filter((k) => options.some((o) => o.kind === k)).map((k) => {
           const n = options.filter((o) => o.kind === k).length;
           const active = k === filters.kind;
@@ -188,7 +188,7 @@ export function requestRoutes(ctx) {
       const platforms = [...new Set(ofKind.map((o) => o.platform))];
       if (platforms.length > 1) rows.push(chipRow("云", "platform", [["all", "全部"], ...platforms.map((p) => [p, PLATFORM_NAME[p] || p])]));
       if (filters.kind !== "account") rows.push(chipRow("状态", "state", STATE_FILTERS.map(([v, t]) => [v, t, ofKind.filter((o) => matchState(o, v)).length])));
-      toolbar.replaceChildren(h("div", { class: "search-wrap" }, search), ...rows);
+      fill(toolbar, h("div", { class: "search-wrap" }, search), ...rows);
     }
 
     function matchState(o, value) {
@@ -221,7 +221,7 @@ export function requestRoutes(ctx) {
 
       if (!shown.length) {
         const anyFilter = filters.q.trim() || filters.category !== "all" || filters.platform !== "all" || filters.state !== "all";
-        list.replaceChildren(
+        fill(list,
           h(
             "div",
             { class: "card empty" },
@@ -255,7 +255,7 @@ export function requestRoutes(ctx) {
         groups.get(key).push(o);
       }
       const keys = [...groups.keys()].sort((a, b) => (a === "") - (b === ""));
-      list.replaceChildren(
+      fill(list,
         ...keys.map((key) =>
           h(
             "section",
@@ -557,7 +557,7 @@ export function requestRoutes(ctx) {
             ),
           ),
         );
-      facetRow.replaceChildren(
+      fill(facetRow,
         kinds.length > 1 ? row("类型", "kind", [["all", "全部"], ...kinds.map((k) => [k, KIND_KEY_LABEL[k] || k])]) : null,
         platforms.length > 1 ? row("云", "platform", [["all", "全部"], ...platforms.map((p) => [p, PLATFORM_NAME[p] || p])]) : null,
       );
@@ -567,7 +567,7 @@ export function requestRoutes(ctx) {
       const q = search.value.trim().toLowerCase();
       const shown = requests.filter(pick).filter((r) => (facets.kind === "all" || kindKey(r) === facets.kind) && (facets.platform === "all" || r.template.platform === facets.platform)).filter((r) => !q || [r.id, requestTitle(r), r.summary, r.kind_label, r.status_label, r.applicant && r.applicant.name, r.applicant && r.applicant.email].join(" ").toLowerCase().includes(q));
       if (!shown.length) {
-        listSlot.replaceChildren(
+        fill(listSlot,
           h(
             "div",
             { class: "card empty" },
@@ -578,7 +578,7 @@ export function requestRoutes(ctx) {
         );
         return;
       }
-      listSlot.replaceChildren(h("div", { class: "card list" }, shown.map((r) => requestRow(r, admin))));
+      fill(listSlot, h("div", { class: "card list" }, shown.map((r) => requestRow(r, admin))));
     }
     search.addEventListener("input", renderRows);
     if (admin) {
@@ -780,7 +780,7 @@ export function requestRoutes(ctx) {
       h("dl", { class: "kv" }, rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, h("code", { class: "secret-value" }, v), copyButton(() => v))])),
       h("div", { class: "snippet" }, h("div", { class: "snippet-head" }, h("span", {}, "在终端里用（官方 CLI 和 SDK 都认这几个环境变量）"), copyButton(() => env, "复制全部")), h("pre", {}, env)),
     );
-    slot.replaceChildren(panel);
+    fill(slot, panel);
     // 5 分钟后自动收起，减少凭证在屏幕上停留的时间
     setTimeout(() => panel.remove(), 5 * 60 * 1000);
     panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -809,7 +809,7 @@ export function requestRoutes(ctx) {
             ),
             link ? h("div", { class: "form-foot" }, h("a", { class: "btn small", href: link, target: "_blank", rel: "noopener noreferrer" }, "打开控制台登录页")) : null,
         );
-        slot.replaceChildren(panel);
+        fill(slot, panel);
         // 和凭证一样 5 分钟后收起
         setTimeout(() => panel.remove(), 5 * 60 * 1000);
         btn.remove();

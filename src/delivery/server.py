@@ -334,7 +334,7 @@ _ADMIN_REVIEW = "/api/admin/review"
 def _is_requests_path(path: str) -> bool:
     return any(
         path == p or path.startswith(p + "/")
-        for p in ("/api/requests", "/api/admin/requests", "/api/policies")
+        for p in ("/api/requests", "/api/admin/requests", "/api/policies", "/api/admin/policies")
     )
 
 

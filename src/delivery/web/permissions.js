@@ -5,7 +5,7 @@
 //   · 勾选多条一起申请，底部操作条始终显示已选数量；申请表单从右侧滑出，不离开列表。
 //   · 策略几千条：一次只渲染一页，筛选在内存里做，输入不卡。
 
-import { ApiError, PLATFORM_NAME, api, apiPost, fmtTime, h, mount, openDrawer, platformTag } from "./core.js";
+import { api, ApiError, apiPost, fill, fmtTime, h, mount, openDrawer, PLATFORM_NAME, platformTag } from "./core.js";
 
 const PAGE = 60;
 const RISK = { low: ["低风险", "good"], medium: ["中风险", "warn"], high: ["高风险", "crit"] };
@@ -78,7 +78,7 @@ export function permissionRoutes(ctx) {
     const current = () => accounts.find((a) => keyOf(a) === view.account);
 
     function renderAccounts() {
-      accountBar.replaceChildren(
+      fill(accountBar,
         ...accounts.map((acc) => {
           const active = keyOf(acc) === view.account;
           const owned = (acc.policies || []).filter((p) => p.state === "owned").length;
@@ -167,7 +167,7 @@ export function permissionRoutes(ctx) {
         renderList();
       });
       const hasCustom = all.some((p) => p.type === "Custom");
-      tools.replaceChildren(
+      fill(tools,
         h("div", { class: "search-row" }, search, serviceSelect),
         chips(
           "状态",
@@ -204,7 +204,7 @@ export function permissionRoutes(ctx) {
       const acc = current();
       if (acc.error) {
         summary.textContent = "";
-        list.replaceChildren(h("div", { class: "card empty" }, h("h2", {}, "这个云账号的权限列表暂时不可用"), h("p", {}, acc.error)));
+        fill(list, h("div", { class: "card empty" }, h("h2", {}, "这个云账号的权限列表暂时不可用"), h("p", {}, acc.error)));
         renderBar();
         return;
       }
@@ -216,7 +216,7 @@ export function permissionRoutes(ctx) {
       if (hits.length !== all.length) parts.push(`符合条件 ${hits.length} 项`);
       summary.textContent = parts.join(" · ");
       if (!hits.length) {
-        list.replaceChildren(
+        fill(list,
           h(
             "div",
             { class: "card empty" },
@@ -243,7 +243,7 @@ export function permissionRoutes(ctx) {
       }
       const rows = hits.slice(0, shown).map((p) => policyRow(acc, p));
       const more = hits.length > shown ? h("button", { type: "button", class: "btn ghost more", onclick: () => ((shown += PAGE), renderList()) }, `显示更多（还有 ${hits.length - shown} 项）`) : null;
-      list.replaceChildren(h("div", { class: "card list" }, rows), more);
+      fill(list, h("div", { class: "card list" }, rows), more);
       renderBar();
     }
 
@@ -303,7 +303,7 @@ export function permissionRoutes(ctx) {
       bar.hidden = n === 0;
       if (!n) return;
       const names = [...view.selected.values()].map((p) => p.name);
-      bar.replaceChildren(
+      fill(bar,
         h("div", { class: "select-bar-inner" }, h("div", { class: "select-count" }, h("b", {}, `已选 ${n} 项`), h("span", { class: "muted" }, names.slice(0, 3).join("、") + (n > 3 ? ` 等` : ""))), h("div", { class: "select-actions" }, h("button", { type: "button", class: "btn ghost small", onclick: () => (view.selected.clear(), renderList()) }, "清空"), h("button", { type: "button", class: "btn small", onclick: () => openRequest(current(), [...view.selected.values()], max) }, "申请选中的权限"))),
       );
     }
@@ -420,5 +420,170 @@ export function permissionRoutes(ctx) {
     setTimeout(() => days.focus(), 0);
   }
 
-  return { renderPermissions };
+  // ── 管理后台：权限规则 ─────────────────────────────────────────────────
+  // 只读：对照真实策略列表看哪些对员工开放。规则改动走 identity/policy-rules.json。
+  const adminView = { account: "", q: "", open: "open", risk: "high" };
+
+  function renderAdminPolicies() {
+    return load(
+      () => api("/api/admin/policies"),
+      (data) => mount(adminPage(data)),
+    );
+  }
+
+  function adminPage(data) {
+    const accounts = data.accounts || [];
+    const rules = data.rules || {};
+    const head = h(
+      "header",
+      { class: "masthead" },
+      h("h1", {}, "权限规则"),
+      h("p", { class: "lede" }, "员工在「权限列表」里能申请哪些策略。默认先列出对员工开放的高风险策略，逐条确认是否应该开放；要收紧就在 identity/policy-rules.json 的 deny 里追加。"),
+      data.captured_at ? h("p", { class: "lede" }, `策略列表采集于 ${fmtTime(data.captured_at)}`) : null,
+    );
+    const rulesCard = h(
+      "details",
+      { class: "card rules-card" },
+      h("summary", {}, h("b", {}, "当前规则"), h("span", { class: "muted" }, ` 禁用 ${(rules.deny || []).length + (rules.deny_families || []).length} 条 · 放开 ${(rules.allow || []).length} 条 · 自定义策略${rules.allow_custom ? "全部开放" : "默认不开放"}`)),
+      h(
+        "dl",
+        { class: "facts" },
+        h("dt", {}, "禁用（按名字匹配）"),
+        h("dd", {}, h("div", { class: "chips" }, (rules.deny || []).map((x) => h("code", { class: "pill" }, x)))),
+        h("dt", {}, "整个产品线禁用（只读除外）"),
+        h("dd", {}, h("div", { class: "chips" }, (rules.deny_families || []).map((x) => h("code", { class: "pill" }, x)))),
+        h("dt", {}, "逐条放开"),
+        h("dd", {}, (rules.allow || []).length ? h("div", { class: "chips" }, rules.allow.map((x) => h("code", { class: "pill" }, x))) : "无"),
+        h("dt", {}, "最长天数"),
+        h("dd", {}, `低风险 ${rules.max_days?.low ?? "-"} 天 · 中风险 ${rules.max_days?.medium ?? "-"} 天 · 高风险 ${rules.max_days?.high ?? "-"} 天 · 一次最多 ${rules.max_per_request ?? "-"} 项`),
+      ),
+    );
+    if (!accounts.length) {
+      return [head, rulesCard, h("div", { class: "card empty" }, h("h2", {}, "还没有策略列表"), h("p", {}, "在服务器上运行 delivery policies collect 采集两家云的权限策略。"))];
+    }
+    if (!accounts.some((a) => keyOf(a) === adminView.account)) adminView.account = keyOf(accounts[0]);
+    const current = () => accounts.find((a) => keyOf(a) === adminView.account);
+
+    const accountBar = h("div", { class: "segmented", role: "tablist", "aria-label": "云账号" });
+    const stats = h("section", { class: "stats" });
+    const tools = h("div", { class: "apply-tools" });
+    const list = h("div", { class: "apply-list" });
+    const search = h("input", { id: "admin-perm-search", class: "input search-input", type: "search", placeholder: "搜索策略名、说明或服务", autocomplete: "off", value: adminView.q, "aria-label": "搜索策略" });
+    search.addEventListener("input", () => {
+      adminView.q = search.value;
+      renderList();
+    });
+
+    function renderAccounts() {
+      fill(accountBar,
+        ...accounts.map((acc) => {
+          const active = keyOf(acc) === adminView.account;
+          return h(
+            "button",
+            {
+              type: "button",
+              role: "tab",
+              class: active ? "seg active" : "seg",
+              "aria-selected": active ? "true" : "false",
+              onclick: () => {
+                adminView.account = keyOf(acc);
+                renderAll();
+              },
+            },
+            h("span", { class: "seg-title" }, platformTag(acc.platform), acc.account_label || acc.account),
+            h("span", { class: "seg-desc" }, acc.error ? "采集失败" : `${(acc.policies || []).length} 条策略${acc.stale ? " · 列表过期" : ""}`),
+          );
+        }),
+      );
+      accountBar.hidden = accounts.length < 2;
+    }
+
+    function chips(label, key, entries) {
+      return h(
+        "div",
+        { class: "chip-row", role: "group", "aria-label": label },
+        h("span", { class: "chip-label" }, label),
+        entries.map(([value, text, n]) =>
+          h(
+            "button",
+            { type: "button", class: adminView[key] === value ? "chip active" : "chip", "aria-pressed": adminView[key] === value ? "true" : "false", onclick: () => ((adminView[key] = value), renderTools(), renderList()) },
+            text,
+            n === undefined ? null : h("span", { class: "chip-n" }, String(n)),
+          ),
+        ),
+      );
+    }
+
+    function renderStats() {
+      const all = current().policies || [];
+      const open = all.filter((p) => p.open);
+      const statEl = (n, label, tone) => h("div", { class: `stat ${tone || ""}` }, h("span", { class: "n" }, String(n)), h("span", { class: "l" }, label));
+      fill(stats,
+        statEl(open.length, "对员工开放"),
+        statEl(open.filter((p) => p.risk === "high").length, "开放中的高风险", open.some((p) => p.risk === "high") ? "warn" : ""),
+        statEl(all.length - open.length, "不开放"),
+        statEl(all.filter((p) => p.type === "Custom").length, "自定义策略"),
+      );
+    }
+
+    function renderTools() {
+      const all = current().policies || [];
+      const base = all.filter((p) => adminView.open === "all" || (adminView.open === "open") === p.open);
+      fill(tools,
+        h("div", { class: "search-row" }, search),
+        chips("开放", "open", [
+          ["open", "对员工开放", all.filter((p) => p.open).length],
+          ["closed", "不开放", all.filter((p) => !p.open).length],
+          ["all", "全部", all.length],
+        ]),
+        chips(
+          "风险",
+          "risk",
+          [["all", "全部"], ["high", "高"], ["medium", "中"], ["low", "低"]].map(([v, t]) => [v, t, base.filter((p) => v === "all" || p.risk === v).length]),
+        ),
+      );
+    }
+
+    function renderList() {
+      const acc = current();
+      if (acc.error) {
+        fill(list, h("div", { class: "banner crit" }, `这个云账号的策略列表采集失败：${acc.error}`));
+        return;
+      }
+      const q = adminView.q.trim().toLowerCase();
+      const rows = (acc.policies || []).filter((p) => (adminView.open === "all" || (adminView.open === "open") === p.open) && (adminView.risk === "all" || p.risk === adminView.risk) && (!q || `${p.name} ${p.description} ${p.service}`.toLowerCase().includes(q)));
+      const shown = rows.slice(0, 200);
+      fill(list,
+        acc.stale ? h("div", { class: "banner warn" }, "最近一次采集失败，下面是之前的列表。") : null,
+        rows.length
+          ? h(
+              "div",
+              { class: "card list" },
+              shown.map((p) => {
+                const [riskText, riskTone] = RISK[p.risk] || RISK.medium;
+                return h(
+                  "div",
+                  { class: `perm admin-perm${p.open ? "" : " off"}` },
+                  h("div", { class: "perm-check" }, h("span", { class: `perm-glyph ${p.open ? "owned" : "unavailable"}`, "aria-hidden": "true" }, p.open ? "✓" : "–")),
+                  h("div", { class: "opt-main" }, h("div", { class: "opt-title" }, h("span", { class: "perm-name" }, p.name), p.service ? h("span", { class: "pill" }, p.service) : null, h("span", { class: `pill ${riskTone}` }, riskText), p.type === "Custom" ? h("span", { class: "pill" }, "自定义") : null), p.description ? h("p", { class: "opt-desc" }, p.description) : null),
+                  h("div", { class: "perm-side" }, h("span", { class: p.open ? "pill good" : "pill" }, p.open ? `开放 · 最长 ${p.max_days} 天` : "不开放"), p.reason ? h("div", { class: "opt-note" }, p.reason) : null),
+                );
+              }),
+            )
+          : h("div", { class: "card empty" }, h("h2", {}, "没有符合条件的策略")),
+        rows.length > shown.length ? h("p", { class: "muted apply-summary" }, `只显示前 ${shown.length} 条，共 ${rows.length} 条。用搜索缩小范围。`) : null,
+      );
+    }
+
+    function renderAll() {
+      renderAccounts();
+      renderStats();
+      renderTools();
+      renderList();
+    }
+    renderAll();
+    return [head, accountBar, stats, rulesCard, h("div", { class: "apply-panel" }, tools), list];
+  }
+
+  return { renderPermissions, renderAdminPolicies };
 }

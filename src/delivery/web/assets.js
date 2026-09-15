@@ -1,9 +1,9 @@
 // 云账号资产：员工看自己有子账号的云账号里各类资源的数量；管理员看明细、可搜索。
 
-import { api, h, mount, platformTag } from "./core.js";
+import { api, fill as fillEl, h, mount, platformTag } from "./core.js";
 
 // CSP 不允许 style 属性，宽度走 CSSOM
-function fill(percent) {
+function barFill(percent) {
   const el = h("span", { class: "bar-fill" });
   el.style.width = `${percent}%`;
   return el;
@@ -19,7 +19,7 @@ function bars(items, key, total) {
         "li",
         {},
         h("span", { class: "bar-label", title: x[key] }, x[key]),
-        h("span", { class: "bar-track" }, fill(Math.max(2, (x.count / max) * 100))),
+        h("span", { class: "bar-track" }, barFill(Math.max(2, (x.count / max) * 100))),
         h("span", { class: "bar-n" }, String(x.count)),
       ),
     ),
@@ -68,16 +68,16 @@ function resourceTable(resources) {
   const tbody = h("tbody");
   const count = h("span", { class: "muted" });
   const search = h("input", { class: "search", type: "search", placeholder: "搜索名称、ID、类型、地域、标签", "aria-label": "搜索资源" });
-  const fill = () => {
+  const renderRows = () => {
     const q = search.value.trim().toLowerCase();
     const rows = resources.filter((r) => !q || [r.name, r.id, r.type_label, r.region, r.group, ...Object.entries(r.tags || {}).map(([k, v]) => `${k}=${v}`)].join(" ").toLowerCase().includes(q));
-    tbody.replaceChildren(
+    fillEl(tbody,
       ...rows.slice(0, 500).map((r) => h("tr", {}, h("td", {}, r.type_label), h("td", {}, h("span", { class: "pname" }, r.name || "—"), h("span", { class: "pmail mono" }, r.id)), h("td", {}, r.region || "全局"), h("td", { class: "muted" }, Object.entries(r.tags || {}).map(([k, v]) => `${k}=${v}`).join("  ") || "—"))),
     );
     count.textContent = rows.length > 500 ? `显示前 500 个，共 ${rows.length} 个` : `${rows.length} 个`;
   };
-  search.addEventListener("input", fill);
-  fill();
+  search.addEventListener("input", renderRows);
+  renderRows();
   return h(
     "details",
     { class: "fold" },

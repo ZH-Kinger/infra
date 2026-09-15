@@ -236,8 +236,31 @@ class RequestsApi:
             return self._policies(flows, method, replace(caller, admin=False))
         if path.startswith("/api/policies"):
             return 404, {"error": "没有这个接口"}
+        if path.rstrip("/") == "/api/admin/policies":
+            if not caller.admin:
+                return 403, {"error": "需要管理员权限"}
+            if method != "GET":
+                return 405, {"error": "不支持的方法"}
+            data = flows.policy_rules_overview()
+            for acc in data["accounts"]:
+                try:
+                    label = (
+                        self._account_label(acc["platform"], acc["account"])
+                        if self._account_label
+                        else ""
+                    )
+                except Exception:  # noqa: BLE001 — 标签只是展示
+                    label = ""
+                acc["account_label"] = label or acc["account"]
+            return 200, data
+        if path.startswith("/api/admin/policies"):
+            return 404, {"error": "没有这个接口"}
         parts = [p for p in path.split("/") if p]  # api, [admin], requests, ...
         admin = len(parts) > 1 and parts[1] == "admin"
+        # 只接 /api/requests… 和 /api/admin/requests…：别的前缀不能落进申请单接口
+        index = 2 if admin else 1
+        if len(parts) <= index or parts[index] != "requests":
+            return 404, {"error": "没有这个接口"}
         rest = parts[3:] if admin else parts[2:]
         if admin and not caller.admin:
             return 403, {"error": "需要管理员权限"}
