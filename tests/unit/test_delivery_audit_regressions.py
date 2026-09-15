@@ -32,6 +32,23 @@ def row(name, email, accounts=(), union_id=""):
     return {"name": name, "email": email, "union_id": union_id, "accounts": list(accounts)}
 
 
+def iam_rows(path):
+    """长格式属性表 → {(email, app): row}；同一 (email, app) 出现多行时报错。"""
+    import csv
+
+    from delivery.cli import IAM_CSV_HEADER
+
+    with Path(path).open(encoding="utf-8-sig", newline="") as fh:
+        reader = csv.DictReader(fh)
+        assert reader.fieldnames == IAM_CSV_HEADER, reader.fieldnames
+        out = {}
+        for r in reader:
+            key = (r["email"], r["app"])
+            assert key not in out, f"重复行 {key}"
+            out[key] = r
+    return out
+
+
 class _Files:
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
@@ -256,8 +273,6 @@ class IamExportTests(unittest.TestCase):
         os.chdir(self._cwd)
 
     def test_export_rules(self):
-        import csv
-
         from delivery.cli import main
 
         d = self.root / "identity"
@@ -289,20 +304,24 @@ class IamExportTests(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
         self.assertEqual(out.stat().st_mode & 0o777, 0o600)
-        rows = {r["email"]: r for r in csv.DictReader(out.open(encoding="utf-8-sig"))}
-        self.assertEqual(rows["p@wuji.tech"]["aliyun_username"], "peter")
-        self.assertEqual(rows["p@wuji.tech"]["feishu_union_id"], "on_P")
+        rows = iam_rows(out)
+        self.assertEqual(len(rows), 3)
+        app = "aliyun_username"
+        p = rows[("p@wuji.tech", app)]
+        self.assertEqual((p["value"], p["action"], p["problem"]), ("peter", "set", ""))
+        self.assertEqual(p["feishu_union_id"], "on_P")
+        self.assertEqual(p["match_by"], "feishu_union_id")
         # 同一云账号下两个号：不导出，标问题
-        self.assertEqual(rows["d@wuji.tech"]["aliyun_username"], "")
-        self.assertIn("多个号", rows["d@wuji.tech"]["problem"])
-        # 只有待确认对应的人不导出
-        self.assertNotIn("t@wuji.tech", rows)
-        self.assertEqual(rows["p@wuji.tech"]["match_by"], "feishu_union_id")
-        self.assertIn("存量回填", rows["d@wuji.tech"]["match_by"])
+        dd = rows[("d@wuji.tech", app)]
+        self.assertEqual((dd["value"], dd["action"]), ("", "skip"))
+        self.assertIn("多个号", dd["problem"])
+        self.assertIn("存量回填", dd["match_by"])
+        # 只有待确认对应的应用：skip，不给值
+        t = rows[("t@wuji.tech", app)]
+        self.assertEqual((t["value"], t["action"]), ("", "skip"))
+        self.assertIn("待确认", t["problem"])
 
     def test_key_and_suffix_spec_exports_full_nameid(self):
-        import csv
-
         from delivery.cli import main
 
         d = self.root / "identity"
@@ -333,8 +352,8 @@ class IamExportTests(unittest.TestCase):
             ]
         )
         self.assertEqual(rc, 0)
-        rows = list(csv.DictReader(out.open(encoding="utf-8-sig")))
-        self.assertEqual(rows[0]["aliyun-main"], "peter@corp.example")
+        r = iam_rows(out)[("p@wuji.tech", "aliyun-main")]
+        self.assertEqual((r["value"], r["action"]), ("peter@corp.example", "set"))
 
     def test_refuses_to_write_outside_identity_dir(self):
         from delivery.cli import main
@@ -425,6 +444,7 @@ class ExportGuardFollowupTests(unittest.TestCase):
         from delivery.errors import DeliveryError
 
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)  # noqa: S603,S607
+        (self.root / ".gitignore").write_text("identity/*\n", encoding="utf-8")
         sub = self.root / "src" / "delivery"
         sub.mkdir(parents=True)
         os.chdir(sub)
@@ -433,10 +453,12 @@ class ExportGuardFollowupTests(unittest.TestCase):
         with self.assertRaises(DeliveryError):
             _require_identity_dir(Path("identity/x.json"))
         _require_identity_dir(self.root / "identity" / "x.json")  # 仓库根目录的 identity/ 允许
+        # C1：别的仓库没忽略 identity/ 时拒绝
+        (self.root / ".gitignore").write_text("", encoding="utf-8")
+        with self.assertRaises(DeliveryError):
+            _require_identity_dir(self.root / "identity" / "x.json")
 
     def test_a2_duplicate_union_id_rows_are_not_exported(self):
-        import csv
-
         acct = "aliyun/1000000000000001"
         rc, out = self._export(
             roster(
@@ -446,8 +468,9 @@ class ExportGuardFollowupTests(unittest.TestCase):
             {acct: {"key": "aliyun-main", "suffix": "@1000000000000001.onaliyun.com"}},
         )
         self.assertEqual(rc, 0)
-        rows = list(csv.DictReader(out.open(encoding="utf-8-sig")))
-        self.assertTrue(all(r["aliyun-main"] == "" for r in rows))
+        rows = list(iam_rows(out).values())
+        self.assertEqual({r["email"] for r in rows}, {"a@wuji.tech", "b@wuji.tech"})
+        self.assertTrue(all(r["value"] == "" and r["action"] == "skip" for r in rows))
         self.assertTrue(all("重复" in r["problem"] for r in rows))
 
     def test_a3_suffix_without_at_is_rejected(self):
@@ -458,25 +481,21 @@ class ExportGuardFollowupTests(unittest.TestCase):
         self.assertEqual(rc, 2)
 
     def test_a3_username_with_at_is_not_suffixed(self):
-        import csv
-
         rc, out = self._export(
             roster(row("彼得", "p@wuji.tech", [ACC_P | {"name": "p@x"}], union_id="on_P")),
             {"aliyun/1000000000000001": {"key": "aliyun-main", "suffix": "@corp.example"}},
         )
         self.assertEqual(rc, 0)
-        r = next(csv.DictReader(out.open(encoding="utf-8-sig")))
-        self.assertEqual(r["aliyun-main"], "")
+        r = iam_rows(out)[("p@wuji.tech", "aliyun-main")]
+        self.assertEqual((r["value"], r["action"]), ("", "skip"))
         self.assertIn("已含 @", r["problem"])
 
     def test_a4_row_without_union_id_and_email_is_not_exported(self):
-        import csv
-
         rc, out = self._export(
             roster(row("无名", "", [ACC_P])),
             {"aliyun/1000000000000001": "aliyun-main"},
         )
         self.assertEqual(rc, 0)
-        r = next(csv.DictReader(out.open(encoding="utf-8-sig")))
-        self.assertEqual(r["aliyun-main"], "")
+        r = iam_rows(out)[("", "aliyun-main")]
+        self.assertEqual((r["value"], r["action"]), ("", "skip"))
         self.assertIn("无法匹配", r["problem"])

@@ -11,6 +11,7 @@ import getpass
 import json
 import os
 import sys
+import time
 import unicodedata
 from pathlib import Path
 from typing import Optional, Sequence
@@ -197,6 +198,14 @@ def build_parser() -> argparse.ArgumentParser:
         help='云账号 → IAM 属性名，形如 {"aliyun/<UID>": "aliyun_username"}',
     )
     iamx.add_argument("--out", default="identity/iam-attributes.csv")
+    iamx.add_argument(
+        "--baseline",
+        default="",
+        help="上次发给 IT 的属性表（或 latest = identity/iam-sent/ 里最新一份），只导出变化",
+    )
+    iamx.add_argument(
+        "--record", action="store_true", help="把本次导出存档到 identity/iam-sent/，作为下次的基线"
+    )
 
     ppl = isub.add_parser("people", help="生成人员名册：映射提案 + 通讯录 union_id")
     ppl.add_argument("--proposal", default="identity/sso-map.proposal.json")
@@ -794,10 +803,16 @@ def _require_identity_dir(out: Path) -> None:
     top = _git_toplevel(target.parent)
     if top is not None:
         root = top
+        # 别的仓库不一定忽略 identity/；以后有人误删 .gitignore 规则也能拦住
+        if _is_under(target, root / "identity") and not _git_ignored(root, target):
+            raise DeliveryError(f"{out} 没有被 {root} 的 .gitignore 忽略，拒绝写入员工数据")
     elif _is_under(target, repo):
         root = repo
     else:
         root = Path.cwd().resolve()
+        if any((d / ".git").exists() for d in (root, *root.parents)):
+            # git 不可用但当前目录在某个仓库里：无法确认忽略规则，拒绝
+            raise DeliveryError(f"无法确认 {out} 是否被 git 忽略（git 不可用），拒绝写入员工数据")
     if not _is_under(target, root / "identity"):
         raise DeliveryError(
             f"{out} 不在仓库根目录的 identity/ 下：这类文件含员工身份，只允许写到那里"
@@ -818,12 +833,34 @@ def _git_toplevel(start: Path) -> Optional[Path]:
             text=True,
             timeout=5,
             check=False,
+            env=_git_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if done.returncode != 0 or not done.stdout.strip():
         return None
     return Path(done.stdout.strip()).resolve()
+
+
+def _git_env() -> dict:
+    # GIT_DIR / GIT_WORK_TREE 会覆盖 -C，判定就不是针对目标路径了
+    return {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+
+
+def _git_ignored(root: Path, target: Path) -> bool:
+    import subprocess
+
+    try:
+        done = subprocess.run(  # noqa: S603 — 固定参数，不拼接外部输入
+            ["git", "-C", str(root), "check-ignore", "-q", str(target)],  # noqa: S607
+            capture_output=True,
+            timeout=5,
+            check=False,
+            env=_git_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
 
 
 def _is_under(path: Path, base: Path) -> bool:
@@ -836,7 +873,7 @@ def _is_under(path: Path, base: Path) -> bool:
 
 def _write_private(path: str, data: dict) -> Path:
     """含全员身份/权限数据的文件：0600，原子替换。"""
-    out = Path(path)
+    out = Path(path).resolve()  # 先解析符号链接，临时文件和替换都基于真实路径
     _require_identity_dir(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(out.suffix + ".tmp")
@@ -878,16 +915,208 @@ def _cmd_inventory_collect(args) -> int:
     return 1 if snap.incomplete else 0
 
 
-def _cmd_identity_iam_export(args) -> int:
-    """名册 → IAM 用户属性 CSV。
+#: 发给 IT 的属性表存档目录（identity/ 整体 gitignore）。
+IAM_SENT_DIR = "identity/iam-sent"
+IAM_CSV_HEADER = [
+    "feishu_union_id",
+    "email",
+    "name",
+    "app",
+    "value",
+    "action",
+    "match_by",
+    "problem",
+]
 
-    一行一个人，每个云账号一列（列名即 IAM 属性名），值是**云上现有用户名原样**。
-    只导出已确认的对应；同一云账号下有多个号的人不导出该列并标出问题——
-    属性值会直接决定 SSO 进哪个号，宁可空着（登录被拒）也不能填错。
+
+def _iam_rows(index, specs: dict) -> list:
+    """名册 → 属性表的行。一行 = 一个人在一个云账号应用上的一条属性。
+
+    action：set 写入 cloud_accounts[app]=value；skip 不导入（problem 写原因）。
+    属性值直接决定 SSO 进哪个号，有任何疑问一律 skip，宁可登录被拒也不能填错。
     """
+    rows = []
+    for person in index.people:
+        if not person.accounts and not person.pending:
+            continue
+        match_by = "feishu_union_id" if person.union_id else "email（存量回填）"
+        blocker = ""
+        if person.union_id and index.is_blocked_uid(person.union_id):
+            blocker = "名册里 union_id 重复，需管理员核对"
+        elif not person.union_id and not person.email:
+            blocker = "既没有 union_id 也没有邮箱，IAM 无法匹配"
+        elif not person.union_id and person.email_collision:
+            blocker = "通讯录里多人共用此邮箱，需管理员核对后补 union_id"
+        elif not person.union_id and index.claim_blocked(person):
+            blocker = "登录绑定与名册对不上，需管理员核对后补 union_id"
+
+        def add(app, value, action, problem, person=person, match_by=match_by):
+            rows.append(
+                {
+                    "feishu_union_id": person.union_id,
+                    "email": person.email,
+                    "name": person.name,
+                    "app": app,
+                    "value": value,
+                    "action": action,
+                    "match_by": match_by,
+                    "problem": problem,
+                }
+            )
+
+        by_scope: dict = {}
+        for ref in person.accounts:
+            by_scope.setdefault(ref.scope, []).append(ref.name)
+        for scope, names in sorted(by_scope.items()):
+            spec = specs.get(scope)
+            if spec is None:
+                add("", "", "skip", f"{scope} 未配置应用标识")
+                continue
+            app, suffix = spec
+            if blocker:
+                add(app, "", "skip", blocker)
+            elif len(names) > 1:
+                add(
+                    app,
+                    "",
+                    "skip",
+                    f"同一云账号下有多个号 {'/'.join(sorted(names))}，需先定保留哪个",
+                )
+            elif suffix and "@" in names[0]:
+                add(app, "", "skip", f"用户名 {names[0]} 已含 @，不能再拼后缀")
+            else:
+                add(app, names[0] + suffix, "set", "")
+        confirmed = {specs[sc][0] for sc in by_scope if sc in specs}
+        for ref in person.pending:
+            spec = specs.get(ref.scope)
+            app = spec[0] if spec else ""
+            if app in confirmed:
+                continue
+            add(app, "", "skip", "对应关系待确认，未导出")
+    return rows
+
+
+def _iam_person_key(row: dict) -> tuple:
+    return (row["feishu_union_id"], row["email"].lower())
+
+
+def _iam_diff(current: list, baseline: list) -> list:
+    """只留变化：新增或改值 → set；基线里 set 过、现在没有了 → remove。
+
+    人按 union_id 对，没有 union_id 时按邮箱对（这个人上次还没有 union_id 的情况）。
+    skip 行不进增量：IT 不需要处理它们，原因在全量导出和命令输出里看。
+    """
+
+    def index_rows(rows):
+        by_uid, by_mail = {}, {}
+        for r in rows:
+            if r["action"] != "set":
+                continue
+            if r["feishu_union_id"]:
+                by_uid[(r["feishu_union_id"], r["app"])] = r
+            if r["email"]:
+                by_mail[(r["email"].lower(), r["app"])] = r
+        return by_uid, by_mail
+
+    def find(r, by_uid, by_mail):
+        if r["feishu_union_id"]:
+            hit = by_uid.get((r["feishu_union_id"], r["app"]))
+            if hit is not None:
+                return hit
+        if not r["email"]:
+            return None
+        hit = by_mail.get((r["email"].lower(), r["app"]))
+        # 按邮箱对只用于「一边还没有 union_id」：两边都有且不同，就是两个人（邮箱被复用）
+        if hit is not None and r["feishu_union_id"] and hit["feishu_union_id"]:
+            return None
+        return hit
+
+    old_uid, old_mail = index_rows(baseline)
+    new_uid, new_mail = index_rows(current)
+    out = []
+    for r in current:
+        if r["action"] != "set":
+            continue
+        prev = find(r, old_uid, old_mail)
+        if prev is None or prev["value"] != r["value"]:
+            out.append(dict(r))
+    for prev in baseline:
+        if prev["action"] != "set" or find(prev, new_uid, new_mail) is not None:
+            continue
+        removed = dict(prev, action="remove", problem="")
+        # 基线里这个人还没有 union_id、现在有了：按 union_id 删更准。
+        # 基线里已有 union_id 的绝不改成别人的（邮箱可能已复用给新人）。
+        if not prev["feishu_union_id"] and prev["email"]:
+            for r in current:
+                if r["email"].lower() == prev["email"].lower() and r["feishu_union_id"]:
+                    removed["feishu_union_id"] = r["feishu_union_id"]
+                    removed["match_by"] = "feishu_union_id"
+                    break
+        out.append(removed)
+    return out
+
+
+def _resolve_baseline(value: str) -> Path:
+    if value == "latest":
+        archived = sorted(Path(IAM_SENT_DIR).glob("*.csv"))
+        if not archived:
+            raise DeliveryError(f"{IAM_SENT_DIR} 里还没有存档：第一次请导出全量并加 --record")
+        return archived[-1]
+    path = Path(value)
+    if not path.exists():
+        raise DeliveryError(f"基线文件 {path} 不存在")
+    return path
+
+
+def _csv_cell(value: str) -> str:
+    # Excel 打开 CSV 时会把 = + - @ 开头的格子当公式执行
+    return "'" + value if value[:1] in ("=", "+", "-", "@") else value
+
+
+def _csv_uncell(value: str) -> str:
+    return value[1:] if value[:1] == "'" and value[1:2] in ("=", "+", "-", "@") else value
+
+
+def _read_iam_csv(path: Path) -> list:
+    import csv
+
+    try:
+        with path.open(encoding="utf-8-sig", newline="") as fh:
+            reader = csv.DictReader(fh)
+            if reader.fieldnames != IAM_CSV_HEADER:
+                raise DeliveryError(f"{path} 不是当前格式的属性表（表头不一致），不能当基线")
+            return [{k: _csv_uncell(v or "") for k, v in row.items()} for row in reader]
+    except OSError as exc:
+        raise DeliveryError(f"读不了基线 {path}：{exc}") from exc
+
+
+def _write_iam_csv(out: Path, rows: list) -> None:
     import csv
     import io
 
+    out = out.resolve()
+    _require_identity_dir(out)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(IAM_CSV_HEADER)
+    for r in rows:
+        writer.writerow([_csv_cell(r[k]) if k != "action" else r[k] for k in IAM_CSV_HEADER])
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, buf.getvalue().encode("utf-8-sig"))
+    finally:
+        os.close(fd)
+    tmp.replace(out)
+
+
+def _cmd_identity_iam_export(args) -> int:
+    """名册 → IAM 属性表 CSV（cloud_accounts 的写入指令）。
+
+    默认导出全量；`--baseline` 只导出与上次发给 IT 的存档相比有变化的行，
+    删号、改名以 remove / set 表达。`--record` 把本次结果存档。
+    """
     from . import people as people_mod
 
     bindings = Path(args.people).with_name("bindings.json")
@@ -932,87 +1161,35 @@ def _cmd_identity_iam_export(args) -> int:
             raise DeliveryError(f'{attr_file} 里 {scope} 的配置应为字符串或 {{"key": ...}}')
     columns = [key for key, _ in specs.values()]
     if len(set(columns)) != len(columns):
-        raise DeliveryError(f"{attr_file} 里有两个云账号用了同一个属性名，值会互相覆盖")
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(["feishu_union_id", "email", "name", *columns, "match_by", "problem"])
+        raise DeliveryError(f"{attr_file} 里有两个云账号用了同一个应用标识，值会互相覆盖")
 
-    def cell(value: str) -> str:
-        # Excel 打开 CSV 时会把 = + - @ 开头的格子当公式执行
-        return "'" + value if value[:1] in ("=", "+", "-", "@") else value
+    full = _iam_rows(index, specs)
+    rows = full
+    if args.baseline:
+        baseline = _resolve_baseline(args.baseline)
+        rows = _iam_diff(full, _read_iam_csv(baseline))
+        print(f"对比基线 {baseline}")
 
-    exported = skipped = 0
-    for person in index.people:
-        if not person.accounts:
-            continue
-        values, problems = {}, []
-        by_scope: dict = {}
-        for ref in person.accounts:
-            by_scope.setdefault(ref.scope, []).append(ref.name)
-        for scope, names in by_scope.items():
-            spec = specs.get(scope)
-            column = spec[0] if spec else None
-            if column is None:
-                problems.append(f"{scope} 未配置属性名")
-            elif len(names) > 1:
-                problems.append(f"{scope} 下有多个号 {'/'.join(sorted(names))}，需先定保留哪个")
-            else:
-                if spec[1] and "@" in names[0]:
-                    problems.append(f"{scope} 的用户名 {names[0]} 已含 @，不能再拼后缀")
-                else:
-                    values[column] = names[0] + spec[1]
-        if person.pending:
-            problems.append(f"另有 {len(person.pending)} 个待确认对应未导出")
-        if person.union_id and index.is_blocked_uid(person.union_id):
-            values = {}
-            problems.append("名册里 union_id 重复，不导出属性，需管理员核对")
-        elif not person.union_id and not person.email:
-            values = {}
-            problems.append("既没有 union_id 也没有邮箱，IAM 无法匹配，不导出属性")
-        elif not person.union_id and (person.email_collision or index.claim_blocked(person)):
-            # 这两类人 IAM 只能按邮箱回填，而邮箱本身有歧义 / 面板已判定对不上：宁可空着
-            values = {}
-            problems.append(
-                "通讯录里多人共用此邮箱" if person.email_collision else "登录绑定与名册对不上"
-            )
-            problems.append("不导出属性，需管理员核对后补 union_id")
-        if not values:
-            skipped += 1
-        else:
-            exported += 1
-        # 没有 union_id 的行，IAM 侧只能按邮箱做一次存量回填（规范允许），在表里写明
-        match_by = "feishu_union_id" if person.union_id else "email（存量回填）"
-        writer.writerow(
-            [
-                cell(person.union_id),
-                cell(person.email),
-                cell(person.name),
-                *[cell(values.get(c, "")) for c in columns],
-                match_by,
-                cell("；".join(problems)),
-            ]
-        )
     out = Path(args.out)
-    _require_identity_dir(out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_suffix(out.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, buf.getvalue().encode("utf-8-sig"))
-    finally:
-        os.close(fd)
-    tmp.replace(out)
-    print(f"已写入 {out}（权限 600）：{exported} 人有可导入的属性，{skipped} 人没有")
+    _write_iam_csv(out, rows)
+    counts = {a: sum(1 for r in rows if r["action"] == a) for a in ("set", "remove", "skip")}
     print(
-        "  导入须知：match_by=email 的行只允许按邮箱回填一次，回填时同时写下 union_id，"
-        "之后只按 union_id 匹配；不要反复按邮箱重导这份表"
+        f"已写入 {out}（权限 600）：set {counts['set']} 条，remove {counts['remove']} 条，"
+        f"skip {counts['skip']} 条"
     )
-    missing_uid = sum(1 for p in index.people if p.accounts and not p.union_id)
-    if missing_uid:
-        print(
-            f"  {missing_uid} 人还没有 union_id：IAM 侧导入时需按 IAM 规范做一次存量回填"
-            "（按邮箱找到 IAM 用户），或先用 IT 的对照表重新生成名册"
-        )
+    if args.record:
+        # 存档的是全量状态，不是这次的增量：下次比对要靠它发现删号
+        archive = Path(IAM_SENT_DIR) / time.strftime("%Y%m%d-%H%M%S.csv")
+        n = 1
+        while archive.exists():  # 同一秒内再次存档，不覆盖前一份
+            archive = archive.with_name(f"{archive.stem.split('~')[0]}~{n}.csv")
+            n += 1
+        _write_iam_csv(archive, full)
+        print(f"  已存档为 {archive}：下次用 --baseline latest 只导出变化")
+    print(
+        "  导入须知：match_by=email 的行只按邮箱回填一次，回填时同时写下 union_id，"
+        "之后只按 union_id 匹配"
+    )
     return 0
 
 
