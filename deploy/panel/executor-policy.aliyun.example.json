@@ -14,7 +14,10 @@
     },
     {
       "Effect": "Allow",
-      "Action": ["ram:AddUserToGroup", "ram:RemoveUserFromGroup"],
+      "Action": [
+        "ram:AddUserToGroup",
+        "ram:RemoveUserFromGroup"
+      ],
       "Resource": [
         "acs:ram:*:<主账号UID>:group/grp-oss-readonly",
         "acs:ram:*:<主账号UID>:group/grp-default"
@@ -22,8 +25,33 @@
     },
     {
       "Effect": "Allow",
+      "Action": [
+        "ram:ListPoliciesForUser",
+        "ram:AttachPolicyToUser",
+        "ram:DetachPolicyFromUser"
+      ],
+      "Resource": [
+        "acs:ram:*:<主账号UID>:user/*",
+        "acs:ram:*:system:policy/AliyunOSSReadOnlyAccess",
+        "acs:ram:*:system:policy/AliyunECSReadOnlyAccess",
+        "acs:ram:*:<主账号UID>:policy/<允许授予的自定义策略名>"
+      ]
+    },
+    {
+      "Effect": "Allow",
       "Action": "sts:AssumeRole",
       "Resource": "acs:ram:*:<主账号UID>:role/dev-readonly"
+    },
+    {
+      "Effect": "Deny",
+      "Action": [
+        "ram:AttachPolicyToUser"
+      ],
+      "Resource": [
+        "acs:ram:*:system:policy/AdministratorAccess",
+        "acs:ram:*:system:policy/AliyunRAMFullAccess",
+        "acs:ram:*:system:policy/AliyunSTSAssumeRoleAccess"
+      ]
     }
   ]
 }

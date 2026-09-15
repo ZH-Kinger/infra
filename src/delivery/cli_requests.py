@@ -5,11 +5,16 @@
   delivery request list [--all]              我的申请
   delivery request show <申请单号>
   delivery request withdraw <申请单号>
+  delivery request policies [--account 平台/ID] [--search 关键字]
+                                             权限列表：全部权限策略，标出已有 / 申请中 / 不开放
+  delivery request grant --account 平台/ID --policy 策略名 [--policy ...] --days N --reason ...
+                                             按策略申请权限（以你的名义发起飞书审批）
   delivery creds <申请单号> [--format env|json] [--hours N]
                                              领取临时凭证。env 格式可以直接 eval，
                                              官方 aliyun / ve CLI 和 SDK 都认这些环境变量
 
   delivery requests sweep                    服务端定时任务：同步审批、到期回收权限、过期凭证
+  delivery policies collect                  服务端：采集两家云的权限策略目录（只读）
   delivery approval widgets --code <审批定义编号>
                                              管理员配置飞书审批表单时查控件 ID
 
@@ -99,6 +104,20 @@ def add_parsers(commands) -> None:
     new.add_argument("--days", type=int, default=None, help="权限申请：需要多少天")
     new.add_argument("--hours", type=int, default=None, help="凭证申请：每次领取的有效小时数")
     new.add_argument("--username", default="", help="开账号：子账号用户名")
+    pol = sub.add_parser("policies", help="权限列表：全部权限策略和你的状态")
+    pol.add_argument("--account", default="", help="只看某个云账号，格式 平台/账号ID")
+    pol.add_argument("--search", default="", help="按策略名、说明、产品过滤")
+    pol.add_argument("--all", action="store_true", help="包括已有和不开放的")
+    grant = sub.add_parser("grant", help="按策略申请权限（以你的名义发起飞书审批）")
+    grant.add_argument("--account", required=True, help="云账号，格式 平台/账号ID")
+    grant.add_argument(
+        "--policy", action="append", required=True, metavar="NAME", help="策略名，可重复"
+    )
+    grant.add_argument(
+        "--type", choices=("System", "Custom"), default=None, help="同名时指定策略类型"
+    )
+    grant.add_argument("--days", type=int, required=True, help="需要多少天")
+    grant.add_argument("--reason", required=True, help="申请理由，审批人会看到")
     ls = sub.add_parser("list", help="我的申请")
     ls.add_argument("--all", action="store_true", help="包括已结束的")
     for name, help_text in (("show", "查看申请详情"), ("withdraw", "撤回待审批的申请")):
@@ -123,6 +142,19 @@ def add_parsers(commands) -> None:
     sweep.add_argument(
         "--manual", default="identity/manual-links.json", help="开账号成功后把新账号对应给申请人"
     )
+    sweep.add_argument(
+        "--policies",
+        default="identity/policies.json",
+        help="权限策略目录（按策略申请的单子开通前核对）",
+    )
+    sweep.add_argument("--policy-rules", default="identity/policy-rules.json")
+
+    policies = commands.add_parser("policies", help="权限策略目录（服务端采集）")
+    psub = policies.add_subparsers(dest="policies_command", required=True)
+    pcollect = psub.add_parser("collect", help="采集两家云的全部权限策略（只读）")
+    pcollect.add_argument("--out", default="identity/policies.json")
+    pcollect.add_argument("--aliyun-profile", action="append", default=[], metavar="PREFIX")
+    pcollect.add_argument("--skip-volcano", action="store_true")
 
     assets = commands.add_parser("assets", help="云账号资产：我能看到的云账号里有哪些资源")
     asub_assets = assets.add_subparsers(dest="assets_command")
@@ -149,6 +181,8 @@ def dispatch(args: argparse.Namespace):
         return _widgets(args)
     if args.command == "assets":
         return _assets(args)
+    if args.command == "policies":
+        return _policies_collect(args)
     return None
 
 
@@ -185,6 +219,10 @@ def _request(args) -> int:
         if r["status"] == "pending_approval":
             print("  飞书审批已经以你的名义发起。查看进度： delivery request show " + r["id"])
         return 0 if r["status"] != "submit_failed" else 1
+    if cmd == "policies":
+        return _list_policies(client, args)
+    if cmd == "grant":
+        return _grant(client, args)
     if cmd == "list":
         data = client.request("GET", "/api/requests")
         rows = [r for r in data.get("requests", []) if args.all or r.get("open")]
@@ -249,6 +287,7 @@ def _creds(args) -> int:
 
 def _sweep(args) -> int:
     from . import people as people_mod
+    from . import policies as policies_mod
     from . import review as review_mod
     from .approval import ApprovalConfig, FeishuApproval
     from .catalog import load as load_catalog
@@ -259,7 +298,9 @@ def _sweep(args) -> int:
     from .tickets import CLAIMABLE, PENDING, TicketStore
 
     # 申请单、名册、人工记录都含员工信息：路径必须在 gitignored 的 identity/ 下
-    for path in (args.tickets, args.people, args.manual):
+    policies_path = getattr(args, "policies", "identity/policies.json")
+    rules_path = getattr(args, "policy_rules", "identity/policy-rules.json")
+    for path in (args.tickets, args.people, args.manual, policies_path, rules_path):
         _require_identity_dir(Path(path).resolve())
     problems = 0
     app_id = os.environ.get("DELIVERY_FEISHU_APP_ID", "")
@@ -289,6 +330,8 @@ def _sweep(args) -> int:
         roster=lambda: people_mod.load(args.people, bindings_path=bindings),
         executor=executor_from_env,
         add_manual_link=link,
+        policy_snapshot=lambda: policies_mod.load(policies_path),
+        policy_rules=lambda: policies_mod.load_rules(rules_path),
     )
     # 每一步、每张单子都隔离：一张单子出错不能挡住后面的到期回收
     for ticket in flows.store.all():
@@ -318,6 +361,114 @@ def _sweep(args) -> int:
             print(line)
             problems += "失败" in line or "中断" in line
     return 1 if problems else 0
+
+
+def _find_account(data: dict, spec: str) -> dict:
+    platform, _, account = spec.partition("/")
+    for acc in data.get("accounts", []):
+        if acc["platform"] == platform and acc["account"] == account:
+            return acc
+    raise ClientError(
+        f"你在 {spec} 下没有子账号（格式：平台/账号ID，见 delivery request policies）"
+    )
+
+
+def _list_policies(client: PanelClient, args) -> int:
+    data = client.request("GET", "/api/policies")
+    accounts = data.get("accounts", [])
+    if args.account:
+        accounts = [_find_account(data, args.account)]
+    if not accounts:
+        print("你还没有云账号，先申请开账号。")
+        return 0
+    marks = {"available": " ", "owned": "✓", "pending": "…", "unavailable": "×"}
+    words = [w.lower() for w in args.search.split()]
+    for acc in accounts:
+        scope = f"{acc['platform']}/{acc['account']}"
+        head = f"{acc['account_label']}（{scope}，子账号 {acc['cloud_user']}）"
+        print(head + (f"  {acc['error']}" if acc.get("error") else ""))
+        for p in acc.get("policies", []):
+            hay = f"{p['name']} {p['description']} {p['service']}".lower()
+            if words and not all(w in hay for w in words):
+                continue
+            if not args.all and p["state"] in ("owned", "unavailable") and not words:
+                continue
+            note = f"  {p['state_note']}" if p.get("state_note") else ""
+            print(
+                f"  {marks.get(p['state'], ' ')} {p['name']:<44} {p['risk']:<6} "
+                f"≤{p['max_days']}天 {p['service']}{note}"
+            )
+    print(
+        f"\n✓ 已有  … 申请中  × 不开放。一次最多 {data.get('max_per_request', 10)} 条。",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _grant(client: PanelClient, args) -> int:
+    data = client.request("GET", "/api/policies")
+    acc = _find_account(data, args.account)
+    chosen = []
+    for name in args.policy:
+        matches = [
+            p
+            for p in acc.get("policies", [])
+            if p["name"].lower() == name.lower() and (args.type is None or p["type"] == args.type)
+        ]
+        if not matches:
+            raise ClientError(f"权限列表里没有策略 {name}（见 delivery request policies --search）")
+        if len(matches) > 1:
+            raise ClientError(f"{name} 同时有系统策略和自定义策略，请加 --type System 或 Custom")
+        chosen.append({"type": matches[0]["type"], "name": matches[0]["name"]})
+    body = {
+        "template_id": "policy",
+        "payload": {
+            "platform": acc["platform"],
+            "account": acc["account"],
+            "cloud_user": acc["cloud_user"],
+            "days": args.days,
+            "policies": chosen,
+        },
+        "reason": args.reason,
+    }
+    r = client.request("POST", "/api/requests", body)["request"]
+    print(f"已提交 {r['id']}：{r['status_label']}")
+    print(f"  {r['summary']}")
+    if r.get("approval_url"):
+        print(f"  飞书审批：{r['approval_url']}")
+    return 0 if r["status"] != "submit_failed" else 1
+
+
+def _policies_collect(args) -> int:
+    from . import policies
+    from .cli import _write_private
+    from .clouds import aliyun, volcano
+
+    def aliyun_job(prefix: str):
+        return lambda: policies.collect_aliyun(aliyun.Credentials.from_env(prefix))
+
+    jobs = [("aliyun", p, aliyun_job(p)) for p in (args.aliyun_profile or ["ALIYUN"])]
+    if not args.skip_volcano:
+        jobs.append(
+            ("volcano", "default", lambda: policies.collect_volcano(volcano.Credentials.from_env()))
+        )
+    try:
+        previous = policies.load(args.out)
+    except policies.PolicyError:
+        previous = None
+    data = policies.build_snapshot(jobs, previous=previous)
+    out = _write_private(args.out, data)
+    failed = [a for a in data["accounts"] if a.get("error") or a.get("stale")]
+    total = sum(len(a.get("policies") or []) for a in data["accounts"])
+    print(f"已写入 {out}（权限 600）：{total} 条策略")
+    for a in failed:
+        if a.get("stale"):
+            print(
+                f"  ⚠ {a['platform']}/{a['account']}：采集失败，沿用上次的列表（{a['error_note']}）"
+            )
+        else:
+            print(f"  ⚠ {a['platform']}/{a['account']}：{a['error']}")
+    return 1 if failed else 0
 
 
 def _brief(exc: Exception) -> str:

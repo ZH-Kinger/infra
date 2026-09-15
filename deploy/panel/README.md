@@ -130,13 +130,32 @@ delivery refresh --trust-unverified-when-derivable   # 和手动生成提案时�
    执行身份泄露时可以重置任何 RAM 用户的控制台密码（包括管理员）。能统一新账号前缀时，
    把 Resource 收窄到该前缀；模板里的角色要把「最大会话时间」设到不小于模板的 `max_hours`。
 
-4. **资产**：两家控制台分别开通「资源中心」，给权限快照用的只读身份加资源中心只读权限。
+   **按策略申请权限**（权限列表页）需要执行身份再有授予 / 撤销策略的权限：阿里云
+   `ram:ListPoliciesForUser`、`ram:AttachPolicyToUser`、`ram:DetachPolicyFromUser`；火山
+   `iam:ListAttachedUserPolicies`、`iam:AttachUserPolicy`、`iam:DetachUserPolicy`。
+   **能授予策略就约等于管理员**：执行身份泄露后可以给任何子账号任何权限。服务端禁用清单
+   （`identity/policy-rules.json`，见下一步）是第一道闸；阿里云还能在执行身份的策略里把可授予的
+   策略收窄到列出的策略 ARN（`acs:ram:*:system:policy/<名称>`、`acs:ram:*:<UID>:policy/<名称>`），
+   并对 AdministratorAccess 等写 Deny（示例已包含）。执行凭证按最高敏感度保管。
+
+4. **资产与权限列表**：两家控制台分别开通「资源中心」，给权限快照用的只读身份加资源中心只读权限。
+   权限列表要采集策略目录，只读身份再加阿里云 `ram:ListPolicies`、火山 `iam:ListPolicies`：
+
+   ```bash
+   delivery policies collect      # 写 identity/policies.json
+   ```
+
+   能申请哪些策略由 `identity/policy-rules.json` 决定（可选，格式见 `identity/policy-rules.example.json`）。
+   不写时用内置规则：AdministratorAccess、RAM / IAM 完全控制、STS、资源目录、资源管理、云 SSO、账单、
+   操作审计类策略不开放（这几类产品线只放只读策略，密钥管理只读也不放）；自定义策略默认**不开放**，要开放的逐条写进 `allow`，按高风险计天数。**不要**把执行身份、采集身份用的自定义策略写进 `allow`，更不要设 `allow_custom: true`——那等于让员工申请到平台自己的管理权限。规则文件只能追加禁用，放开内置禁用项要逐条写进 `allow`。
+   风险决定最长授权天数（默认低 180 / 中 90 / 高 30 天）。
 
 5. **定时任务**：在 `delivery-refresh.service` 之外再加两条（同一个 EnvironmentFile）：
 
    ```bash
    delivery requests sweep     # 同步飞书审批、到期回收权限、标记过期凭证、开账号后对应到名册（建议每 10 分钟）
    delivery assets collect     # 采集资产快照（每天一次）
+   delivery policies collect   # 采集权限策略目录（每天一次）
    ```
 
    审批通过后，员工或管理员打开申请单时也会实时同步，定时任务是兜底。
@@ -149,6 +168,8 @@ CLI（`delivery login` 之后）：
 delivery request templates
 delivery request new aliyun-oss-read --user <你的子账号> --days 30 --reason "..."
 delivery request list
+delivery request policies --search oss
+delivery request grant --account aliyun/<UID> --policy AliyunOSSReadOnlyAccess --days 30 --reason "..."
 eval "$(delivery creds <申请单号>)"     # 临时凭证写进当前 shell，官方 aliyun / ve CLI 直接可用
 delivery assets
 ```

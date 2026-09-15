@@ -5,8 +5,9 @@
 //   · 身份和权限数据只存在内存里，不写 localStorage / sessionStorage。
 //   · 非管理员永远不发 /api/admin/* 请求——不靠后端 403 兜底来「隐藏」页面。
 
-import { ApiError, api, apiPost, clear, h, mount, platformTag, safePath } from "./core.js";
+import { ApiError, api, apiPost, clear, h, mount, platformTag, requestTitle, safePath } from "./core.js";
 import { renderAssets } from "./assets.js";
+import { permissionRoutes } from "./permissions.js";
 import { requestRoutes } from "./requests.js";
 
 const state = { session: null, loginUrl: "", peopleFilter: "all", peopleQuery: "", peopleCache: null, flash: null };
@@ -139,12 +140,14 @@ function parseHash() {
     return { page: "request", key: decode(id), fresh: flag === "new=1", space: "user" };
   }
   if (path === "requests") return { page: "requests", filter: query || "open", space: "user" };
+  if (path === "permissions") return { page: "permissions", space: "user" };
   if (path === "apply") return { page: "apply", space: "user" };
   if (path.startsWith("apply=")) return { page: "apply", key: decode(path.slice(6)), space: "user" };
   return { page: "me", space: "user" };
 }
 
 const pages = requestRoutes({ load, errorView, route: () => route() });
+const permissionPages = permissionRoutes({ load, errorView });
 
 function route() {
   if (!state.session || !state.session.authenticated) return renderLogin();
@@ -191,6 +194,10 @@ function route() {
     markTab("admin-requests");
     return pages.renderDetail(key, { admin: true });
   }
+  if (page === "permissions") {
+    markTab("permissions");
+    return permissionPages.renderPermissions();
+  }
   if (page === "apply") {
     markTab("apply");
     return pages.renderApply(key);
@@ -204,7 +211,13 @@ function route() {
     return pages.renderDetail(key, { admin: false, fresh });
   }
   markTab("me");
-  return load(() => api("/api/me"), (detail) => mount(personPage(detail, { admin: false })));
+  return load(
+    async () => {
+      const [detail, reqs] = await Promise.all([api("/api/me"), api("/api/requests").catch(() => null)]);
+      return { ...detail, requests: reqs ? reqs.requests || [] : null };
+    },
+    (detail) => mount(personPage(detail, { admin: false })),
+  );
 }
 
 function renderLogin() {
@@ -293,7 +306,7 @@ function accountCard(acct) {
       { class: "acct-title" },
       h("div", { class: "chips" }, platformTag(acct.platform, acct.platform_display), h("span", { class: "muted" }, acct.account_label || acct.account || "")),
       h("span", { class: "acct-name" }, acct.name || ""),
-      acct.display_name ? h("span", { class: "acct-sub" }, acct.display_name) : null,
+      acct.display_name && acct.display_name !== acct.name ? h("span", { class: "acct-sub" }, acct.display_name) : null,
     ),
     highRisk.length ? h("span", { class: "pill crit" }, `高危 ${highRisk.length}`) : null,
     gone ? h("span", { class: "pill" }, "快照中不存在") : null,
@@ -416,12 +429,14 @@ function personPage(detail, { admin }) {
     ),
   );
 
+  if (!admin && detail.requests) nodes.push(reminders(detail.requests));
+
   if (accounts.length) {
     nodes.push(
       h(
         "section",
         { class: "group" },
-        h("div", { class: "group-label" }, "云账号"),
+        h("div", { class: "group-head" }, h("div", { class: "group-label" }, "云账号"), admin ? null : h("a", { class: "linkbtn push", href: "#permissions" }, "申请更多权限 →")),
         h("div", { class: "accounts" }, accounts.map(accountCard)),
       ),
     );
@@ -437,6 +452,35 @@ function personPage(detail, { admin }) {
     );
   }
   return nodes;
+}
+
+// 首页提醒：能领取的、等审批的、快到期的。没有就不显示。
+function reminders(requests) {
+  const soon = Date.now() + 7 * 86400 * 1000;
+  const items = [];
+  for (const r of requests) {
+    const link = `#request=${encodeURIComponent(r.id)}`;
+    if (r.actions && r.actions.credential) items.push(["good", "可领取", `${requestTitle(r)}：临时凭证已批准，可以领取`, link, "去领取"]);
+    else if (r.actions && r.actions.password) items.push(["good", "可领取", `${requestTitle(r)}：初始密码可以领取`, link, "去领取"]);
+    else if (r.status === "pending_approval") items.push(["accent", "待审批", `${requestTitle(r)}：等审批人在飞书里处理`, link, "查看"]);
+    else if (r.status === "failed") items.push(["crit", "开通失败", `${requestTitle(r)}：管理员会处理`, link, "查看"]);
+    else if (r.status === "done" && r.expires_at && new Date(r.expires_at).getTime() < soon) {
+      items.push(["warn", "快到期", `${requestTitle(r)}：${new Date(r.expires_at).toLocaleDateString("zh-CN")} 到期，需要继续用请续期`, r.template.id === "policy" ? "#permissions" : `#apply=${encodeURIComponent(r.template.id)}`, "续期"]);
+    }
+  }
+  if (!items.length) return null;
+  const order = { good: 0, crit: 1, warn: 2, accent: 3 };
+  items.sort((a, b) => order[a[0]] - order[b[0]]);
+  return h(
+    "section",
+    { class: "group" },
+    h("div", { class: "group-head" }, h("div", { class: "group-label" }, "需要留意"), h("a", { class: "linkbtn push", href: "#requests" }, "全部申请 →")),
+    h(
+      "div",
+      { class: "card list" },
+      items.slice(0, 6).map(([tone, label, text, href, cta]) => h("a", { class: "row", href }, h("div", { class: "row-main" }, h("div", { class: "row-title" }, h("span", { class: `pill ${tone}` }, label), h("span", {}, text))), h("div", { class: "row-side" }, h("span", { class: "linkbtn" }, `${cta} →`)))),
+    ),
+  );
 }
 
 const PENDING_STATUS = { review: "待人工确认", blocked: "受阻" };

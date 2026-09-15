@@ -16,6 +16,7 @@
   GET  /api/admin/people/<key>  管理员：某个人的权限详情。
   GET  /api/admin/review     管理员：名册审核的人工记录。
   /api/requests/*            员工：云账号申请（开账号、权限、访问凭证），见 requests_api.py。
+  GET  /api/policies         员工：权限列表（全部权限策略对本人的状态），见 policies.py。
   /api/admin/requests/*      管理员：全部申请、重试开通、关闭。
   POST /api/admin/review     管理员：确认 / 驳回 / 分配 / 标记服务号 / 撤销（见 review.py）。
   GET  /auth/login       跳飞书授权页（带 PKCE 与 state）。
@@ -44,6 +45,7 @@ from typing import Callable, Optional
 from . import assets as assets_mod
 from . import inventory
 from . import people as people_mod
+from . import policies as policies_mod
 from . import review as review_mod
 from . import tickets as tickets_mod
 from .approval import ApprovalConfig, FeishuApproval
@@ -317,6 +319,7 @@ _STATIC = {
     "/core.js": ("core.js", "text/javascript; charset=utf-8"),
     "/requests.js": ("requests.js", "text/javascript; charset=utf-8"),
     "/assets.js": ("assets.js", "text/javascript; charset=utf-8"),
+    "/permissions.js": ("permissions.js", "text/javascript; charset=utf-8"),
 }
 #: 页面只加载同源资源。前端不拼 innerHTML，这条 CSP 是第二道闸。
 _CSP = (
@@ -329,7 +332,8 @@ _ADMIN_REVIEW = "/api/admin/review"
 
 def _is_requests_path(path: str) -> bool:
     return any(
-        path == p or path.startswith(p + "/") for p in ("/api/requests", "/api/admin/requests")
+        path == p or path.startswith(p + "/")
+        for p in ("/api/requests", "/api/admin/requests", "/api/policies")
     )
 
 
@@ -362,8 +366,12 @@ class Backend:
         executor: Optional[Callable[[str, str], object]] = None,
         approval_transport=None,
         assets_path: Optional[str] = None,
+        policies_path: Optional[str] = None,
+        policy_rules_path: Optional[str] = None,
     ):
         self.assets_path = assets_path
+        self.policies_path = policies_path
+        self.policy_rules_path = policy_rules_path
         self.tickets_path = tickets_path
         self.templates_path = templates_path
         self.approval_path = approval_path
@@ -446,6 +454,42 @@ class Backend:
             "assets", self._stamp(self.assets_path), lambda: assets_mod.load(self.assets_path)
         )
 
+    def policies(self) -> Optional[dict]:
+        return self._cached(
+            "policies",
+            self._stamp(self.policies_path),
+            lambda: policies_mod.load(self.policies_path),
+        )
+
+    def policy_rules(self) -> policies_mod.Rules:
+        return self._cached(
+            "policy_rules",
+            self._stamp(self.policy_rules_path),
+            lambda: policies_mod.load_rules(self.policy_rules_path),
+        )
+
+    def current_policies(self, platform: str, account: str, name: str) -> Optional[dict]:
+        """权限快照里这个子账号当前有的策略 {策略名小写: (策略名, 来源)}。
+
+        直接授予和经用户组继承的都算；只在资源组 / 项目范围生效的（带 @）不算「已有」。
+        快照没有、这个云账号没采全、子账号不在快照里时返回 None（未知）。
+        """
+        snap = self.snapshot()
+        if snap is None or any(i.startswith(f"{platform}/{account}：") for i in snap.incomplete):
+            return None
+        user = snap.user(platform, account, name)
+        if user is None:
+            return None
+        out: dict = {}
+        for policy in user.policies:
+            if "@" not in policy:
+                out.setdefault(policy.lower(), (policy, "直接授予"))
+        for group in snap.groups_of(user):
+            for policy in group.policies:
+                if "@" not in policy:
+                    out.setdefault(policy.lower(), (policy, f"经用户组 {group.name}"))
+        return out
+
     def catalog(self):
         return self._cached(
             "catalog", self._stamp(self.templates_path), lambda: load_catalog(self.templates_path)
@@ -479,6 +523,9 @@ class Backend:
                 executor=self._executor,
                 add_manual_link=link,
                 current_groups=self.current_groups,
+                policy_snapshot=self.policies,
+                policy_rules=self.policy_rules,
+                current_policies=self.current_policies,
             )
         return self._flows
 
@@ -528,7 +575,10 @@ def make_handler(
 ):
     """proxy 不为空即代理登录模式：只认 oauth2-proxy 注入的请求头，飞书登录路由关闭。"""
     backend = backend or Backend(platforms={p.id: p.display for p in registry})
-    requests_api = RequestsApi(backend.flows)
+    requests_api = RequestsApi(
+        backend.flows,
+        account_label=lambda platform, account: backend.labels().account(platform, account),
+    )
 
     class Handler(http.server.BaseHTTPRequestHandler):
         server_version = "delivery-dev"
@@ -1018,6 +1068,8 @@ def serve(
     templates_path: Optional[str] = None,
     approval_path: Optional[str] = None,
     assets_path: Optional[str] = None,
+    policies_path: Optional[str] = None,
+    policy_rules_path: Optional[str] = None,
     auth: Optional[str] = None,
     echo=print,
 ) -> None:
@@ -1043,6 +1095,8 @@ def serve(
         templates_path=templates_path,
         approval_path=approval_path,
         assets_path=assets_path,
+        policies_path=policies_path,
+        policy_rules_path=policy_rules_path,
         feishu_token=_tenant_token_cache(app_id, app_secret) if app_id and app_secret else None,
     )
     handler = make_handler(

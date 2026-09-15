@@ -5,7 +5,7 @@
 //   · 不能申请的模板照样展示，但置灰并写明原因，而不是让人找不到。
 //   · 凭证和密码只在领取那一刻显示，离开页面就没了；页面上明确提示这一点。
 
-import { ApiError, PLATFORM_NAME, ago, api, apiPost, copyButton, fmtTime, h, mount, platformTag, safeHttps } from "./core.js";
+import { ApiError, PLATFORM_NAME, ago, api, apiPost, copyButton, fmtTime, h, mount, openDrawer, platformTag, requestTitle, safeHttps } from "./core.js";
 
 const KIND_ORDER = ["permission", "credential", "account"];
 const KIND_INFO = {
@@ -38,8 +38,23 @@ function riskPill(risk) {
   return h("span", { class: `pill ${tone}` }, label);
 }
 
+// 云账号显示名（「阿里云主账号」这类），从 /api/me 取一次缓存在内存里；取不到就显示账号 ID
+const ACCOUNT_LABELS = new Map();
+let labelsLoaded = null;
+function loadAccountLabels() {
+  labelsLoaded ||= api("/api/me")
+    .then((me) => {
+      for (const a of (me && me.accounts) || []) if (a.account_label) ACCOUNT_LABELS.set(`${a.platform}/${a.account}`, a.account_label);
+    })
+    .catch(() => {
+      labelsLoaded = null;
+    });
+  return labelsLoaded;
+}
+
 function accountLabel(tpl) {
-  return `${PLATFORM_NAME[tpl.platform] || tpl.platform} · ${tpl.account}`;
+  const label = tpl.account_label || ACCOUNT_LABELS.get(`${tpl.platform}/${tpl.account}`);
+  return `${PLATFORM_NAME[tpl.platform] || tpl.platform} · ${label || tpl.account}`;
 }
 
 function pageHead(title, lede, ...extra) {
@@ -257,7 +272,16 @@ export function requestRoutes(ctx) {
       renderList();
     }
     renderAll();
-    return [head, kindTabs, h("div", { class: "apply-panel" }, toolbar, summary), list];
+    const more = h(
+      "a",
+      { class: "card hint-card", href: "#permissions" },
+      h("div", {}, h("b", {}, "找不到需要的权限？"), h("span", { class: "muted" }, " 在「权限列表」里可以从云上全部权限策略中搜索、勾选申请。")),
+      h("span", { class: "hint-go" }, "打开权限列表 →"),
+    );
+    const syncMore = () => (more.hidden = filters.kind !== "permission");
+    kindTabs.addEventListener("click", () => setTimeout(syncMore, 0));
+    syncMore();
+    return [head, kindTabs, h("div", { class: "apply-panel" }, toolbar, summary), list, more];
   }
 
   function optionRow(o, myAccounts) {
@@ -303,21 +327,10 @@ export function requestRoutes(ctx) {
 
   // ── 申请表单（右侧抽屉）────────────────────────────────────────────────
   function openForm(o, myAccounts) {
-    document.querySelector("dialog.drawer")?.remove();
-    const dialog = h("dialog", { class: "drawer", "aria-labelledby": "drawer-title" });
-    const close = () => dialog.close();
-    dialog.addEventListener("close", () => {
-      dialog.remove();
+    history.replaceState(null, "", `#apply=${encodeURIComponent(o.id)}`);
+    openDrawer("drawer-title", (close) => applyForm(o, myAccounts, close), () => {
       if (location.hash.startsWith("#apply=")) history.replaceState(null, "", "#apply");
     });
-    // 点遮罩关闭
-    dialog.addEventListener("click", (e) => {
-      if (e.target === dialog) close();
-    });
-    history.replaceState(null, "", `#apply=${encodeURIComponent(o.id)}`);
-    dialog.append(applyForm(o, myAccounts, close));
-    document.body.append(dialog);
-    dialog.showModal();
   }
 
   function applyForm(o, myAccounts, close) {
@@ -472,7 +485,7 @@ export function requestRoutes(ctx) {
   // ── 我的申请 ────────────────────────────────────────────────────────────
   function renderMine(filter = "open") {
     return load(
-      () => api("/api/requests"),
+      async () => (await Promise.all([api("/api/requests"), loadAccountLabels()]))[0],
       (data) => mount(listPage(data.requests || [], { admin: false, filter })),
     );
   }
@@ -486,39 +499,53 @@ export function requestRoutes(ctx) {
 
   function listPage(requests, { admin, filter }) {
     const tabs = [
-      ["open", "进行中"],
-      ["closed", "已结束"],
-      ["all", "全部"],
+      ["open", "进行中", (r) => r.open],
+      ["attention", admin ? "需要处理" : "待我操作", (r) => (admin ? ["failed", "executing", "submitting"].includes(r.status) : Boolean(r.actions.credential || r.actions.password))],
+      ["closed", "已结束", (r) => !r.open],
+      ["all", "全部", () => true],
     ];
-    const pick = { open: (r) => r.open, closed: (r) => !r.open, all: () => true }[filter] || (() => true);
-    const shown = requests.filter(pick);
+    const pick = (tabs.find(([key]) => key === filter) || tabs[3])[2];
     const base = admin ? "#admin/requests" : "#requests";
     const head = admin
       ? pageHead("申请与开通", "全部员工的申请。开通失败的可以在这里重试；审批本身在飞书里处理。")
       : pageHead("我的申请", "", h("a", { class: "btn small push", href: "#apply" }, "新的申请"));
     const failed = admin ? requests.filter((r) => r.status === "failed").length : 0;
     const nodes = [head];
-    if (failed) nodes.push(h("div", { class: "banner crit" }, h("b", {}, `${failed} 张申请开通失败，`), "审批已通过但没开通成功，请查看原因后重试。"));
+    if (failed) nodes.push(h("div", { class: "banner crit" }, h("b", {}, `${failed} 张申请开通失败，`), "审批已通过但没开通成功，请在「需要处理」里查看原因后重试。"));
+    const search = h("input", { id: "req-search", class: "search", type: "search", placeholder: admin ? "搜索申请人、权限、单号" : "搜索权限、单号", "aria-label": "搜索申请", autocomplete: "off" });
     nodes.push(
       h(
         "div",
         { class: "toolbar" },
-        tabs.map(([key, label]) => h("a", { class: key === filter ? "filter active" : "filter", href: `${base}?${key}`, "aria-current": key === filter ? "page" : null }, `${label} ${requests.filter({ open: (r) => r.open, closed: (r) => !r.open, all: () => true }[key]).length}`)),
+        tabs.map(([key, label, fn]) => {
+          const n = requests.filter(fn).length;
+          if (key === "attention" && !n && filter !== key) return null;
+          return h("a", { class: `${key === filter ? "filter active" : "filter"}${key === "attention" && n ? (admin ? " alert" : " notice") : ""}`, href: `${base}?${key}`, "aria-current": key === filter ? "page" : null }, `${label} ${n}`);
+        }),
+        search,
       ),
     );
-    if (!shown.length) {
-      nodes.push(
-        h(
-          "div",
-          { class: "card empty" },
-          h("h2", {}, filter === "open" ? "没有进行中的申请" : "没有申请"),
-          admin ? null : h("p", {}, "需要云账号、权限或访问凭证时，从「申请」开始。"),
-          admin ? null : h("a", { class: "btn small", href: "#apply" }, "去申请"),
-        ),
-      );
-      return nodes;
+    const listSlot = h("div", { class: "list-slot" });
+    function renderRows() {
+      const q = search.value.trim().toLowerCase();
+      const shown = requests.filter(pick).filter((r) => !q || [r.id, requestTitle(r), r.summary, r.kind_label, r.status_label, r.applicant && r.applicant.name, r.applicant && r.applicant.email].join(" ").toLowerCase().includes(q));
+      if (!shown.length) {
+        listSlot.replaceChildren(
+          h(
+            "div",
+            { class: "card empty" },
+            h("h2", {}, q ? "没有符合条件的申请" : filter === "open" ? "没有进行中的申请" : "没有申请"),
+            admin || q ? null : h("p", {}, "需要云账号、权限或访问凭证时，从「申请」开始。"),
+            admin || q ? null : h("a", { class: "btn small", href: "#apply" }, "去申请"),
+          ),
+        );
+        return;
+      }
+      listSlot.replaceChildren(h("div", { class: "card list" }, shown.map((r) => requestRow(r, admin))));
     }
-    nodes.push(h("div", { class: "card list" }, shown.map((r) => requestRow(r, admin))));
+    search.addEventListener("input", renderRows);
+    renderRows();
+    nodes.push(listSlot);
     return nodes;
   }
 
@@ -528,7 +555,7 @@ export function requestRoutes(ctx) {
     return h(
       "a",
       { class: "row", href },
-      h("div", { class: "row-main" }, h("div", { class: "row-title" }, platformTag(r.template.platform), h("span", {}, r.template.title), h("span", { class: "muted" }, r.kind_label)), h("div", { class: "row-sub" }, admin ? `${r.applicant.name || r.applicant.email} · ` : "", r.summary)),
+      h("div", { class: "row-main" }, h("div", { class: "row-title" }, platformTag(r.template.platform), h("span", { class: "title-break" }, requestTitle(r)), h("span", { class: "muted" }, r.kind_label)), h("div", { class: "row-sub" }, admin ? `${r.applicant.name || r.applicant.email} · ` : "", r.summary)),
       h("div", { class: "row-side" }, statusPill(r), cta, h("span", { class: "muted", title: r.created_at }, ago(r.created_at))),
     );
   }
@@ -537,7 +564,7 @@ export function requestRoutes(ctx) {
   function renderDetail(id, { admin, fresh }) {
     const url = admin ? `/api/admin/requests/${encodeURIComponent(id)}` : `/api/requests/${encodeURIComponent(id)}`;
     return load(
-      () => api(url),
+      async () => (await Promise.all([api(url), loadAccountLabels()]))[0],
       (data) => mount(detailPage(data.request, { admin, fresh })),
     );
   }
@@ -561,7 +588,7 @@ export function requestRoutes(ctx) {
   function detailPage(r, { admin, fresh }) {
     const back = admin ? "#admin/requests" : "#requests";
     const nodes = [
-      h("header", { class: "masthead" }, h("div", { class: "masthead-row" }, h("a", { class: "btn ghost small", href: back }, "← 返回"), h("h1", {}, r.template.title), statusPill(r)), h("p", { class: "lede" }, `${r.kind_label} · ${accountLabel(r.template)} · 申请单 ${r.id}`)),
+      h("header", { class: "masthead" }, h("div", { class: "masthead-row" }, h("a", { class: "btn ghost small", href: back }, "← 返回"), h("h1", { class: "title-break" }, requestTitle(r)), statusPill(r)), h("p", { class: "lede" }, `${r.kind_label} · ${accountLabel(r.template)} · 申请单 ${r.id}`)),
     ];
     if (fresh && r.status === "pending_approval") nodes.push(h("div", { class: "banner good" }, h("b", {}, "已提交。"), " 飞书审批已经以你的名义发起，审批人会在飞书里收到通知。审批通过后这里会自动更新。"));
     if (r.status === "submit_failed") nodes.push(h("div", { class: "banner crit" }, h("b", {}, "没能发起飞书审批。"), " ", lastNote(r) || "请稍后重新提交，或联系管理员。"));
@@ -569,25 +596,27 @@ export function requestRoutes(ctx) {
     if (r.status === "rejected") nodes.push(h("div", { class: "banner warn" }, "审批没有通过。可以在飞书里查看审批意见，调整后重新申请。"));
     if (r.status === "done" && r.result) nodes.push(h("div", { class: "banner good" }, h("b", {}, "已开通。"), " ", r.result));
 
-    nodes.push(h("div", { class: "card card-pad" }, steps(r)));
-
     const actions = h("div", { class: "actions" });
     const secret = h("div", { class: "secret-slot" });
+    const link = feishuLink(r);
+    if (link) actions.append(link);
     if (r.actions.credential) actions.append(credentialAction(r, secret));
     if (r.actions.password) actions.append(passwordAction(r, secret));
     if (r.actions.withdraw) actions.append(simpleAction("撤回申请", `/api/requests/${encodeURIComponent(r.id)}/withdraw`, "撤回后飞书里的审批也会撤销。确定撤回？", admin, true));
     if (r.actions.retry) actions.append(simpleAction("重试开通", `/api/admin/requests/${encodeURIComponent(r.id)}/retry`, "会先重新核对飞书审批，通过后再开通。确定重试？", admin));
     if (r.actions.recover) actions.append(simpleAction("标记为失败", `/api/admin/requests/${encodeURIComponent(r.id)}/recover`, "这张单子长时间没有进展。标记为失败后可以核对云上状态再重试。确定？", admin, true));
     if (r.actions.close) actions.append(simpleAction("关闭申请", `/api/admin/requests/${encodeURIComponent(r.id)}/close`, "关闭后不能再开通或领取。确定关闭？", admin, true));
-    if (actions.childElementCount) nodes.push(actions);
+    const hint = nextStep(r, admin);
+    nodes.push(h("div", { class: "card status-card" }, steps(r), hint || actions.childElementCount ? h("div", { class: "status-foot" }, hint ? h("p", { class: "status-hint" }, hint) : null, actions.childElementCount ? actions : null) : null));
     nodes.push(secret);
 
     const facts = [
       ["申请内容", r.summary],
+      r.template.policies && r.template.policies.length ? ["授予的权限", policyList(r.template.policies)] : null,
       ["申请理由", r.reason],
       admin ? ["申请人", `${r.applicant.name || ""} ${r.applicant.email || ""}`.trim()] : null,
       r.valid_until ? ["领取截止", fmtTime(r.valid_until)] : null,
-      r.expires_at ? ["权限到期", `${fmtTime(r.expires_at)}（到期自动移出用户组）`] : null,
+      r.expires_at ? ["权限到期", `${fmtTime(r.expires_at)}（到期自动收回）`] : null,
       ["提交时间", fmtTime(r.created_at)],
       admin && r.approval && r.approval.instance_code ? ["飞书审批实例", r.approval.instance_code] : null,
     ].filter(Boolean);
@@ -601,6 +630,48 @@ export function requestRoutes(ctx) {
       ),
     );
     return nodes;
+  }
+
+  function feishuLink(r) {
+    // 飞书 AppLink 手机端和电脑端是两条路径：窄屏或移动端 UA 用手机链接
+    const mobile = window.matchMedia("(max-width: 640px)").matches || /Android|iPhone|iPad/i.test(navigator.userAgent);
+    const url = safeHttps(mobile ? r.approval_url_mobile || r.approval_url : r.approval_url);
+    return url ? h("a", { class: "btn ghost small", href: url, target: "_blank", rel: "noopener noreferrer" }, "在飞书中查看审批 ↗") : null;
+  }
+
+  // 状态卡片里的一句话：现在卡在哪、接下来会发生什么
+  function nextStep(r, admin) {
+    const who = admin ? "申请人" : "你";
+    switch (r.status) {
+      case "pending_approval":
+        return "等审批人在飞书里处理。通过后自动开通，这里会同步更新。";
+      case "approved":
+      case "executing":
+        return "审批已通过，正在开通。";
+      case "claimable":
+        return r.valid_until ? `已批准，${fmtTime(r.valid_until)} 前${who}可以随时领取临时凭证。` : "已批准，可以领取临时凭证。";
+      case "done":
+        if (r.actions.password) return `子账号已开通。${who}可以领取一次性初始密码，首次登录必须修改。`;
+        return r.expires_at ? `已开通，${fmtTime(r.expires_at)} 到期后自动收回。需要继续用请在到期前重新申请。` : "已开通。";
+      case "failed":
+        return admin ? "开通失败。核对原因后可以重试，或关闭这张申请。" : "";
+      case "withdrawn":
+        return "申请已撤回。";
+      case "expired":
+        return "领取期已过，需要的话请重新申请。";
+      case "revoked":
+        return "权限已到期收回。";
+      default:
+        return "";
+    }
+  }
+
+  function policyList(policies) {
+    return h(
+      "ul",
+      { class: "policy-facts" },
+      policies.map((p) => h("li", {}, h("code", {}, p.name), p.type === "Custom" ? h("span", { class: "pill" }, "自定义") : null, p.risk ? riskPill(p.risk) : null)),
+    );
   }
 
   function lastNote(r) {

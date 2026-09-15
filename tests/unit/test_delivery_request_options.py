@@ -79,6 +79,12 @@ class CategoryTests(unittest.TestCase):
         self.assertEqual(cat.get("oss-read").public()["category"], "存储")
         self.assertEqual(cat.get("dev-sts").public()["category"], "")
 
+    def test_policy_template_id_is_reserved(self):
+        data = _templates()
+        data["templates"][0]["id"] = "policy"
+        with self.assertRaises(catalog_mod.CatalogError):
+            catalog_mod.parse(data)
+
     def test_overlong_category_rejected(self):
         with self.assertRaises(catalog_mod.CatalogError):
             catalog_mod.parse(_templates(**{"oss-read": "很长" * 20}))

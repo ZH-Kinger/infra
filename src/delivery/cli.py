@@ -188,6 +188,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--tickets", default="identity/tickets.json", help="申请单存储（开账号、权限、访问凭证）"
     )
     srv.add_argument("--assets", default="identity/assets.json", help="云账号资产快照")
+    srv.add_argument(
+        "--policies",
+        default="identity/policies.json",
+        help="权限策略目录（delivery policies collect）",
+    )
+    srv.add_argument(
+        "--policy-rules",
+        default="identity/policy-rules.json",
+        help="权限策略申请规则（可选，不存在时用内置禁用清单）",
+    )
     srv.add_argument("--templates", default="identity/request-templates.json", help="申请模板目录")
     srv.add_argument(
         "--approval", default="identity/approval.json", help="飞书审批定义与表单控件配置"
@@ -1418,6 +1428,13 @@ def _request_paths(args) -> dict:
         out["assets_path"] = args.assets
     except DeliveryError as exc:
         print(f"  ⚠ 云账号资产已关闭：{str(exc).splitlines()[0]}")
+    try:
+        # 规则文件决定能授予什么：不在 identity/ 下同样关掉按策略申请，而不是回落到内置规则
+        for path in (args.policies, args.policy_rules):
+            _require_identity_dir(Path(path).resolve())
+        out.update(policies_path=args.policies, policy_rules_path=args.policy_rules)
+    except DeliveryError as exc:
+        print(f"  ⚠ 按策略申请权限已关闭：{str(exc).splitlines()[0]}")
     return out
 
 
@@ -1584,7 +1601,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return _cmd_inventory_collect(args)
         if args.command == "refresh":
             return _cmd_refresh(args)
-        if args.command in ("request", "creds", "requests", "approval", "assets"):
+        if args.command in ("request", "creds", "requests", "approval", "assets", "policies"):
             from . import cli_requests
 
             return cli_requests.dispatch(args)

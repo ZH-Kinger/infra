@@ -1,6 +1,7 @@
 """申请相关的 HTTP 接口。server.py 只做登录、角色、CSRF，然后把请求交给这里。
 
 员工接口                                   管理员接口
+  GET  /api/policies                        （权限列表：全部权限策略对本人的状态）
   GET  /api/requests/options                GET  /api/admin/requests?status=
   GET  /api/requests                        GET  /api/admin/requests/<id>
   POST /api/requests                        POST /api/admin/requests/<id>/retry
@@ -52,6 +53,7 @@ _EVENT_LABELS = {
     "expired": "已过期",
     "closed": "已关闭",
     "groups_checked": "核对原有用户组",
+    "policies_checked": "核对原有策略",
     "revoked": "到期回收",
     "revoke_failed": "到期回收失败",
 }
@@ -82,7 +84,8 @@ class Caller:
         )
 
 
-def ticket_view(ticket: dict, *, viewer: Caller) -> dict:
+def ticket_view(ticket: dict, *, viewer: Caller, links: Optional[dict] = None) -> dict:
+    """links：飞书审批实例的跳转链接 {"pc", "mobile"}，只给申请人本人和管理员。"""
     tpl = ticket.get("template") or {}
     own = ticket.get("applicant", {}).get("union_id") == viewer.union_id
 
@@ -124,6 +127,10 @@ def ticket_view(ticket: dict, *, viewer: Caller) -> dict:
             "platform": tpl.get("platform"),
             "account": tpl.get("account"),
             "groups": tpl.get("groups", []),
+            "policies": [
+                {"type": p.get("type"), "name": p.get("name"), "risk": p.get("risk", "low")}
+                for p in tpl.get("policies") or []
+            ],
             "risk": tpl.get("risk", "low"),
         },
         "applicant": {
@@ -152,6 +159,9 @@ def ticket_view(ticket: dict, *, viewer: Caller) -> dict:
             "recover": viewer.admin and status in (t.EXECUTING, t.SUBMITTING),
         },
     }
+    links = links if (own or viewer.admin) and links else {}
+    view["approval_url"] = links.get("pc", "")
+    view["approval_url_mobile"] = links.get("mobile", "")
     if viewer.admin:
         view["applicant"]["union_id"] = ticket.get("applicant", {}).get("union_id", "")
         view["approval"] = ticket.get("approval", {})
@@ -172,8 +182,14 @@ def _quiet_sync(flows: Flows, ticket_id: str) -> Optional[dict]:
 
 
 class RequestsApi:
-    def __init__(self, flows: Callable[[], Optional[Flows]]):
+    def __init__(
+        self,
+        flows: Callable[[], Optional[Flows]],
+        *,
+        account_label: Optional[Callable[[str, str], str]] = None,
+    ):
         self._flows = flows
+        self._account_label = account_label
 
     def handle(
         self, method: str, path: str, query: dict, body: Optional[dict], caller: Caller
@@ -195,7 +211,29 @@ class RequestsApi:
             first = next((ln for ln in str(exc).splitlines() if ln.strip()), "操作失败")
             return 502, {"error": first[:300]}
 
+    @staticmethod
+    def _view(flows: Flows, ticket: dict, caller: Caller) -> dict:
+        return ticket_view(ticket, viewer=caller, links=flows.approval_links(ticket))
+
+    def _policies(self, flows: Flows, method: str, caller: Caller) -> tuple:
+        if method != "GET":
+            return 405, {"error": "不支持的方法"}
+        data = flows.policy_options(caller.union_id)
+        for acc in data["accounts"]:
+            label = ""
+            if self._account_label is not None:
+                try:
+                    label = self._account_label(acc["platform"], acc["account"])
+                except Exception:  # noqa: BLE001 — 标签只是展示
+                    label = ""
+            acc["account_label"] = label or acc["account"]
+        return 200, data
+
     def _route(self, flows: Flows, method, path, query, body, caller: Caller) -> tuple:
+        if path.rstrip("/") == "/api/policies":
+            return self._policies(flows, method, replace(caller, admin=False))
+        if path.startswith("/api/policies"):
+            return 404, {"error": "没有这个接口"}
         parts = [p for p in path.split("/") if p]  # api, [admin], requests, ...
         admin = len(parts) > 1 and parts[1] == "admin"
         rest = parts[3:] if admin else parts[2:]
@@ -219,7 +257,7 @@ class RequestsApi:
                             _quiet_sync(flows, item["id"])
                     items = flows.store.mine(caller.union_id)
                 items = sorted(items, key=lambda x: x.get("created_at", ""), reverse=True)
-                return 200, {"requests": [ticket_view(x, viewer=caller) for x in items]}
+                return 200, {"requests": [self._view(flows, x, caller) for x in items]}
             if method == "POST" and not admin:
                 ticket = flows.submit(
                     applicant=caller.applicant,
@@ -228,7 +266,7 @@ class RequestsApi:
                     payload=body.get("payload") if isinstance(body.get("payload"), dict) else {},
                     reason=str(body.get("reason") or ""),
                 )
-                return 201, {"request": ticket_view(ticket, viewer=caller)}
+                return 201, {"request": self._view(flows, ticket, caller)}
             return 405, {"error": "不支持的方法"}
 
         if not admin and rest == ["options"] and method == "GET":
@@ -248,29 +286,29 @@ class RequestsApi:
         if not action and method == "GET":
             if ticket.get("status") in (t.PENDING, t.CLAIMABLE):
                 ticket = _quiet_sync(flows, ticket_id) or ticket
-            return 200, {"request": ticket_view(ticket, viewer=caller)}
+            return 200, {"request": self._view(flows, ticket, caller)}
         if method != "POST":
             return 405, {"error": "不支持的方法"}
 
         if admin and action == "retry":
             return 200, {
-                "request": ticket_view(
-                    flows.execute(ticket_id, actor=caller.union_id), viewer=caller
+                "request": self._view(
+                    flows, flows.execute(ticket_id, actor=caller.union_id), caller
                 )
             }
         if admin and action == "recover":
             flows.recover_stuck(ticket_id, actor=caller.union_id)
-            return 200, {"request": ticket_view(flows.store.get(ticket_id), viewer=caller)}
+            return 200, {"request": self._view(flows, flows.store.get(ticket_id), caller)}
         if admin and action == "close":
             note = str(body.get("note") or "")[:200]
             return 200, {
-                "request": ticket_view(
-                    flows.close(ticket_id, actor=caller.union_id, note=note), viewer=caller
+                "request": self._view(
+                    flows, flows.close(ticket_id, actor=caller.union_id, note=note), caller
                 )
             }
         if not admin and action == "withdraw":
             done = flows.withdraw(ticket_id, union_id=caller.union_id)
-            return 200, {"request": ticket_view(done, viewer=caller)}
+            return 200, {"request": self._view(flows, done, caller)}
         if not admin and action == "credential":
             hours = body.get("hours")
             ticket, cred = flows.claim_credential(
@@ -278,7 +316,7 @@ class RequestsApi:
             )
             tpl = ticket["template"]
             return 200, {
-                "request": ticket_view(ticket, viewer=caller),
+                "request": self._view(flows, ticket, caller),
                 "credential": {
                     "platform": tpl["platform"],
                     "account": tpl["account"],
@@ -296,7 +334,7 @@ class RequestsApi:
                 "volcano": f"https://console.volcengine.com/auth/login/user/{tpl['account']}",
             }.get(tpl["platform"], "")
             return 200, {
-                "request": ticket_view(ticket, viewer=caller),
+                "request": self._view(flows, ticket, caller),
                 "login": {
                     "username": ticket["payload"]["username"],
                     "password": password,

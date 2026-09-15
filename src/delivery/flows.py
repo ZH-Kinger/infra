@@ -17,8 +17,9 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from . import catalog as catalog_mod
+from . import policies as policies_mod
 from . import tickets as t
-from .approval import STATUS_APPROVED, STATUS_PENDING, Applicant, FeishuApproval
+from .approval import STATUS_APPROVED, STATUS_PENDING, Applicant, FeishuApproval, instance_links
 from .errors import DeliveryError
 from .provision import ProvisionError, describe_error
 
@@ -48,6 +49,10 @@ _EXEC_FIELDS = (
 )
 #: 领取凭证前核对：扮演哪个角色（时长另按当前模板上限截断）
 _CLAIM_FIELDS = ("kind", "platform", "account", "role_arn")
+#: 从权限策略目录里挑策略申请时的「模板」id：不在模板目录里，按策略目录和策略规则现场生成
+POLICY_TEMPLATE = "policy"
+_POLICY_TITLE = "权限策略"
+_RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 
 
 class FlowError(t.TicketError):
@@ -88,6 +93,15 @@ def _ts(iso: object) -> float:
         return 0.0
 
 
+def _policy_key(policy: dict) -> str:
+    return f"{policy['type']}:{policy['name']}"
+
+
+def _policy_keys(ticket: dict) -> list:
+    """申请单里要授予的策略（Type:Name）；模板权限单没有这一项。"""
+    return [_policy_key(p) for p in (ticket.get("template") or {}).get("policies") or []]
+
+
 def _same_grantee(other: dict, template: dict, user: str) -> bool:
     """other 是不是给同一个云账号下同一个子账号的权限申请。"""
     tpl = other.get("template") or {}
@@ -116,6 +130,9 @@ class Flows:
         executor: Callable[[str, str], object],
         add_manual_link: Optional[Callable[[str, str, str], None]] = None,
         current_groups: Optional[Callable[[str, str, str], Optional[set]]] = None,
+        policy_snapshot: Optional[Callable[[], Optional[dict]]] = None,
+        policy_rules: Optional[Callable[[], policies_mod.Rules]] = None,
+        current_policies: Optional[policies_mod.CurrentPolicies] = None,
         clock: Callable[[], float] = time.time,
     ):
         self.store = store
@@ -125,6 +142,9 @@ class Flows:
         self._executor = executor
         self._add_manual_link = add_manual_link
         self._current_groups = current_groups
+        self._policy_snapshot = policy_snapshot or (lambda: None)
+        self._policy_rules = policy_rules or policies_mod.Rules
+        self._current_policies = current_policies
         self._clock = clock
         self._last_sync: dict = {}
 
@@ -224,6 +244,109 @@ class Flows:
         have = {g.lower() for g in current}
         return all(g.lower() in have for g in tpl.groups)
 
+    def policy_options(self, union_id: str) -> dict:
+        """权限列表页：本人有子账号的每个云账号里，全部权限策略对本人的状态。
+
+        state: available 可申请 / owned 已有（快照里直接授予或经用户组继承）/
+               pending 在进行中的申请里 / unavailable 规则不开放（原因见 state_note）。
+        快照没有或没采全时「已有」未知，按可申请显示；真正开通前执行器会再查云上现状。
+        """
+        rules = self._policy_rules()
+        data = self._policy_snapshot()
+        tickets = self.store.mine(union_id) if union_id else []
+        now = self._clock()
+        seen, accounts = set(), []
+        for mine in self.my_accounts(union_id) if union_id else []:
+            key = (mine["platform"], mine["account"])
+            if key in seen:
+                continue  # 同一云账号有多个子账号：列表按第一个算
+            seen.add(key)
+            accounts.append(self._policy_account(mine, data, rules, tickets, now))
+        return {
+            "captured_at": str((data or {}).get("captured_at") or ""),
+            "max_per_request": rules.max_per_request,
+            "accounts": accounts,
+        }
+
+    def _policy_account(self, mine: dict, data, rules, tickets: list, now: float) -> dict:
+        platform, account, user = mine["platform"], mine["account"], mine["name"]
+        out = {
+            "platform": platform,
+            "account": account,
+            "cloud_user": user,
+            "error": "",
+            "total": 0,
+            "policies": [],
+        }
+        entry = policies_mod.account_entry(data, platform, account)
+        items = policies_mod.directory(data, platform, account)
+        if items is None:
+            out["error"] = "权限列表还没采集" if entry is None else "权限列表暂时不可用"
+            return out
+        try:
+            current = (
+                self._current_policies(platform, account, user) if self._current_policies else None
+            )
+        except Exception:  # noqa: BLE001 — 只是提示，快照读不了就当「未知」
+            current = None
+        pending, expires, granted = {}, {}, {}
+        for x in tickets:
+            tpl = x.get("template") or {}
+            if (
+                tpl.get("id") != POLICY_TEMPLATE
+                or (tpl.get("platform"), tpl.get("account")) != (platform, account)
+                or (x.get("payload") or {}).get("cloud_user") != user
+            ):
+                continue
+            for key in _policy_keys(x):
+                if x.get("status") in t.OPEN:
+                    pending[key] = x["id"]
+                elif x.get("status") == t.DONE and float(x.get("expires_at_ts") or 0) > now:
+                    expires[key] = str(x.get("expires_at") or "")
+                    granted[key] = x["id"]
+        rows = []
+        for p in items:
+            ptype, name = p["type"], p["name"]
+            key = f"{ptype}:{name}"
+            state, note, ref = "available", "", ""
+            denied = rules.denied(ptype, name)
+            have = (current or {}).get(name.lower())
+            if denied:
+                state, note = "unavailable", denied
+            elif key in pending:
+                state, note, ref = "pending", "已提交，还没处理完", pending[key]
+            elif have:
+                state, note = "owned", have[1]
+            elif key in granted:
+                # 刚通过申请开通、权限快照还没刷新：按申请单算已拥有
+                state, note, ref = "owned", "通过申请开通", granted[key]
+            rows.append(
+                {
+                    "type": ptype,
+                    "name": name,
+                    "description": p.get("description", ""),
+                    "service": p.get("service", ""),
+                    "risk": rules.risk_of(ptype, name),
+                    "max_days": rules.max_days_of(ptype, name),
+                    "state": state,
+                    "state_note": note,
+                    "request_id": ref,
+                    "expires_at": expires.get(key, "") if state == "owned" else "",
+                }
+            )
+        rows.sort(key=lambda r: (r["service"].lower(), r["name"].lower()))
+        out.update(total=len(rows), policies=rows)
+        return out
+
+    def approval_links(self, ticket: dict) -> dict:
+        """申请单对应飞书审批实例的跳转链接；审批没配置或实例编号缺失时为空串。"""
+        code = (ticket.get("approval") or {}).get("instance_code")
+        try:
+            approval = self._approval()
+        except Exception:  # noqa: BLE001 — 链接只是便利，审批配置读不了也不能让详情页打不开
+            approval = None
+        return instance_links(approval.config if approval else None, code)
+
     # ── 提交 ──────────────────────────────────────────────────────────────
     def submit(
         self, *, applicant: Applicant, email: str, template_id: str, payload: dict, reason: str
@@ -231,25 +354,31 @@ class Flows:
         approval = self._approval()
         if approval is None:
             raise FlowError("还没有配置飞书审批，暂时不能提交申请", 503)
-        tpl = self._catalog().get(str(template_id or ""))
-        if tpl is None:
-            raise FlowError("没有这个申请模板")
         reason = str(reason or "").strip()
+        if str(template_id or "") == POLICY_TEMPLATE:
+            snapshot, clean, summary = self._validate_policy(applicant, payload)
+        else:
+            tpl = self._catalog().get(str(template_id or ""))
+            if tpl is None:
+                raise FlowError("没有这个申请模板")
+            clean, summary = None, None
+            snapshot = _snapshot(tpl)
         if not _REASON_MIN <= len(reason) <= _REASON_MAX:
             raise FlowError(f"申请理由需要 {_REASON_MIN}–{_REASON_MAX} 个字")
-        clean, summary = self._validate(tpl, applicant, payload)
+        if clean is None:
+            clean, summary = self._validate(tpl, applicant, payload)
         for other in self.store.mine(applicant.union_id):
             if (
                 other.get("status") in t.OPEN
-                and other.get("template", {}).get("id") == tpl.id
+                and other.get("template", {}).get("id") == snapshot["id"]
                 and other.get("payload") == clean
             ):
                 raise FlowError(f"已有一张相同的申请 {other['id']} 还没结束", 409)
 
         ticket = self.store.create(
             {
-                "kind": tpl.kind,
-                "template": _snapshot(tpl),
+                "kind": snapshot["kind"],
+                "template": snapshot,
                 "applicant": _applicant_dict(applicant, email),
                 "payload": clean,
                 "reason": reason,
@@ -260,7 +389,7 @@ class Flows:
         try:
             code = approval.create(
                 ticket_id=ticket["id"],
-                kind_label=catalog_mod.KIND_LABELS[tpl.kind],
+                kind_label=catalog_mod.KIND_LABELS[snapshot["kind"]],
                 summary=summary,
                 reason=reason,
                 applicant=applicant,
@@ -283,6 +412,84 @@ class Flows:
             note="已发起飞书审批",
             fields={"approval": {"instance_code": code, "status": STATUS_PENDING}},
         )
+
+    def _validate_policy(self, applicant: Applicant, payload: object) -> tuple:
+        """从策略目录申请：返回 (模板快照, 规范化的 payload, 审批摘要)。
+
+        每条策略都必须在**当前**策略目录里、没被规则禁用；天数不超过所选策略里最短的上限。
+        """
+        payload = payload if isinstance(payload, dict) else {}
+        platform = str(payload.get("platform") or "")
+        account = str(payload.get("account") or "")
+        user = str(payload.get("cloud_user") or "")
+        mine = {
+            a["name"]
+            for a in self.my_accounts(applicant.union_id)
+            if (a["platform"], a["account"]) == (platform, account)
+        }
+        if not user or user not in mine:
+            raise FlowError("只能给名册里确认属于你自己的子账号申请权限")
+        rules = self._policy_rules()
+        items = policies_mod.directory(self._policy_snapshot(), platform, account)
+        if items is None:
+            raise FlowError("这个云账号的权限列表还没采集，暂时不能按策略申请", 409)
+        wanted = payload.get("policies")
+        if not isinstance(wanted, list) or not wanted:
+            raise FlowError("至少选择一条权限策略")
+        chosen = {}
+        for w in wanted:
+            if not isinstance(w, dict):
+                raise FlowError("权限策略格式不对")
+            ptype, name = str(w.get("type") or ""), str(w.get("name") or "")
+            if policies_mod.find(items, ptype, name) is None:
+                raise FlowError(f"权限列表里没有策略 {name[:80]}（{ptype}），请刷新后重选")
+            denied = rules.denied(ptype, name)
+            if denied:
+                raise FlowError(f"{name}：{denied}")
+            chosen[(ptype, name)] = {"type": ptype, "name": name}
+        if len(chosen) > rules.max_per_request:
+            raise FlowError(f"一次最多申请 {rules.max_per_request} 条策略")
+        limit = min(rules.max_days_of(p, n) for p, n in chosen)
+        days = payload.get("days")
+        if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= limit:
+            raise FlowError(f"授权天数必须在 1–{limit} 之间（按所选策略里风险最高的算）")
+        ordered = sorted(chosen.values(), key=lambda p: (p["type"], p["name"].lower()))
+        for other in self.store.mine(applicant.union_id):
+            o_tpl = other.get("template") or {}
+            if (
+                other.get("status") in t.OPEN
+                and o_tpl.get("id") == POLICY_TEMPLATE
+                and (o_tpl.get("platform"), o_tpl.get("account")) == (platform, account)
+                and (other.get("payload") or {}).get("cloud_user") == user
+            ):
+                overlap = set(_policy_keys(other)) & {_policy_key(p) for p in ordered}
+                if overlap:
+                    names = "、".join(sorted(k.split(":", 1)[1] for k in overlap))
+                    raise FlowError(f"{names} 已在申请 {other['id']} 中，等它结束后再申请", 409)
+        risky = [{**p, "risk": rules.risk_of(p["type"], p["name"])} for p in ordered]
+        highest = max((p["risk"] for p in risky), key=lambda r: _RISK_ORDER[r])
+        snapshot = {
+            "id": POLICY_TEMPLATE,
+            "kind": catalog_mod.KIND_PERMISSION,
+            "platform": platform,
+            "account": account,
+            "title": _POLICY_TITLE,
+            "groups": [],
+            "policies": risky,
+            "max_days": limit,
+            "risk": highest,
+        }
+        lines = "；".join(
+            f"{p['name']}（{policies_mod.TYPE_LABELS[p['type']]}，"
+            f"{policies_mod.RISK_LABELS[p['risk']]}）"
+            for p in risky
+        )
+        summary = (
+            f"云账号权限「{_POLICY_TITLE}」：给 {platform}/{account} 的子账号 {user} "
+            f"授予 {len(risky)} 条策略，{days} 天：{lines}"
+        )
+        clean = {"cloud_user": user, "days": days, "policies": ordered}
+        return snapshot, clean, summary
 
     def _validate(self, tpl: catalog_mod.Template, applicant: Applicant, payload: dict) -> tuple:
         payload = payload if isinstance(payload, dict) else {}
@@ -436,12 +643,49 @@ class Flows:
         只比 fields：标题、说明、风险标签这类展示字段改了不影响已批准的单子。
         """
         self._verify_approval(ticket)
+        if ticket["template"].get("id") == POLICY_TEMPLATE:
+            return self._verify_policy(ticket)
         tpl = self._catalog().get(ticket["template"]["id"])
         if tpl is None or _effective(_snapshot(tpl), fields) != _effective(
             ticket["template"], fields
         ):
             raise FlowError("申请模板在审批期间被修改或删除，请重新提交申请", 409)
         return tpl
+
+    def _verify_policy(self, ticket: dict) -> catalog_mod.Template:
+        """按策略申请的单子：审批期间策略从目录里没了、被规则禁用、上限天数被调低，都不能开通。
+
+        规则放宽不影响（审批人批的是提交时的内容，放宽不会多给）。
+        """
+        tpl = ticket["template"]
+        rules = self._policy_rules()
+        items = policies_mod.directory(self._policy_snapshot(), tpl["platform"], tpl["account"])
+        if items is None:
+            raise FlowError("这个云账号的权限列表不可用，暂时不能开通", 409)
+        user = ticket["payload"].get("cloud_user")
+        owned = {
+            a["name"]
+            for a in self.my_accounts(ticket["applicant"]["union_id"])
+            if (a["platform"], a["account"]) == (tpl["platform"], tpl["account"])
+        }
+        if user not in owned:
+            raise FlowError(f"子账号 {user} 在名册里已不属于申请人，不能开通", 409)
+        days = int(ticket["payload"].get("days") or 0)
+        for policy in tpl.get("policies") or []:
+            ptype, name = policy["type"], policy["name"]
+            if policies_mod.find(items, ptype, name) is None:
+                raise FlowError(f"策略 {name} 已不在权限列表里，请重新提交申请", 409)
+            if rules.denied(ptype, name):
+                raise FlowError(f"策略 {name} 在审批期间被设为不开放申请，不能开通", 409)
+            if days > rules.max_days_of(ptype, name):
+                raise FlowError(f"策略 {name} 的最长授权天数在审批期间被调低，请重新提交申请", 409)
+        return catalog_mod.Template(
+            id=POLICY_TEMPLATE,
+            kind=catalog_mod.KIND_PERMISSION,
+            platform=tpl["platform"],
+            account=tpl["account"],
+            title=_POLICY_TITLE,
+        )
 
     def execute(self, ticket_id: str, *, actor: str) -> dict:
         ticket = self.store.get(ticket_id)
@@ -622,22 +866,31 @@ class Flows:
         tpl = ticket["template"]
         user = ticket["payload"]["cloud_user"]
         keep = set(ticket.get("preexisting_groups") or [])
+        keep_policies = set(ticket.get("preexisting_policies") or [])
         # 移出前重新读一次：批量开始后才开通的续期单也要算进来，避免把刚续上的组移掉
         for other in self.store.all():
             if other.get("id") == ticket["id"] or not _same_grantee(other, tpl, user):
                 continue
             status = other.get("status")
-            active = status == t.EXECUTING or (
+            # 开通中的单子要等它记下开通前基线才算：没记基线就中断的单子，重试时会把本单还在的组 /
+            # 策略当成「原有」，这里再替它保留就会变成永久权限
+            recorded = "preexisting_groups" in other or "preexisting_policies" in other
+            active = (status == t.EXECUTING and recorded) or (
                 status == t.DONE
                 and (not other.get("expires_at_ts") or float(other["expires_at_ts"]) > now)
             )
             if active:
                 keep.update(other["template"].get("groups") or [])
-        remove = [g for g in tpl["groups"] if g not in keep]
+                keep_policies.update(_policy_keys(other))
+        remove = [g for g in tpl.get("groups") or [] if g not in keep]
+        detach = [k for k in _policy_keys(ticket) if k not in keep_policies]
         try:
             ex = self._executor(tpl["platform"], tpl["account"])
             for group in remove:
                 ex.remove_from_group(user, group)
+            for key in detach:
+                ptype, name = key.split(":", 1)
+                ex.detach_policy(user, ptype, name)
         except Exception as exc:  # noqa: BLE001 — 失败记事件，下次定时任务再试
             note = describe_error(exc) or type(exc).__name__
             last = (ticket.get("events") or [{}])[-1]
@@ -647,8 +900,20 @@ class Flows:
                     ticket["id"], actor="system", expect=[t.DONE], event="revoke_failed", note=note
                 )
             return f"{ticket['id']}：回收失败，下次重试"
-        kept = [g for g in tpl["groups"] if g in keep]
-        note = f"已移出 {'、'.join(remove) or '无'}" + (f"；保留 {'、'.join(kept)}" if kept else "")
+        parts = []
+        if tpl.get("groups"):
+            kept = [g for g in tpl["groups"] if g in keep]
+            parts.append(
+                f"已移出 {'、'.join(remove) or '无'}"
+                + (f"；保留 {'、'.join(kept)}" if kept else "")
+            )
+        if _policy_keys(ticket):
+            kept = [k.split(":", 1)[1] for k in _policy_keys(ticket) if k in keep_policies]
+            gone = [k.split(":", 1)[1] for k in detach]
+            parts.append(
+                f"已撤销 {'、'.join(gone) or '无'}" + (f"；保留 {'、'.join(kept)}" if kept else "")
+            )
+        note = "；".join(parts) or "无需回收"
         try:
             self.store.update(
                 ticket["id"],
@@ -667,20 +932,41 @@ class Flows:
         payload = ticket["payload"]
         if tpl.kind == catalog_mod.KIND_PERMISSION:
             user = payload["cloud_user"]
-            # 只在第一次开通时记：重试时组可能是上一次部分成功加进去的，不能算「原有」
-            if "preexisting_groups" not in ticket:
-                existing = self._preexisting(ex, tpl, ticket, user)
-                self.store.update(
-                    ticket["id"],
-                    actor="system",
-                    expect=[t.EXECUTING],
-                    event="groups_checked",
-                    note=f"开通前已在：{'、'.join(existing) or '无'}",
-                    fields={"preexisting_groups": existing},
-                )
-            for group in tpl.groups:
-                ex.add_to_group(user, group)
-            return f"已把 {user} 加入 {'、'.join(tpl.groups)}"
+            keys = _policy_keys(ticket)
+            done = []
+            if tpl.groups:
+                # 只在第一次开通时记：重试时组可能是上一次部分成功加进去的，不能算「原有」
+                if "preexisting_groups" not in ticket:
+                    existing = self._preexisting(ex, tpl, ticket, user)
+                    self.store.update(
+                        ticket["id"],
+                        actor="system",
+                        expect=[t.EXECUTING],
+                        event="groups_checked",
+                        note=f"开通前已在：{'、'.join(existing) or '无'}",
+                        fields={"preexisting_groups": existing},
+                    )
+                for group in tpl.groups:
+                    ex.add_to_group(user, group)
+                done.append(f"已把 {user} 加入 {'、'.join(tpl.groups)}")
+            if keys:
+                # 同上：只在第一次记「开通前已直接授予」的策略
+                if "preexisting_policies" not in ticket:
+                    existing = self._preexisting_policies(ex, tpl, ticket, user, keys)
+                    self.store.update(
+                        ticket["id"],
+                        actor="system",
+                        expect=[t.EXECUTING],
+                        event="policies_checked",
+                        note="开通前已授予："
+                        + ("、".join(k.split(":", 1)[1] for k in existing) or "无"),
+                        fields={"preexisting_policies": existing},
+                    )
+                for key in keys:
+                    ptype, name = key.split(":", 1)
+                    ex.attach_policy(user, ptype, name)
+                done.append(f"已给 {user} 授予 {'、'.join(k.split(':', 1)[1] for k in keys)}")
+            return "；".join(done)
         username = payload["username"]
         # 重试时不再建号：上一次已经建好（由这张单子建的），直接补后面的步骤
         if not ticket.get("user_created"):
@@ -723,6 +1009,30 @@ class Flows:
             granters = [x for x in others if group in (x["template"].get("groups") or [])]
             if all(group in (x.get("preexisting_groups") or []) for x in granters):
                 out.append(group)
+        return out
+
+    def _preexisting_policies(
+        self, ex, tpl: catalog_mod.Template, ticket: dict, user: str, keys: list
+    ) -> list:
+        """开通前子账号就已直接授予、到期不该撤销的策略。和 _preexisting 同一个道理：
+        别的申请单授予的（没回收、正在开通、开通失败、失败后关闭），不算原有。"""
+        snap = {"platform": tpl.platform, "account": tpl.account}
+        others = [
+            x
+            for x in self.store.all()
+            if x.get("id") != ticket["id"]
+            and _same_grantee(x, snap, user)
+            and x.get("status") in (t.DONE, t.EXECUTING, t.FAILED, t.CLOSED)
+            and "preexisting_policies" in x
+        ]
+        out = []
+        for key in keys:
+            ptype, name = key.split(":", 1)
+            if not ex.has_policy(user, ptype, name):
+                continue
+            granters = [x for x in others if key in _policy_keys(x)]
+            if all(key in (x.get("preexisting_policies") or []) for x in granters):
+                out.append(key)
         return out
 
     def _applicant_email(self, ticket: dict) -> str:

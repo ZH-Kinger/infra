@@ -1,0 +1,20 @@
+{
+  "schema": "wuji-policy-rules@1",
+  "deny": [
+    "*VPCFullAccess"
+  ],
+  "allow": [
+    "example-custom-readonly"
+  ],
+  "risk": {
+    "AliyunOSSFullAccess": "high",
+    "example-custom-readonly": "low"
+  },
+  "max_days": {
+    "low": 180,
+    "medium": 90,
+    "high": 14
+  },
+  "allow_custom": false,
+  "max_per_request": 10
+}

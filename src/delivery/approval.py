@@ -15,7 +15,13 @@
 
     {"approval_code": "<审批定义编号>",
      "widgets": {"ticket_id": "<控件ID>", "kind": "<控件ID>",
-                 "summary": "<控件ID>", "reason": "<控件ID>"}}
+                 "summary": "<控件ID>", "reason": "<控件ID>"},
+     "instance_url": "https://.../{instance_code}",          # 可选
+     "instance_url_mobile": "https://.../{instance_code}"}   # 可选
+
+申请单详情页「去飞书查看审批」用飞书 AppLink 打开审批实例（飞书客户端 7.3.0 起支持，
+官方文档「打开审批页面」）。默认用飞书审批应用的 PC 与移动端链接；Lark 国际版等情况可以在
+approval.json 里用 instance_url / instance_url_mobile 覆盖，`{instance_code}` 会换成审批实例编号。
 
 控件 ID 在飞书审批后台建好表单后，用 `delivery approval widgets` 查（调查询审批定义接口）。
 """
@@ -24,6 +30,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -43,6 +50,18 @@ STATUS_DELETED = "DELETED"
 STATUS_REVERTED = "REVERTED"
 FINAL_NEGATIVE = (STATUS_REJECTED, STATUS_CANCELED, STATUS_DELETED)
 WIDGET_KEYS = ("ticket_id", "kind", "summary", "reason")
+#: 飞书 AppLink：打开审批实例详情（PC 端 / 移动端）。path 参数是 URL 编码过的小程序页面路径
+DEFAULT_INSTANCE_URL = (
+    "https://applink.feishu.cn/client/mini_program/open?appId=cli_9cb844403dbb9108"
+    "&mode=appCenter&path=pc%2Fpages%2Fin-process%2Findex%3FinstanceId%3D{instance_code}"
+)
+DEFAULT_INSTANCE_URL_MOBILE = (
+    "https://applink.feishu.cn/client/mini_program/open?appId=cli_9cb844403dbb9108"
+    "&path=pages%2Fdetail%2Findex%3FinstanceId%3D{instance_code}"
+)
+#: 审批实例编号只接受这几类字符：编号在链接里处于已编码的 path 参数中，
+#: 限定字符集就不存在要不要二次编码的问题
+_INSTANCE_CODE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _TIMEOUT = 15
 _MAX_BODY = 1024 * 1024
 
@@ -58,6 +77,8 @@ class ApprovalError(DeliveryError):
 class ApprovalConfig:
     approval_code: str
     widgets: Mapping
+    instance_url: str = ""
+    instance_url_mobile: str = ""
 
     @classmethod
     def load(cls, path: Optional[str]) -> Optional[ApprovalConfig]:
@@ -77,7 +98,40 @@ class ApprovalConfig:
             not isinstance(widgets.get(k), str) or not widgets[k] for k in WIDGET_KEYS
         ):
             raise ApprovalError(f"审批配置的 widgets 必须包含 {', '.join(WIDGET_KEYS)}")
-        return cls(approval_code=code.strip(), widgets=dict(widgets))
+        urls = {}
+        for key in ("instance_url", "instance_url_mobile"):
+            url = data.get(key, "")
+            if url and not valid_instance_url(url):
+                raise ApprovalError(f"审批配置的 {key} 必须是 https 地址，且包含 {{instance_code}}")
+            urls[key] = url or ""
+        return cls(approval_code=code.strip(), widgets=dict(widgets), **urls)
+
+
+def valid_instance_url(template: object) -> bool:
+    if not isinstance(template, str) or "{instance_code}" not in template:
+        return False
+    parsed = urllib.parse.urlsplit(template.replace("{instance_code}", "x"))
+    return (
+        parsed.scheme == "https"
+        and bool(parsed.netloc)
+        and not any(c in template for c in ('"', "'", "<", ">", " ", "\\"))
+    )
+
+
+def instance_links(config: Optional[ApprovalConfig], instance_code: object) -> dict:
+    """跳到飞书审批实例的链接 {"pc": ..., "mobile": ...}；编号为空或不合规时为空串。"""
+    code = str(instance_code or "")
+    out = {"pc": "", "mobile": ""}
+    if not _INSTANCE_CODE.match(code):
+        return out
+    pairs = (
+        ("pc", (config.instance_url if config else "") or DEFAULT_INSTANCE_URL),
+        ("mobile", (config.instance_url_mobile if config else "") or DEFAULT_INSTANCE_URL_MOBILE),
+    )
+    for key, template in pairs:
+        if valid_instance_url(template):
+            out[key] = template.replace("{instance_code}", code)
+    return out
 
 
 @dataclass(frozen=True)

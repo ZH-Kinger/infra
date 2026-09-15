@@ -140,6 +140,8 @@ def parse_template(spec: object, index: int) -> Template:
     where = f"模板 {tid}"
     if not _ID.match(tid):
         raise CatalogError(f"{where}：id 只能含小写字母、数字和横线")
+    if tid == "policy":
+        raise CatalogError(f"{where}：id「policy」保留给权限列表申请，请换一个")
     kind = _str(spec, "kind", where)
     if kind not in KINDS:
         raise CatalogError(f"{where}：kind 只能是 {' / '.join(KINDS)}")

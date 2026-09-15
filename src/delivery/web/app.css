@@ -62,7 +62,7 @@ button{font:inherit; color:inherit}
               display:flex; align-items:center; gap:1.25rem; flex-wrap:wrap}
 .brand{font-weight:600; letter-spacing:-.01em}
 .tabs{display:flex; gap:.25rem}
-.tab{padding:.3rem .8rem; border-radius:980px; color:var(--ink-2); font-size:.875rem}
+.tab{padding:.3rem .8rem; border-radius:980px; color:var(--ink-2); font-size:.875rem; white-space:nowrap}
 .tab:hover{text-decoration:none; color:var(--ink)}
 .tab.active{background:var(--surface); color:var(--ink); box-shadow:var(--shadow);
             border:1px solid var(--hair)}
@@ -111,7 +111,7 @@ h2{font-size:.9375rem; font-weight:600; margin:0}
 .banner.info{background:var(--accent-soft); color:var(--ink)}
 
 /* 统计卡 */
-.stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(9rem,1fr)); gap:.75rem}
+.stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(7.5rem,1fr)); gap:.75rem}
 .stat{background:var(--surface); border:1px solid var(--hair); border-radius:14px;
       box-shadow:var(--shadow); padding:.7rem 1rem; display:flex; flex-direction:column; gap:.15rem}
 .stat .n{font-size:1.5rem; font-weight:600; letter-spacing:-.02em; font-variant-numeric:tabular-nums}
@@ -253,6 +253,7 @@ dialog.drawer::backdrop{background:rgba(0,0,0,.28)}
           color:var(--ink-2); cursor:pointer; font-size:.8125rem}
 .icon-btn:hover{color:var(--ink)}
 .drawer-body{flex:1; overflow-y:auto; padding:1rem 1.5rem 1.25rem; display:flex; flex-direction:column; gap:1rem}
+.drawer-body > *{flex-shrink:0}
 .drawer-desc{margin:0; font-size:.875rem}
 .drawer-meta{font-size:.75rem; color:var(--ink-3); padding:.6rem .8rem; border-radius:10px; background:var(--surface-2);
              overflow-wrap:anywhere}
@@ -267,6 +268,53 @@ dialog.drawer::backdrop{background:rgba(0,0,0,.28)}
 .inline .input{width:7rem}
 .presets{display:flex; gap:.35rem; flex-wrap:wrap}
 select.input,input.input{height:2.625rem}
+
+/* 权限列表 */
+.search-row{display:flex; gap:.5rem; align-items:center}
+.search-row .search-input{flex:1; min-width:0}
+.input.compact{width:auto; max-width:15rem; height:2.75rem; border-radius:12px}
+.chip-rows{display:flex; gap:.5rem 1.5rem; flex-wrap:wrap}
+.perm{display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:.3rem 1rem; align-items:center;
+      padding:.8rem 1.25rem; border-top:1px solid var(--hair); cursor:default; color:var(--ink)}
+.perm:first-child{border-top:0}
+label.perm{cursor:pointer}
+label.perm:hover{background:var(--surface-2)}
+.perm.picked{background:var(--accent-soft)}
+.perm.off .perm-name, .perm.off .opt-desc{color:var(--ink-3)}
+.perm-check{display:flex; align-items:center}
+.check{width:1.05rem; height:1.05rem; margin:0; accent-color:var(--accent); cursor:pointer}
+.perm-glyph{display:inline-flex; align-items:center; justify-content:center; width:1.05rem; height:1.05rem;
+  border-radius:50%; font-size:.6875rem; font-weight:700; background:var(--surface-2); color:var(--ink-3)}
+.perm-glyph.owned{background:var(--good-soft); color:var(--good)}
+.perm-glyph.pending{background:var(--accent-soft); color:var(--accent)}
+.perm-side-row{display:flex; gap:.5rem; align-items:center}
+.perm-name{font-family:var(--mono); font-size:.8125rem; font-weight:600; overflow-wrap:anywhere}
+.perm-side{display:flex; flex-direction:column; align-items:flex-end; gap:.3rem; text-align:right}
+.perm-side .opt-note{max-width:15rem}
+.btn.more{align-self:center; margin-top:.75rem}
+.apply-list > .btn.more{display:flex; margin-inline:auto}
+.select-bar{position:sticky; bottom:1rem; z-index:5}
+.select-bar-inner{display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap;
+  padding:.7rem .8rem .7rem 1.25rem; border-radius:980px; background:var(--ink); color:var(--surface);
+  box-shadow:0 8px 30px rgba(0,0,0,.18)}
+.select-count{display:flex; gap:.6rem; align-items:baseline; min-width:0}
+.select-count .muted{color:color-mix(in srgb,var(--surface) 65%,transparent); font-size:.8125rem;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:28rem}
+.select-actions{display:flex; gap:.5rem}
+.select-bar .btn.ghost{background:transparent; color:var(--surface); border-color:color-mix(in srgb,var(--surface) 35%,transparent)}
+.picked-list{list-style:none; margin:0; padding:0; border:1px solid var(--hair); border-radius:10px; overflow:hidden}
+.picked-list li{display:flex; justify-content:space-between; align-items:center; gap:.75rem; padding:.6rem .8rem;
+  border-top:1px solid var(--hair)}
+.picked-list li:first-child{border-top:0}
+.small{font-size:.75rem}
+.title-break{overflow-wrap:anywhere; min-width:0}
+.renew-tag{margin-left:.4rem; font-family:var(--ui); vertical-align:.1rem}
+.policy-facts{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:.35rem}
+.policy-facts li{display:flex; gap:.5rem; align-items:center; flex-wrap:wrap}
+.hint-card{display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap;
+  padding:.9rem 1.25rem; color:var(--ink); box-shadow:none; background:transparent; border-style:dashed}
+.hint-card:hover{text-decoration:none; border-color:var(--accent); background:var(--surface)}
+.hint-go{color:var(--accent); font-size:.875rem; font-weight:500; white-space:nowrap}
 
 /* 申请：表单 */
 .form{display:flex; flex-direction:column}
@@ -296,6 +344,9 @@ textarea.input{resize:vertical; min-height:6rem; line-height:1.5}
 .row-sub{font-size:.8125rem; color:var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 .row-side{display:flex; gap:.5rem; align-items:center; flex:none}
 a.filter{text-decoration:none}
+.filter.alert:not(.active){border-color:color-mix(in srgb,var(--crit) 45%,var(--hair)); color:var(--crit)}
+.filter.notice:not(.active){border-color:color-mix(in srgb,var(--accent) 45%,var(--hair)); color:var(--accent)}
+.secret-slot:empty{display:none}
 
 /* 申请详情：进度 */
 .steps{list-style:none; margin:0; padding:0; display:flex; gap:0; counter-reset:step}
@@ -313,6 +364,12 @@ a.filter{text-decoration:none}
 .step.stopped{color:var(--crit)}
 .step.stopped .dot{background:var(--crit); border-color:var(--crit)}
 .actions{display:flex; gap:.5rem; flex-wrap:wrap}
+.status-card{display:flex; flex-direction:column}
+.status-card .steps{padding:1.1rem 1.25rem .9rem}
+.status-foot{display:flex; justify-content:space-between; align-items:center; gap:.75rem 1rem; flex-wrap:wrap;
+  padding:.8rem 1.25rem; border-top:1px solid var(--hair); background:var(--surface-2)}
+.status-hint{margin:0; font-size:.875rem; color:var(--ink-2)}
+.status-foot .actions{margin-left:auto}
 
 dl.facts{margin:0; display:grid; grid-template-columns:8rem 1fr}
 dl.facts dt{padding:.7rem 1.25rem; font-size:.8125rem; color:var(--ink-2); border-top:1px solid var(--hair)}
@@ -378,6 +435,12 @@ dl.kv dd{margin:0; display:flex; gap:.5rem; align-items:center; min-width:0}
   dl.facts dd{padding:0 1.25rem .7rem; border-top:0}
   .form-foot{flex-direction:column; align-items:stretch}
   .opt{grid-template-columns:1fr}
+  .perm{grid-template-columns:auto minmax(0,1fr); padding-inline:1rem}
+  .perm-side{grid-column:2; align-items:flex-start; text-align:left}
+  .search-row{flex-direction:column; align-items:stretch}
+  .input.compact{max-width:none; width:100%}
+  .select-bar-inner{border-radius:14px}
+  .select-count .muted{display:none}
   .opt-side{grid-template-columns:auto 5.5rem; justify-content:start; justify-items:start}
   .opt-note{text-align:left; max-width:none}
   .segmented{grid-template-columns:1fr}
@@ -387,6 +450,8 @@ dl.kv dd{margin:0; display:flex; gap:.5rem; align-items:center; min-width:0}
   .drawer-actions .btn{flex:1}
   .topbar-inner{padding:.55rem 1rem; gap:.6rem}
   .who{margin-left:0; width:100%}
+  .tabs{width:100%; overflow-x:auto; scrollbar-width:none; padding-block:.15rem}
+  .tabs::-webkit-scrollbar{display:none}
   .wrap{padding:1.25rem 1rem 4rem}
   .accounts{grid-template-columns:1fr}
   .search{margin-left:0; width:100%; min-width:0}

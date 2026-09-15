@@ -130,3 +130,31 @@ export function copyButton(getText, label = "复制") {
   });
   return btn;
 }
+
+// 右侧抽屉：build(close) 返回抽屉内容。关闭（✕、取消、Esc、点遮罩）后从 DOM 移除，
+// 并执行 onClose（比如把地址栏的 #apply=… 还原）。
+export function openDrawer(labelledBy, build, onClose) {
+  for (const d of document.querySelectorAll("dialog.drawer")) d.remove();
+  const dialog = h("dialog", { class: "drawer", "aria-labelledby": labelledBy });
+  const close = () => dialog.close();
+  dialog.addEventListener("close", () => {
+    dialog.remove();
+    if (onClose) onClose();
+  });
+  dialog.addEventListener("click", (e) => {
+    if (e.target === dialog) close();
+  });
+  dialog.append(build(close));
+  document.body.append(dialog);
+  dialog.showModal();
+  return close;
+}
+
+// 申请单的显示标题：按权限列表申请的单子用策略名（「AliyunOSSReadOnlyAccess 等 3 项」），其余用模板标题
+export function requestTitle(r) {
+  const policies = (r.template && r.template.policies) || [];
+  if (r.template && r.template.id === "policy" && policies.length) {
+    return policies.length > 1 ? `${policies[0].name} 等 ${policies.length} 项` : policies[0].name;
+  }
+  return (r.template && r.template.title) || r.kind_label || r.id;
+}
