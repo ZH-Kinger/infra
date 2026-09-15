@@ -6,7 +6,7 @@
 //   · 非管理员永远不发 /api/admin/* 请求——不靠后端 403 兜底来「隐藏」页面。
 
 const app = document.getElementById("app");
-const state = { session: null, peopleFilter: "all", peopleQuery: "", peopleCache: null };
+const state = { session: null, loginUrl: "", peopleFilter: "all", peopleQuery: "", peopleCache: null };
 
 const PLATFORM_CLASS = { aliyun: "aliyun", volcano: "volcano" };
 const FOLD_LIMIT = 8;
@@ -191,14 +191,17 @@ function route() {
 
 function renderLogin() {
   renderTopbar();
-  const url = safePath(state.session && state.session.login_url, "/auth/login");
+  // 会话过期时拿不到新的 login_url：回首页重新走一遍（飞书模式显示登录页，代理模式由代理跳 IAM）
+  const url = safePath(state.loginUrl, "/");
+  const known = url !== "/";
+  const viaIam = url.startsWith("/oauth2/");
   mount(
     h(
       "div",
       { class: "card login" },
       h("h1", {}, "云权限面板"),
-      h("p", {}, "查看你在阿里云、火山引擎上的账号和权限。用飞书账号登录。"),
-      h("a", { class: "btn", href: url }, "用飞书登录"),
+      h("p", {}, `查看你在阿里云、火山引擎上的账号和权限。${!known ? "" : viaIam ? "用公司 IAM 登录。" : "用飞书账号登录。"}`),
+      h("a", { class: "btn", href: url }, !known ? "重新登录" : viaIam ? "用公司 IAM 登录" : "用飞书登录"),
     ),
   );
 }
@@ -680,6 +683,7 @@ function unlinkedSection(items) {
 async function boot() {
   try {
     state.session = await api("/api/session");
+    state.loginUrl = state.session.login_url || state.loginUrl;
   } catch (err) {
     const view = errorView(err instanceof ApiError ? err : new ApiError(0, String(err)), boot);
     if (view) mount(view);

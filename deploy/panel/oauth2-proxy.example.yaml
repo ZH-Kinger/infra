@@ -1,0 +1,69 @@
+# 云权限面板前面的 oauth2-proxy（公司 IAM 登录）。alpha 配置，按 v7.15.0 验证过。
+#
+# 部署形态：HTTPS 终止在 nginx / SLB，转发到本机 127.0.0.1:4180 的 oauth2-proxy，
+# 再转发到本机 127.0.0.1:8765 的面板。代理和面板端口都不对外。
+#
+# 启动：
+#   oauth2-proxy --alpha-config=oauth2-proxy.yaml \
+#     --cookie-secret-file=<32 字节随机串文件> \
+#     --cookie-secure=true --cookie-samesite=lax --cookie-expire=8h \
+#     --reverse-proxy=true \
+#     --email-domain='*' --redirect-url=https://<面板域名>/oauth2/callback \
+#     --whitelist-domain=<IAM 域名> \
+#     --skip-provider-button=true --api-route='^/api/'
+# 环境变量：
+#   PANEL_PROXY_SECRET   和面板 DELIVERY_PROXY_SECRET 同一个值
+#
+# 各参数为什么这样配：
+#   cookie-secure=true   只在 HTTPS 下发会话 cookie。本地 http 调试才改 false，线上不要改
+#   cookie-expire=8h     会话最长 8 小时。IAM 里停用某人后，他已有的会话最多再用 8 小时
+#   reverse-proxy=true   前面有 nginx / SLB 时才加，否则客户端能伪造 X-Forwarded-*
+#   email-domain='*'     emailClaim 指向 feishu_union_id，不是邮箱，所以不按域名过滤。
+#                        能不能登录完全取决于 IAM 应用的访问策略：IT 没绑定策略时，
+#                        所有 IAM 账号（含服务账号、外部账号）都能登录，见 README
+#   skip-provider-button 未登录直接跳 IAM，不显示代理自己的登录页
+#   api-route            /api/ 未登录回 401，前端能识别；不加会回 HTML 登录页
+
+upstreamConfig:
+  upstreams:
+    - id: panel
+      path: /
+      uri: http://127.0.0.1:8765
+
+injectRequestHeaders:
+  # 代理会覆盖客户端自带的同名请求头，浏览器伪造无效
+  - name: X-Panel-Proxy-Secret
+    values:
+      - secretSource:
+          fromEnv: PANEL_PROXY_SECRET
+  - name: X-Panel-Union-Id
+    values:
+      - claimSource:
+          claim: feishu_union_id
+  - name: X-Panel-Name
+    values:
+      - claimSource:
+          claim: name
+  # 面板只在名册里还没有这个 union_id 时，用它查 IAM userinfo 拿邮箱做首次关联。
+  # 全员 union_id 回填完后删掉这一段，面板就不再收到 access token
+  - name: X-Panel-Access-Token
+    values:
+      - claimSource:
+          claim: access_token
+
+server:
+  bindAddress: 127.0.0.1:4180
+
+providers:
+  - id: wuji-iam
+    provider: oidc
+    clientID: cloud-panel
+    clientSecretFile: /run/secrets/iam_client_secret
+    scope: "openid profile email wuji"
+    code_challenge_method: S256
+    oidcConfig:
+      issuerURL: https://<IAM 域名>/application/o/cloud-panel/
+      # 会话主键用 union_id：没有邮箱的员工也能登录，IAM 没给 union_id 的直接拒绝
+      emailClaim: feishu_union_id
+      audienceClaims: [aud]
+    additionalClaims: [feishu_union_id, name]

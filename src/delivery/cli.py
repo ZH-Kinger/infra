@@ -153,7 +153,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="企业邮箱未验证、但用户名可由它推出时也直接确认（默认需人工确认）",
     )
 
-    srv = commands.add_parser("serve", help="本地开发服务器：看板 + 飞书登录")
+    srv = commands.add_parser("serve", help="本地开发服务器：看板 + 飞书登录或公司 IAM 登录")
+    srv.add_argument(
+        "--auth",
+        choices=("feishu", "proxy"),
+        default=None,
+        help="登录方式：feishu 飞书应用（默认）；proxy 挂在 oauth2-proxy 后面走公司 IAM。"
+        "默认取 DELIVERY_AUTH",
+    )
     srv.add_argument("--port", type=int, default=8765, help="监听端口，默认 8765")
     srv.add_argument(
         "--host",
@@ -1272,6 +1279,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 people_path=args.people,
                 admins_path=args.admins,
                 labels_path=args.labels,
+                auth=args.auth,
             )
             return 0
         if args.command == "inventory":

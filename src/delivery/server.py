@@ -15,6 +15,7 @@
   GET  /api/admin/people     管理员：人员列表，?filter=all|multi|high_risk|unbound|no_account
   GET  /api/admin/people/<key>  管理员：某个人的权限详情。
   GET  /auth/login       跳飞书授权页（带 PKCE 与 state）。
+                         代理登录模式下 /auth/* 全部 404，登录退出走 oauth2-proxy 的 /oauth2/*。
   GET  /auth/callback    接飞书回调，换 token，建会话。
   POST /auth/exchange    **给 CLI 用**：CLI 自己拿到 code，交到这里换会话令牌。
                          app_secret 只在这一侧，CLI 不持有。
@@ -42,6 +43,14 @@ from .errors import DeliveryError
 from .feishu import FeishuError, FeishuUser, exchange_code, fetch_user
 from .login import _pkce_pair, authorize_url
 from .people import BIND_NONE, BIND_UNION_ID
+from .proxy_auth import (
+    AUTH_FEISHU,
+    AUTH_MODES,
+    AUTH_PROXY,
+    ENV_AUTH,
+    ProxyAuthConfig,
+    ProxyIdentity,
+)
 from .registry import PlatformRegistry
 from .roles import ROLE_ADMIN, Admins, load_admins
 from .views import FILTERS, Labels, admin_overview, admin_people, person_detail
@@ -410,7 +419,9 @@ def make_handler(
     app_secret: str,
     base_url: str,
     backend: Optional[Backend] = None,
+    proxy: Optional[ProxyIdentity] = None,
 ):
+    """proxy 不为空即代理登录模式：只认 oauth2-proxy 注入的请求头，飞书登录路由关闭。"""
     backend = backend or Backend(platforms={p.id: p.display for p in registry})
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -436,6 +447,9 @@ def make_handler(
             )
 
         def _session(self) -> Optional[_WebSession]:
+            if proxy is not None:
+                user = proxy.user(self.headers)
+                return _WebSession(user=user) if user is not None else None
             raw = self.headers.get("Cookie")
             if not raw:
                 return None
@@ -475,6 +489,8 @@ def make_handler(
                     return self._json(
                         500, {"error": safe or "面板数据暂不可用，请联系管理员查看服务端日志"}
                     )
+            if proxy is not None and path.startswith("/auth/"):
+                return self._send(404, _page("404", "<h1>没有这个页面</h1>"))
             if path == "/auth/login":
                 return self._start_login()
             if path == "/auth/callback":
@@ -528,7 +544,8 @@ def make_handler(
             if path == "/api/session":
                 session = self._session()
                 if session is None:
-                    return self._json(200, {"authenticated": False, "login_url": "/auth/login"})
+                    login_url = proxy.login_url if proxy is not None else "/auth/login"
+                    return self._json(200, {"authenticated": False, "login_url": login_url})
                 user = session.user
                 return self._json(
                     200,
@@ -538,7 +555,8 @@ def make_handler(
                         "union_id": user.union_id,
                         "email": user.enterprise_email or user.email,
                         "role": backend.role(user),
-                        "logout_url": "/auth/logout",
+                        "login_url": proxy.login_url if proxy is not None else "/auth/login",
+                        "logout_url": proxy.logout_url if proxy is not None else "/auth/logout",
                     },
                 )
             if path == "/api/me":
@@ -549,6 +567,20 @@ def make_handler(
                 found = backend.people().resolve(
                     union_id=user.union_id, enterprise_email=user.enterprise_email
                 )
+                if proxy is not None and found.person is None and found.binding == BIND_NONE:
+                    # 代理模式：名册里还没有这个 union_id 时才去 IAM 查邮箱做首次关联
+                    email = proxy.email(self.headers, user.union_id)
+                    if email:
+                        found = backend.people().resolve(
+                            union_id=user.union_id, enterprise_email=email
+                        )
+                    elif found.person is None and found.binding == BIND_NONE:
+                        found = people_mod.Resolution(
+                            None,
+                            BIND_NONE,
+                            "名册里还没有你的 union_id，且公司 IAM 没有返回可用的企业邮箱，"
+                            "无法自动关联。请把本页显示的 union_id 发给管理员登记。",
+                        )
                 detail = person_detail(
                     found.person,
                     backend.snapshot(),
@@ -616,7 +648,7 @@ def make_handler(
 
         def do_POST(self):  # noqa: N802
             path = urllib.parse.urlsplit(self.path).path
-            if path != "/auth/exchange":
+            if proxy is not None or path != "/auth/exchange":
                 return self._json(404, {"error": "not found"})
             length = int(self.headers.get("Content-Length") or 0)
             try:
@@ -718,9 +750,14 @@ def serve(
     people_path: Optional[str] = None,
     admins_path: Optional[str] = None,
     labels_path: Optional[str] = None,
+    auth: Optional[str] = None,
     echo=print,
 ) -> None:
     registry = registry or PlatformRegistry.load()
+    auth = auth or os.environ.get(ENV_AUTH, "") or AUTH_FEISHU
+    if auth not in AUTH_MODES:
+        raise DeliveryError(f"登录方式只能是 {' / '.join(AUTH_MODES)}，收到 {auth!r}")
+    proxy = ProxyIdentity(ProxyAuthConfig.from_env()) if auth == AUTH_PROXY else None
     app_id = os.environ.get("DELIVERY_FEISHU_APP_ID", "")
     app_secret = os.environ.get("DELIVERY_FEISHU_APP_SECRET", "")
     base_url = os.environ.get("DELIVERY_BASE_URL") or f"http://localhost:{port}"
@@ -740,18 +777,25 @@ def serve(
         app_secret=app_secret,
         base_url=base_url,
         backend=backend,
+        proxy=proxy,
     )
     # 只绑回环：这是开发服务器，绑 0.0.0.0 会把还没做访问控制的看板暴露给整个网段。
     server = http.server.ThreadingHTTPServer((host, port), handler)
-    echo(f"  控制台      {base_url}")
-    echo(f"  回调地址    {base_url}/auth/callback")
     echo(f"  权限快照    {inventory_path or '未配置（--inventory）'}")
     echo(f"  人员名册    {people_path or '未配置（--people）'}")
-    echo("")
-    if not app_id or not app_secret:
-        echo("  ⚠ 未设置 DELIVERY_FEISHU_APP_ID / DELIVERY_FEISHU_APP_SECRET，登录会失败")
+    if proxy is not None:
+        echo(f"  登录方式    公司 IAM（经 oauth2-proxy），面板监听 {host}:{port}")
+        echo(f"  userinfo    {proxy.config.userinfo_url or '未配置：首次登录不能按邮箱自动关联'}")
         echo("")
-    echo(f"  把 {base_url}/auth/callback 逐字加进飞书后台的「重定向 URL」，否则报 20029。")
+        echo("  浏览器访问 oauth2-proxy 的地址，不要直接访问面板端口。")
+    else:
+        echo(f"  控制台      {base_url}")
+        echo(f"  回调地址    {base_url}/auth/callback")
+        echo("")
+        if not app_id or not app_secret:
+            echo("  ⚠ 未设置 DELIVERY_FEISHU_APP_ID / DELIVERY_FEISHU_APP_SECRET，登录会失败")
+            echo("")
+        echo(f"  把 {base_url}/auth/callback 逐字加进飞书后台的「重定向 URL」，否则报 20029。")
     echo("  Ctrl-C 停止。")
     try:
         server.serve_forever()
