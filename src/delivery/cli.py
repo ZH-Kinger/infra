@@ -314,7 +314,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rf.add_argument("--no-alert", action="store_true", help="只打印，不发飞书告警")
 
-    lg = commands.add_parser("login", help="用飞书账号登录（浏览器授权）")
+    lg = commands.add_parser(
+        "login", help="登录：飞书账号（浏览器授权），或公司 IAM（--iam，设备码）"
+    )
+    lg.add_argument(
+        "--iam",
+        action="store_true",
+        help="面板挂在公司 IAM（oauth2-proxy）后面时用：终端显示验证码，在浏览器里用公司账号确认",
+    )
+    lg.add_argument("--issuer", default="", help="公司 IAM 签发方地址，默认取 DELIVERY_IAM_ISSUER")
+    lg.add_argument(
+        "--client-id",
+        default="",
+        help="IAM 里给 CLI 建的公开客户端 ID，默认取 DELIVERY_IAM_CLI_CLIENT_ID",
+    )
     lg.add_argument("--server", default="", help="后端地址，默认取 DELIVERY_SERVER")
     lg.add_argument("--app-id", default="", help="飞书 App ID，默认取 DELIVERY_FEISHU_APP_ID")
     lg.add_argument("--port", type=int, default=8765, help="本机回调端口（须与飞书白名单一致）")
@@ -509,6 +522,8 @@ def _cmd_login(args: argparse.Namespace) -> int:
         raise DeliveryError(
             "未指定后端地址。用 --server http://<host>:<port>，或设置环境变量 DELIVERY_SERVER。"
         )
+    if getattr(args, "iam", False):
+        return _cmd_login_iam(args, server)
     app_id = args.app_id or os.environ.get("DELIVERY_FEISHU_APP_ID") or ""
     session = login(
         BackendExchange(server),
@@ -523,6 +538,62 @@ def _cmd_login(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_login_iam(args: argparse.Namespace, server: str, *, transport=None, sleep=None) -> int:
+    from . import iam_device
+    from .session import Session, save_session
+
+    issuer = args.issuer or os.environ.get("DELIVERY_IAM_ISSUER") or ""
+    client_id = args.client_id or os.environ.get("DELIVERY_IAM_CLI_CLIENT_ID") or ""
+    if not issuer or not client_id:
+        raise DeliveryError(
+            "公司 IAM 登录需要签发方地址和 CLI 客户端 ID：--issuer / --client-id，"
+            "或环境变量 DELIVERY_IAM_ISSUER / DELIVERY_IAM_CLI_CLIENT_ID（向 IT 要）"
+        )
+    from .cli_requests import ClientError, PanelClient
+
+    try:
+        PanelClient(server, "")  # 先校验面板地址（必须 https），免得登录完才发现存了个用不了的地址
+    except ClientError as exc:
+        raise DeliveryError(str(exc)) from None
+    scope = os.environ.get("DELIVERY_IAM_SCOPE") or iam_device.DEFAULT_SCOPE
+    kw = {"transport": transport} if transport else {}
+    endpoints = iam_device.discover(issuer, **kw)
+    code = iam_device.start(endpoints, client_id, scope=scope, **kw)
+    link = code.verification_uri_complete or code.verification_uri
+    print("\n  在浏览器里打开下面的链接，用公司账号登录并确认：")
+    print(f"    {link}")
+    print(f"  验证码：{code.user_code}    （{code.expires_in // 60} 分钟内有效）\n")
+    if not args.no_browser:
+        import webbrowser
+
+        webbrowser.open(link)
+    tokens = iam_device.poll(
+        endpoints, client_id, code, **kw, **({"sleep": sleep} if sleep else {})
+    )
+    claims = tokens.claims
+    session = Session(
+        union_id=str(claims.get("feishu_union_id") or claims.get("sub") or ""),
+        name=str(claims.get("name") or claims.get("preferred_username") or ""),
+        token=tokens.token,
+        expires_ts=tokens.expires_ts,
+        server=server,
+        kind="iam",
+        refresh_token=tokens.refresh_token,
+        token_endpoint=endpoints.token,
+        client_id=client_id,
+    )
+    save_session(session)
+    if not claims.get("feishu_union_id"):
+        print("  ⚠ 令牌里没有 feishu_union_id：面板会按未登录处理。")
+        print("    请 IT 给这个客户端分配 wuji scope 映射")
+    print(f"  ✓ 已登录：{session.name or session.union_id}")
+    print(
+        "    之后的请求经 oauth2-proxy 校验身份；"
+        + ("令牌到期前会自动续期" if tokens.refresh_token else "令牌到期后需要重新登录")
+    )
+    return 0
+
+
 def _cmd_logout() -> int:
     print("已清除本机会话" if clear_session() else "本机没有已保存的会话")
     return 0
@@ -532,6 +603,11 @@ def _cmd_status(registry: PlatformRegistry) -> int:
     session = load_session()
     if session is None:
         print("未登录。运行： delivery login")
+    elif session.kind == "iam" and session.expired and not session.refresh_token:
+        print(f"登录已过期（{session.name or session.union_id}），请重新 delivery login --iam")
+    elif session.kind == "iam":
+        renew = "到期前自动续期" if session.refresh_token else "到期后需要重新 delivery login --iam"
+        print(f"已登录（公司 IAM）：{session.name or session.union_id}    {renew}")
     elif session.expired:
         print(f"会话已过期（{session.name or session.union_id}），请重新 delivery login")
     else:

@@ -183,7 +183,59 @@ eval "$(delivery creds <申请单号>)"     # 临时凭证写进当前 shell，�
 delivery assets
 ```
 
-CLI 走面板的会话令牌，目前只支持飞书登录模式；公司 IAM（代理）模式下 CLI 登录另做。
+CLI 在飞书登录模式下走面板的会话令牌（`delivery login`）；公司 IAM（代理）模式下用 `delivery login --iam`，见下一节。
+
+## CLI 登录（公司 IAM 模式）
+
+浏览器登录走 oauth2-proxy 的 Cookie，CLI 没有 Cookie。CLI 用 OAuth 2.0 设备码授权（RFC 8628）向公司 IAM
+要令牌，请求时带 `Authorization: Bearer <access_token>`；oauth2-proxy 开 `--skip-jwt-bearer-tokens`
+后校验这个 JWT（签名、签发方、audience、过期），按和浏览器登录**同一套** `emailClaim` / `additionalClaims`
+注入身份头。面板不发令牌、不改信任模型，仍只认代理注入的头。
+
+员工用法：
+
+```bash
+export DELIVERY_SERVER=https://<面板域名>
+export DELIVERY_IAM_ISSUER=https://<IAM 域名>/application/o/cloud-panel/
+export DELIVERY_IAM_CLI_CLIENT_ID=cloud-panel
+delivery login --iam          # 终端显示验证码，浏览器里用公司账号确认
+delivery request list
+```
+
+令牌存 `~/.w0/session.json`（0600）。快过期时自动用 refresh_token 续期，收到 401 也会续期重试一次。
+
+**oauth2-proxy**：在现有参数上加一个（这类参数只能写在命令行或旧版 TOML，写进 alpha YAML 会启动失败）：
+
+```bash
+  --skip-jwt-bearer-tokens=true
+  # --bearer-token-login-fallback 保持默认 true：/api/ 下令牌无效或过期回 401（CLI 据此续期）
+```
+
+**需要 IT 在 IAM（Authentik）上做**，方案 A（推荐）：把现有 `cloud-panel` 应用改成支持设备码，
+CLI 和浏览器用同一个客户端，令牌的 audience 一致，代理走主 provider 的校验路径、身份头和浏览器登录完全一样。
+
+1. 告诉我们 Authentik 版本（设备码的客户端认证和错误码因版本不同）。
+2. 建一个设备码流程（Stage Configuration，要求已登录），在 System > Brands 里设为 **Default code flow**。
+3. `cloud-panel` provider：Grant Types 勾 **Device Code** 和 **Refresh Token**；客户端类型改 **Public**
+   （2026.5 起机密客户端的设备码请求必须带 client secret，CLI 带不了）。oauth2-proxy 的 `clientSecretFile`
+   仍需非空，保留占位文件即可；浏览器登录继续用 PKCE S256。
+4. 配 **Signing Key**（RS256）。没配时 Authentik 用 HS256 签名，代理拿不到公钥无法校验。
+5. 保持 **Include claims in id_token** 开启；给这个 provider 分配 scope 映射 `openid`、`profile`、`email`、
+   `wuji`（含 `feishu_union_id`、`feishu_user_id`、`name`）和 `offline_access`。
+6. **Access code validity** 调到 10 分钟左右（默认 1 分钟，来不及在浏览器里确认）。这个值同时决定浏览器登录授权码的有效期，
+   浏览器登录有 PKCE S256 绑定，授权码被截获也换不到令牌。
+7. 授权流程里带明确的同意页：防设备码钓鱼（员工能看到自己在授权哪个应用）。
+8. 应用的访问策略绑定「全体在职员工」，设备码确认同样受它约束。
+9. 用设备码登录一次，给我们一份解码后的 access_token 样例：确认有 `iss`、`aud=cloud-panel`、
+   `feishu_union_id`、`feishu_user_id`、`name`。
+
+方案 B（不改现有应用）：单独建公开客户端 `cloud-panel-cli`，两个 provider 用同一把签名密钥，
+主 provider 加 `extraAudiences: [cloud-panel-cli]` 和 `insecureSkipIssuerVerification: true`。
+**不要**用 `--extra-jwt-issuers`：那条路径只读 `sub/email/groups`，不读 `feishu_union_id` 等自定义声明，
+身份头会是空的，面板一律按未登录处理。
+
+令牌里没有 `feishu_union_id` 时，代理不会注入 `X-Panel-Union-Id`，面板直接按未登录处理（不会退回用 `sub` 认人）；
+`delivery login --iam` 登录成功后也会提示这种情况。
 
 ## 回退
 

@@ -43,6 +43,20 @@ class ClientError(DeliveryError):
     """后端返回错误。"""
 
 
+class _Unauthorized(Exception):
+    pass
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """urllib 跟随跳转时会把 Authorization 原样带到新地址（不管主机和协议）：一律不跟。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        raise urllib.error.HTTPError(req.full_url, code, "拒绝跟随跳转", headers, fp)
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 class PanelClient:
     def __init__(self, server: str, token: str):
         parsed = urllib.parse.urlsplit(server)
@@ -52,20 +66,42 @@ class PanelClient:
             raise ClientError("后端地址必须是 https（本机调试除外）：会话令牌不能明文传输")
         self.server = server.rstrip("/")
         self._token = token
+        #: 公司 IAM 登录：收到 401 时续期一次再重试（令牌可能刚好在路上过期）
+        self._renew = None
 
     @classmethod
-    def from_session(cls) -> PanelClient:
+    def from_session(cls, *, refresher=None) -> PanelClient:
         session = load_session()
         if session is None:
-            raise ClientError("未登录。运行： delivery login")
-        if session.expired:
+            raise ClientError(
+                "未登录。运行： delivery login（公司 IAM 登录用 delivery login --iam）"
+            )
+        if session.kind == "iam":
+            session = _fresh_iam_session(session, refresher)
+        elif session.expired:
             raise ClientError("会话已过期，请重新 delivery login")
         server = session.server or os.environ.get("DELIVERY_SERVER", "")
         if not server:
             raise ClientError("不知道后端地址：重新 delivery login --server <地址>")
-        return cls(server, session.token)
+        client = cls(server, session.token)
+        if session.kind == "iam":
+            client._renew = lambda: _fresh_iam_session(session, refresher, force=True).token
+        return client
 
     def request(self, method: str, path: str, body=None) -> dict:
+        try:
+            return self._request_once(method, path, body)
+        except _Unauthorized:
+            if self._renew is None:
+                raise ClientError("会话无效或已过期，请重新 delivery login") from None
+            self._token = self._renew()
+            self._renew = None
+            try:
+                return self._request_once(method, path, body)
+            except _Unauthorized:
+                raise ClientError("身份校验没通过，请重新 delivery login --iam") from None
+
+    def _request_once(self, method: str, path: str, body=None) -> dict:
         data = json.dumps(body or {}).encode() if method == "POST" else None
         headers = {
             "Authorization": f"Bearer {self._token}",
@@ -79,7 +115,7 @@ class PanelClient:
             self.server + path, data=data, headers=headers, method=method
         )
         try:
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:  # noqa: S310
+            with _OPENER.open(req, timeout=_TIMEOUT) as resp:
                 return json.loads(resp.read().decode() or "{}")
         except urllib.error.HTTPError as exc:
             try:
@@ -87,10 +123,57 @@ class PanelClient:
             except ValueError:
                 message = None
             if exc.code == 401:
-                raise ClientError("会话无效或已过期，请重新 delivery login") from None
+                raise _Unauthorized() from None
+            if 300 <= exc.code < 400:
+                raise ClientError(
+                    f"后端返回了跳转（HTTP {exc.code}），为保护令牌不跟随。"
+                    "检查 DELIVERY_SERVER 是否是面板地址"
+                ) from None
             raise ClientError(message or f"请求失败（HTTP {exc.code}）") from None
         except (urllib.error.URLError, OSError) as exc:
             raise ClientError(f"连不上后端 {self.server}：{type(exc).__name__}") from None
+
+
+def _fresh_iam_session(session, refresher=None, *, force=False):
+    """IAM 登录的令牌快过期时用 refresh_token 续期并写回本机会话。
+
+    · 续期在本机文件锁里做：IAM 续期会作废旧 refresh_token，两个 CLI 进程同时续期时后到的会失败。
+      拿到锁后先重读会话文件，别的进程已经续过就直接用它的结果。
+    · 续期失败但令牌还没真正过期：先用着，真过期时再报错（请求收到 401 还会再续一次）。
+    """
+    import dataclasses
+    import time
+
+    from . import iam_device
+    from .session import load_session, save_session, session_lock
+
+    if not force and session.expires_ts - time.time() > iam_device.REFRESH_MARGIN:
+        return session
+    refresh = refresher or iam_device.refresh
+    with session_lock():
+        current = load_session()
+        if (
+            current is not None
+            and current.kind == "iam"
+            and current.token != session.token
+            and current.expires_ts - time.time() > iam_device.REFRESH_MARGIN
+        ):
+            return current  # 别的进程刚续过
+        base = current if current is not None and current.kind == "iam" else session
+        try:
+            tokens = refresh(base.token_endpoint, base.client_id, base.refresh_token)
+        except iam_device.IamLoginError as exc:
+            if not force and base.expires_ts > time.time():
+                return base
+            raise ClientError(str(exc)) from None
+        renewed = dataclasses.replace(
+            base,
+            token=tokens.token,
+            refresh_token=tokens.refresh_token,
+            expires_ts=tokens.expires_ts,
+        )
+        save_session(renewed)
+        return renewed
 
 
 def add_parsers(commands) -> None:

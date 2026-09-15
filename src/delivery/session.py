@@ -16,10 +16,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import stat
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,18 +84,42 @@ def _read_json(path: Path) -> dict:
 
 
 def _write_json(path: Path, payload: dict) -> None:
-    _ensure_home()
-    # 先以 0600 建出来再写：先写后 chmod 会有一个短暂的宽权限窗口，
-    # 而这个文件在那个窗口里已经含有令牌了。
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _FILE_MODE)
+    """原子写：同目录临时文件（mkstemp 建出来就是 0600）写完 fsync 再替换。
+
+    不能截断后原地写：写到一半崩了，另一个进程会读到半截 JSON；IAM 续期还会作废旧 refresh_token，
+    文件丢了就只能重新登录。
+    """
+    base = _ensure_home()
+    fd, tmp = tempfile.mkstemp(dir=str(base), prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False, indent=2)
-    except Exception:
-        fd = -1
+            fh.flush()
+            os.fsync(fh.fileno())
+        if os.name == "posix":
+            Path(tmp).chmod(_FILE_MODE)
+        Path(tmp).replace(path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            Path(tmp).unlink()
         raise
-    if os.name == "posix":
-        path.chmod(_FILE_MODE)  # 覆盖已存在文件时 O_CREAT 的 mode 不生效
+
+
+@contextlib.contextmanager
+def session_lock():
+    """本机会话文件的进程间锁（续期令牌时用）。Windows 上没有 fcntl，退化为不加锁。"""
+    base = _ensure_home()
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - 非 POSIX
+        yield
+        return
+    fd = os.open(str(base / ".session.lock"), os.O_WRONLY | os.O_CREAT, _FILE_MODE)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 @dataclass(frozen=True)
@@ -103,6 +129,11 @@ class Session:
     token: str
     expires_ts: float
     server: str = ""
+    #: panel = 飞书登录换来的面板会话令牌；iam = 公司 IAM 设备码登录的 id_token（oauth2-proxy 校验）
+    kind: str = "panel"
+    refresh_token: str = ""
+    token_endpoint: str = ""
+    client_id: str = ""
 
     @property
     def expired(self) -> bool:
@@ -134,6 +165,10 @@ def load_session() -> Optional[Session]:
             token=str(data["token"]),
             expires_ts=float(data.get("expires_ts") or 0),
             server=str(data.get("server") or ""),
+            kind=str(data.get("kind") or "panel"),
+            refresh_token=str(data.get("refresh_token") or ""),
+            token_endpoint=str(data.get("token_endpoint") or ""),
+            client_id=str(data.get("client_id") or ""),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise SessionError(f"会话文件字段不完整：{exc}") from exc
@@ -148,6 +183,10 @@ def save_session(session: Session) -> None:
             "token": session.token,
             "expires_ts": session.expires_ts,
             "server": session.server,
+            "kind": session.kind,
+            "refresh_token": session.refresh_token,
+            "token_endpoint": session.token_endpoint,
+            "client_id": session.client_id,
         },
     )
 
