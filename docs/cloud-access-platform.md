@@ -139,6 +139,5 @@ server.py ── HTTP 接口、角色校验、CSRF
 | `policies.py` | 权限策略目录采集、申请规则（禁用、风险、天数） |
 | `notify.py` | 申请状态通知：申请人飞书私信卡片、开通失败管理员告警 |
 | `health.py` | 管理后台系统状态检查 |
-| `notify.py` | 飞书私信与管理员告警 |
 | `cli_requests.py` | CLI 子命令 |
 | `web/core.js` · `web/requests.js` · `web/assets.js` | 前端公共工具、申请页面、资产页面 |
