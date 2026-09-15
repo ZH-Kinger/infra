@@ -1239,6 +1239,30 @@ class Flows:
         )
         return ""
 
+    def link_pending(self, ticket: dict) -> bool:
+        """开账号单子建好了号，但没能自动对应到申请人，而且名册里到现在也还没对应上。
+
+        管理员在「人员与名册」里确认之后名册会更新，这里随之变成 False；不依赖单子上补事件。
+        """
+        if ticket.get("kind") != catalog_mod.KIND_ACCOUNT or not ticket.get("user_created"):
+            return False
+        events = [e.get("event") for e in ticket.get("events") or []]
+        if "link_needed" not in events or (
+            "linked" in events and events[::-1].index("linked") < events[::-1].index("link_needed")
+        ):
+            return False
+        tpl = ticket["template"]
+        key = (tpl["platform"], tpl["account"], (ticket.get("payload") or {}).get("username"))
+        try:
+            people = self._roster().people
+        except DeliveryError:
+            return True  # 名册读不了：保持提醒
+        return not any(
+            (ref.platform, ref.account, ref.name) == key
+            for person in people
+            for ref in person.accounts
+        )
+
     def _account_owner_ok(self, ticket: dict, username: str) -> bool:
         """名册里这个子账号要么还没对应给人，要么对应的就是申请人。"""
         tpl = ticket["template"]

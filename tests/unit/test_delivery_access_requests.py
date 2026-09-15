@@ -310,6 +310,24 @@ class ApprovalTests(unittest.TestCase):
         self.assertEqual(closed["events"][-1]["event"], "approval_invalid")
         self.assertEqual(h.executor.actions, [])
 
+    def test_link_pending_clears_once_roster_has_the_account(self):
+        h = Harness()
+        h.flows._add_manual_link = None  # 自动对应失败 → link_needed
+        ticket = h.submit(applicant=NEW, template="new-user", payload={"username": "xinren"})
+        h.approve(ticket)
+        done = h.flows.sync(ticket["id"], force=True)
+        self.assertEqual(done["status"], t.DONE)
+        self.assertTrue(h.flows.link_pending(done))
+        roster = _roster()
+        rows = [people_mod.person_row(p) for p in roster.people]
+        rows[1]["accounts"] = [
+            {"platform": "aliyun", "account": ACC, "name": "xinren", "status": "confirmed"}
+        ]
+        h.flows._roster = lambda: people_mod.parse({"schema": people_mod.SCHEMA, "people": rows})
+        self.assertFalse(h.flows.link_pending(done))
+        # 权限单、正常对应上的单子都不提醒
+        self.assertFalse(h.flows.link_pending({**done, "kind": "permission"}))
+
     def test_self_approval_blocks_execution_end_to_end(self):
         h = Harness()
         ticket = h.submit()

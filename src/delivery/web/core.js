@@ -142,10 +142,13 @@ export function copyButton(getText, label = "复制") {
 export function openDrawer(labelledBy, build, onClose) {
   for (const d of document.querySelectorAll("dialog.drawer")) d.remove();
   const dialog = h("dialog", { class: "drawer", "aria-labelledby": labelledBy });
+  // 关掉后把焦点还给打开它的按钮，键盘用户不用从页首重新找
+  const opener = document.activeElement;
   const close = () => dialog.close();
   dialog.addEventListener("close", () => {
     dialog.remove();
     if (onClose) onClose();
+    if (opener && opener.isConnected && typeof opener.focus === "function") opener.focus();
   });
   dialog.addEventListener("click", (e) => {
     if (e.target === dialog) close();

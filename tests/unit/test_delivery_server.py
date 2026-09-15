@@ -10,6 +10,7 @@ import unittest
 import urllib.parse
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 from delivery.feishu import FeishuUser
 from delivery.registry import PlatformRegistry
@@ -299,6 +300,30 @@ class ApiTests(unittest.TestCase):
     def _get(self, live, path, sid=""):
         status, _, body = live.get(path, cookie=sid)
         return status, json.loads(body)
+
+    def test_large_get_json_is_gzipped_only_when_accepted(self):
+        import gzip
+
+        from delivery import server as server_mod
+
+        with self._live() as live, mock.patch.object(server_mod, "_GZIP_MIN", 10):
+            sid = self._login(live, "on_admin")
+            conn = http.client.HTTPConnection("127.0.0.1", live.port, timeout=5)
+            conn.request(
+                "GET",
+                "/api/admin/overview",
+                headers={"Cookie": f"{COOKIE_NAME}={sid}", "Accept-Encoding": "gzip"},
+            )
+            resp = conn.getresponse()
+            raw = resp.read()
+            conn.close()
+            self.assertEqual(resp.getheader("Content-Encoding"), "gzip")
+            self.assertEqual(resp.getheader("Vary"), "Accept-Encoding")
+            self.assertIn("totals", json.loads(gzip.decompress(raw)))
+            # 不声明 gzip 的客户端（CLI 用的 urllib）照常拿明文
+            status, headers, body = live.get("/api/admin/overview", cookie=sid)
+            self.assertNotIn("Content-Encoding", headers)
+            self.assertIn("totals", json.loads(body))
 
     def test_anonymous_gets_401_everywhere(self):
         with self._live() as live:

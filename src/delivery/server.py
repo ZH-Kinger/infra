@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import gzip
 import html
 import http.cookies
 import http.server
@@ -333,6 +334,9 @@ _ADMIN_PEOPLE = "/api/admin/people/"
 _ADMIN_REVIEW = "/api/admin/review"
 
 
+_GZIP_MIN = 16 * 1024
+
+
 def _approval_ready(backend) -> Optional[bool]:
     """审批对象能不能建出来（不发网络请求）；配置本身读坏了交给系统状态页那一项去报。"""
     try:
@@ -610,11 +614,18 @@ def make_handler(
             self.wfile.write(body)
 
         def _json(self, code: int, payload: dict):
-            self._send(
-                code,
-                json.dumps(payload, ensure_ascii=False).encode(),
-                ctype="application/json; charset=utf-8",
-            )
+            body = json.dumps(payload, ensure_ascii=False).encode()
+            headers = {}
+            # 权限列表这类大响应压缩后小一个数量级。只压 GET：POST 的响应里有现签的凭证、初始密码，
+            # 不和压缩放在一起（避免 BREACH 类侧信道）
+            if (
+                self.command == "GET"
+                and len(body) >= _GZIP_MIN
+                and "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
+            ):
+                body = gzip.compress(body, compresslevel=6)
+                headers = {"Content-Encoding": "gzip", "Vary": "Accept-Encoding"}
+            self._send(code, body, ctype="application/json; charset=utf-8", headers=headers)
 
         def _session(self) -> Optional[_WebSession]:
             if proxy is not None:

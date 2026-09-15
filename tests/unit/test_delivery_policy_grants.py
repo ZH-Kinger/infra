@@ -196,6 +196,8 @@ class RulesTests(unittest.TestCase):
             rules.risk_of("System", "AliyunDataWorksAccessingRdsOSSBinlogPolicy"), "medium"
         )
         self.assertEqual(rules.risk_of("Custom", "team-data-reader"), "high")
+        self.assertEqual(rules.risk_of("System", "MLPlatformAdminAccess"), "high")
+        self.assertEqual(rules.risk_of("System", "AliyunEMRFlowAdmin"), "high")
         self.assertEqual(rules.max_days_of("System", "AliyunOSSReadOnlyAccess"), 180)
         custom = pol.parse_rules({"risk": {"team-data-reader": "low"}, "max_days": {"high": 14}})
         self.assertEqual(custom.risk_of("Custom", "TEAM-DATA-READER"), "low")
@@ -222,6 +224,8 @@ class RulesTests(unittest.TestCase):
             "AliyunCloudSSOAdministratorAccess",
             "AliyunResourceDirectoryAdministratorAccess",
             "CloudIdentityFullAccess",
+            "AccessKeySelfManageAccess",
+            "PowerUserAccess",
             "KMSFullAccess",
             "IAMUserManageAccess",
         ):

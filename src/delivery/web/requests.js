@@ -83,7 +83,7 @@ const STATE_FILTERS = [
 export function requestRoutes(ctx) {
   const { load, errorView } = ctx;
   // 筛选条件跨次渲染保留：从申请详情返回时不用重新筛
-  const filters = { kind: "permission", q: "", category: "all", platform: "all", state: "all" };
+  const filters = { kind: "", q: "", category: "all", platform: "all", state: "all" };
 
   function renderApply(selectedId) {
     return load(
@@ -106,7 +106,10 @@ export function requestRoutes(ctx) {
     if (!options.length) {
       return [head, h("div", { class: "card empty" }, h("h2", {}, "还没有可申请的项目"), h("p", {}, "管理员还没有配置申请模板。需要开通云资源请先联系管理员。"))];
     }
-    if (!options.some((o) => o.kind === filters.kind)) filters.kind = KIND_ORDER.find((k) => options.some((o) => o.kind === k));
+    if (!options.some((o) => o.kind === filters.kind)) {
+      // 第一次打开：默认停在有可申请项的那一栏（没有云账号的新同事直接看到「开账号」）
+      filters.kind = KIND_ORDER.find((k) => options.some((o) => o.kind === k && o.available)) || KIND_ORDER.find((k) => options.some((o) => o.kind === k));
+    }
 
     const kindTabs = h("div", { class: "segmented", role: "tablist", "aria-label": "申请类型" });
     const toolbar = h("div", { class: "apply-tools" });
@@ -501,7 +504,7 @@ export function requestRoutes(ctx) {
   function listPage(requests, { admin, filter }) {
     const tabs = [
       ["open", "进行中", (r) => r.open],
-      ["attention", admin ? "需要处理" : "待我操作", (r) => (admin ? ["failed", "executing", "submitting"].includes(r.status) : Boolean(r.actions.credential || r.actions.password))],
+      ["attention", admin ? "需要处理" : "待我操作", (r) => (admin ? ["failed", "executing", "submitting"].includes(r.status) || needsLink(r) : Boolean(r.actions.credential || r.actions.password))],
       ["closed", "已结束", (r) => !r.open],
       ["all", "全部", () => true],
     ];
@@ -590,13 +593,19 @@ export function requestRoutes(ctx) {
     return nodes;
   }
 
+  // 新开的子账号没能自动对应到申请人（比如名册里查不到企业邮箱），要管理员在名册里补
+  // 服务端对照名册算：管理员在名册里确认后自动消失（只在管理员视图里有这个字段）
+  function needsLink(r) {
+    return r.link_pending === true;
+  }
+
   function kindKey(r) {
     return r.template.id === "policy" ? "policy" : r.kind;
   }
 
   function requestRow(r, admin) {
     const href = admin ? `#admin/request=${encodeURIComponent(r.id)}` : `#request=${encodeURIComponent(r.id)}`;
-    const cta = admin ? null : r.actions.password ? h("span", { class: "pill good" }, "可领取初始密码") : null;
+    const cta = admin ? (needsLink(r) ? h("span", { class: "pill warn" }, "待对应到名册") : null) : r.actions.password ? h("span", { class: "pill good" }, "可领取初始密码") : null;
     return h(
       "a",
       { class: "row", href },
@@ -639,6 +648,7 @@ export function requestRoutes(ctx) {
     if (r.status === "submit_failed") nodes.push(h("div", { class: "banner crit" }, h("b", {}, "没能发起飞书审批。"), " ", lastNote(r) || "请稍后重新提交，或联系管理员。"));
     if (r.status === "failed") nodes.push(h("div", { class: "banner crit" }, h("b", {}, "审批已通过，但开通失败。"), " ", admin ? lastNote(r) : "管理员会处理，处理好后这里会更新。"));
     if (r.status === "rejected") nodes.push(h("div", { class: "banner warn" }, "审批没有通过。可以在飞书里查看审批意见，调整后重新申请。"));
+    if (admin && needsLink(r)) nodes.push(h("div", { class: "banner warn" }, h("b", {}, "新账号还没对应到申请人。"), " 请在「人员与名册」里把这个子账号确认给申请人，否则他之后申请权限时选不到这个账号。 ", h("a", { href: "#admin" }, "去人员与名册 →")));
     if (r.status === "done" && r.result) nodes.push(h("div", { class: "banner good" }, h("b", {}, "已开通。"), " ", r.result));
 
     const actions = h("div", { class: "actions" });

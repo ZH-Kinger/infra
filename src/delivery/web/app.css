@@ -319,6 +319,9 @@ label.perm:hover{background:var(--surface-2)}
   padding:.85rem 1.25rem; border-top:1px solid var(--hair)}
 .health-row:first-child{border-top:0}
 .health-row .pill{justify-self:start; margin-top:.1rem}
+.empty-split{display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap;
+  width:100%; max-width:34rem; margin-top:.75rem; padding:.9rem 1rem; border-radius:12px; background:var(--surface-2); text-align:left}
+.empty-split p{margin:.15rem 0 0}
 .health-fix{margin:.25rem 0 0; font-size:.8125rem; color:var(--ink-2); overflow-wrap:anywhere}
 .health-fix b{font-weight:600; color:var(--ink)}
 .health-row.level-crit{background:color-mix(in srgb,var(--crit-soft) 45%,transparent)}

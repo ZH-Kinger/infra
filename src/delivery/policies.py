@@ -51,6 +51,11 @@ TYPE_LABELS = {TYPE_SYSTEM: "系统策略", TYPE_CUSTOM: "自定义策略"}
 DEFAULT_DENY = (
     "AdministratorAccess",
     "*AdministratorAccess",
+    # 近似管理员
+    "*PowerUser*",
+    # 自己管理长期 AccessKey：绕过平台「只发临时凭证」的流程
+    "AccessKey*",
+    "*AccessKey*Manage*",
     "AliyunRAM*FullAccess",
     "AliyunRAM*ManageAccess",
     "AliyunIMS*FullAccess",
@@ -152,7 +157,7 @@ class Rules:
         low = name.lower()
         if ptype == TYPE_CUSTOM:
             return "high"  # 内容由管理员自己写，看名字判断不了
-        if "administrator" in low or low.endswith("fullaccess") or "manage" in low:
+        if "admin" in low or low.endswith("fullaccess") or "manage" in low:
             return "high"
         if "readonly" in low or low.endswith("readaccess"):
             return "low"

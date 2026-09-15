@@ -216,7 +216,10 @@ class RequestsApi:
 
     @staticmethod
     def _view(flows: Flows, ticket: dict, caller: Caller) -> dict:
-        return ticket_view(ticket, viewer=caller, links=flows.approval_links(ticket))
+        view = ticket_view(ticket, viewer=caller, links=flows.approval_links(ticket))
+        if caller.admin:
+            view["link_pending"] = flows.link_pending(ticket)
+        return view
 
     def _policies(self, flows: Flows, method: str, caller: Caller) -> tuple:
         if method != "GET":

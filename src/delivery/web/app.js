@@ -443,6 +443,14 @@ function personPage(detail, { admin }) {
         h("h2", {}, detail.binding === "conflict" ? "身份关联冲突" : "还没有关联到云账号"),
         h("p", {}, detail.binding_note || "请联系管理员登记。"),
         person.union_id ? h("p", { class: "muted mono" }, `你的 union_id：${person.union_id}`) : null,
+        detail.binding === "unbound"
+          ? h(
+              "div",
+              { class: "empty-split" },
+              h("div", {}, h("b", {}, "新同事，还没有云账号？"), h("p", { class: "muted" }, "直接申请开子账号，审批通过后自动开通并对应到你名下。")),
+              h("a", { class: "btn small", href: "#apply" }, "申请开子账号"),
+            )
+          : null,
       ),
     );
     return nodes;
@@ -455,7 +463,8 @@ function personPage(detail, { admin }) {
         "div",
         { class: "card empty" },
         h("h2", {}, admin ? "没有阿里云或火山账号" : "你目前没有阿里云或火山账号"),
-        h("p", {}, admin ? "这个人在已采集的云账号里没有对应的号。" : "需要开通请走权限申请。"),
+        h("p", {}, admin ? "这个人在已采集的云账号里没有对应的号。" : "先申请开一个子账号。审批通过后自动开通，可以领取控制台初始密码；之后就能在「权限列表」里申请权限。"),
+        admin ? null : h("a", { class: "btn small", href: "#apply" }, "申请开子账号"),
       ),
     );
     return nodes;
