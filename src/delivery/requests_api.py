@@ -38,6 +38,7 @@ _EVENT_LABELS = {
     "approval_canceled": "审批已撤销",
     "approval_deleted": "审批已删除",
     "approval_reverted": "审批通过后被撤销",
+    "approval_invalid": "审批未经他人同意，已关闭",
     "withdrawn": "撤回申请",
     "claimable": "可以领取",
     "execute_start": "开始开通",

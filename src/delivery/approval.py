@@ -8,6 +8,8 @@
   · 发起人就是申请人（open_id 或 user_id）
   · 表单里的申请单号就是这张申请单（防止一个审批实例被套用到另一张单子上）
   · 实例没有被撤销（reverted：通过后又被撤销的单据，status 可能仍是 APPROVED）
+  · 至少有一位申请人以外的审批人点了通过（task_list 里 APPROVED 的任务）：只有本人或自动通过的
+    不算，allow_self_approval=true 才放开。只算 APPROVED 不算 DONE（或签节点里别人批了，其余是 DONE）
 
 飞书回调、本地保存的状态都只当「该去查一次了」的提示，不当结论。
 
@@ -17,7 +19,8 @@
      "widgets": {"ticket_id": "<控件ID>", "kind": "<控件ID>",
                  "summary": "<控件ID>", "reason": "<控件ID>"},
      "instance_url": "https://.../{instance_code}",          # 可选
-     "instance_url_mobile": "https://.../{instance_code}"}   # 可选
+     "instance_url_mobile": "https://.../{instance_code}",   # 可选
+     "allow_self_approval": false}                           # 可选，默认 false
 
 申请单详情页「去飞书查看审批」用飞书 AppLink 打开审批实例（飞书客户端 7.3.0 起支持，
 官方文档「打开审批页面」）。默认用飞书审批应用的 PC 与移动端链接；Lark 国际版等情况可以在
@@ -79,6 +82,8 @@ class ApprovalConfig:
     widgets: Mapping
     instance_url: str = ""
     instance_url_mobile: str = ""
+    #: 默认要求至少有一位**不是申请人**的审批人点了通过；审批定义里只有申请人自己或自动通过时不开通
+    allow_self_approval: bool = False
 
     @classmethod
     def load(cls, path: Optional[str]) -> Optional[ApprovalConfig]:
@@ -104,7 +109,15 @@ class ApprovalConfig:
             if url and not valid_instance_url(url):
                 raise ApprovalError(f"审批配置的 {key} 必须是 https 地址，且包含 {{instance_code}}")
             urls[key] = url or ""
-        return cls(approval_code=code.strip(), widgets=dict(widgets), **urls)
+        self_ok = data.get("allow_self_approval", False)
+        if not isinstance(self_ok, bool):
+            raise ApprovalError("审批配置的 allow_self_approval 必须是 true / false")
+        return cls(
+            approval_code=code.strip(),
+            widgets=dict(widgets),
+            allow_self_approval=self_ok,
+            **urls,
+        )
 
 
 def valid_instance_url(template: object) -> bool:
@@ -184,6 +197,10 @@ def _data(resp: dict, what: str) -> dict:
     return data
 
 
+class SelfApprovalError(ApprovalError):
+    """审批「通过」了，但没有申请人以外的审批人同意。这是确定的结论，不是查询失败。"""
+
+
 class FeishuApproval:
     def __init__(
         self,
@@ -238,6 +255,10 @@ class FeishuApproval:
 
     def status(self, *, instance_code: str, ticket_id: str, applicant: Applicant) -> str:
         """实时查询并核对，返回审批状态。实例和申请单对不上直接报错。"""
+        return self._checked(instance_code, ticket_id, applicant)[0]
+
+    def _checked(self, instance_code: str, ticket_id: str, applicant: Applicant) -> tuple:
+        """(状态, 实例数据)。实例数据只在本次调用里传递：面板多线程共用这个对象，不能存成属性。"""
         data = self.fetch(instance_code)
         if data.get("approval_code") != self.config.approval_code:
             raise ApprovalError("审批实例不属于配置的审批定义，拒绝")
@@ -252,14 +273,19 @@ class FeishuApproval:
         if status not in (STATUS_PENDING, STATUS_APPROVED, *FINAL_NEGATIVE):
             raise ApprovalError(f"未知的审批状态 {status!r}")
         if data.get("reverted"):
-            return STATUS_REVERTED
-        return status
+            return STATUS_REVERTED, data
+        return status, data
 
     def verify_approved(self, *, instance_code: str, ticket_id: str, applicant: Applicant) -> None:
         """开通前调用。任何一项不满足都抛错。"""
-        status = self.status(instance_code=instance_code, ticket_id=ticket_id, applicant=applicant)
+        status, data = self._checked(instance_code, ticket_id, applicant)
         if status != STATUS_APPROVED:
             raise ApprovalError(f"飞书审批状态是 {status}，不是已通过，拒绝开通")
+        if not self.config.allow_self_approval and not _approved_by_other(data, applicant):
+            raise SelfApprovalError(
+                "审批没有经过申请人以外的审批人同意（只有本人或自动通过），拒绝开通。"
+                "请检查飞书审批定义的审批人设置"
+            )
 
     def widgets(self, approval_code: str) -> list:
         """管理员配置用：列出审批定义里的表单控件（id、类型、名称）。"""
@@ -274,6 +300,34 @@ class FeishuApproval:
             for x in form
             if isinstance(x, dict)
         ]
+
+
+def _approved_by_other(data: object, applicant: Applicant) -> bool:
+    """task_list 里至少有一条「通过」的任务，审批人有身份且不是申请人。
+
+    自动通过的任务没有审批人 open_id / user_id，不算。
+    """
+    # 按申请人实际有的那种身份比：飞书登录只有 open_id，公司 IAM 登录只有 user_id。
+    # 审批任务缺这种身份就认不出是不是本人，不算数（宁可不开通）。
+    key, mine = (
+        ("open_id", applicant.open_id) if applicant.open_id else ("user_id", applicant.user_id)
+    )
+    if not mine:
+        return False
+    tasks = data.get("task_list") if isinstance(data, dict) else None
+    for task in tasks if isinstance(tasks, list) else []:
+        if not isinstance(task, dict) or task.get("status") != "APPROVED":
+            continue
+        theirs = str(task.get(key) or "")
+        if not theirs or theirs == mine:
+            continue
+        # 申请人两种身份都有时，另一种对上了也是本人
+        other_key = "user_id" if key == "open_id" else "open_id"
+        other_mine = getattr(applicant, other_key)
+        if other_mine and str(task.get(other_key) or "") == other_mine:
+            continue
+        return True
+    return False
 
 
 def _form_value(form: object, widget_id: str) -> str:

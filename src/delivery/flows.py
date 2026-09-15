@@ -20,7 +20,14 @@ from typing import Callable, Optional
 from . import catalog as catalog_mod
 from . import policies as policies_mod
 from . import tickets as t
-from .approval import STATUS_APPROVED, STATUS_PENDING, Applicant, FeishuApproval, instance_links
+from .approval import (
+    STATUS_APPROVED,
+    STATUS_PENDING,
+    Applicant,
+    FeishuApproval,
+    SelfApprovalError,
+    instance_links,
+)
 from .errors import DeliveryError
 from .provision import ProvisionError, describe_error
 
@@ -663,6 +670,10 @@ class Flows:
             fields={"approval": {"instance_code": code, "status": status}},
         )
         if ticket["kind"] == catalog_mod.KIND_CREDENTIAL:
+            try:
+                self._verify_approval(ticket)
+            except SelfApprovalError as exc:
+                return self._close_self_approved(ticket_id, exc)
             valid_until = now + ticket["template"]["valid_days"] * 86400
             ticket = self.store.update(
                 ticket_id,
@@ -677,6 +688,17 @@ class Flows:
             )
             return self._emit("claimable", ticket)
         return self.execute(ticket_id, actor="system")
+
+    def _close_self_approved(self, ticket_id: str, exc: Exception) -> dict:
+        closed = self.store.update(
+            ticket_id,
+            actor="system",
+            expect=[t.APPROVED],
+            to=t.CLOSED,
+            event="approval_invalid",
+            note=describe_error(exc) or "审批没有经过申请人以外的审批人同意",
+        )
+        return self._emit("rejected", closed)
 
     def _maybe_expire(self, ticket: dict) -> dict:
         if self._clock() < float(ticket.get("valid_until_ts") or 0):
@@ -871,7 +893,12 @@ class Flows:
                 continue
             try:
                 if ticket.get("kind") == catalog_mod.KIND_CREDENTIAL:
-                    self._verify_approval(ticket)
+                    try:
+                        self._verify_approval(ticket)
+                    except SelfApprovalError as exc:
+                        after = self._close_self_approved(ticket["id"], exc)
+                        out.append(f"{ticket['id']}：审批只有申请人本人，已关闭")
+                        continue
                     valid_until = _ts(ticket.get("updated_at")) + (
                         ticket["template"]["valid_days"] * 86400
                     )

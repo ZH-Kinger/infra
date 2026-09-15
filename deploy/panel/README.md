@@ -103,7 +103,8 @@ delivery refresh --trust-unverified-when-derivable   # 和手动生成提案时�
 设计与安全规则见 [docs/cloud-access-platform.md](../../docs/cloud-access-platform.md)。上线前按顺序准备：
 
 1. **飞书审批**：在飞书审批后台建一个审批定义，表单放 4 个控件：申请单号（单行文本）、申请类型（单行文本）、
-   申请内容（多行文本）、申请理由（多行文本），审批人按公司流程配。面板的飞书应用要有
+   申请内容（多行文本）、申请理由（多行文本），审批人按公司流程配。**审批人不能只有申请人本人，也不要开「审批人为空时自动通过」**：
+   开通前会核对至少有一位申请人以外的审批人点了通过，否则一律不开通（`allow_self_approval: true` 才放开，不建议）。面板的飞书应用要有
    `approval:approval` 权限。查控件 ID，填进 `identity/approval.json`（格式见 `identity/approval.example.json`）：
 
    ```bash

@@ -82,7 +82,13 @@ class FakeFeishu:
             return {"code": 0, "data": {"instance_code": code}}
         if method == "GET" and "/approval/v4/instances/" in url:
             code = url.rsplit("/", 1)[1]
-            return {"code": 0, "data": dict(self.instances[code])}
+            data = dict(self.instances[code])
+            if data["status"] == "APPROVED" and "task_list" not in data:
+                # 默认有一位申请人以外的审批人点了通过；测试自审批时显式给 task_list
+                data["task_list"] = [
+                    {"open_id": "ou_approver", "user_id": "u_approver", "status": "APPROVED"}
+                ]
+            return {"code": 0, "data": data}
         if "/instances/cancel" in url:
             self.instances[body["instance_code"]]["status"] = "CANCELED"
             return {"code": 0, "data": {}}
@@ -234,6 +240,93 @@ class ApprovalTests(unittest.TestCase):
             self.approval.verify_approved(instance_code=self.code, ticket_id="REQ-1", applicant=LI)
         self.feishu.instances[self.code]["status"] = "APPROVED"
         self.approval.verify_approved(instance_code=self.code, ticket_id="REQ-1", applicant=LI)
+
+    def test_self_or_auto_approval_is_refused(self):
+        inst = self.feishu.instances[self.code]
+        inst["status"] = "APPROVED"
+        verify = lambda: self.approval.verify_approved(  # noqa: E731
+            instance_code=self.code, ticket_id="REQ-1", applicant=LI
+        )
+        cases = {
+            "只有申请人自己": [{"open_id": "ou_li", "user_id": "", "status": "APPROVED"}],
+            "自动通过": [{"open_id": "", "user_id": "", "status": "APPROVED"}],
+            "别人还没批": [{"open_id": "ou_boss", "status": "PENDING"}],
+            "别人已转交": [{"open_id": "ou_boss", "status": "TRANSFERRED"}],
+            "没有任务": [],
+        }
+        for label, tasks in cases.items():
+            inst["task_list"] = tasks
+            with self.assertRaises(ApprovalError, msg=label):
+                verify()
+        inst["task_list"] = [
+            {"open_id": "ou_li", "status": "APPROVED"},
+            {"open_id": "ou_boss", "user_id": "u_boss", "status": "APPROVED"},
+        ]
+        verify()
+        # 管理员明确允许（比如审批定义本身就是本人确认）才放行
+        relaxed = FeishuApproval(
+            ApprovalConfig(CONFIG.approval_code, CONFIG.widgets, allow_self_approval=True),
+            lambda: "tok",
+            transport=self.feishu,
+        )
+        inst["task_list"] = []
+        relaxed.verify_approved(instance_code=self.code, ticket_id="REQ-1", applicant=LI)
+
+    def test_self_approval_check_uses_applicants_own_id_type(self):
+        from delivery.approval import _approved_by_other
+
+        iam = Applicant(union_id="on_x", name="x", open_id="", user_id="u_self")
+        refused = [
+            [{"open_id": "ou_someone", "user_id": "u_self", "status": "APPROVED"}],
+            [{"open_id": "ou_someone", "status": "APPROVED"}],  # 缺 user_id：认不出是不是本人
+        ]
+        for tasks in refused:
+            self.assertFalse(_approved_by_other({"task_list": tasks}, iam), tasks)
+        self.assertTrue(
+            _approved_by_other(
+                {"task_list": [{"open_id": "ou_boss", "user_id": "u_boss", "status": "APPROVED"}]},
+                iam,
+            )
+        )
+        feishu = Applicant(union_id="on_y", name="y", open_id="ou_self")
+        self.assertFalse(
+            _approved_by_other({"task_list": [{"user_id": "u_boss", "status": "APPROVED"}]}, feishu)
+        )
+        both = Applicant(union_id="on_z", name="z", open_id="ou_z", user_id="u_z")
+        self.assertFalse(
+            _approved_by_other(
+                {"task_list": [{"open_id": "ou_other", "user_id": "u_z", "status": "APPROVED"}]},
+                both,
+            )
+        )
+
+    def test_self_approved_credential_is_closed_not_claimable(self):
+        h = Harness()
+        ticket = h.submit(template="dev-sts", payload={"hours": 2})
+        inst = h.feishu.instances[ticket["approval"]["instance_code"]]
+        inst.update(status="APPROVED", task_list=[{"open_id": "ou_li", "status": "APPROVED"}])
+        closed = h.flows.sync(ticket["id"], force=True)
+        self.assertEqual(closed["status"], t.CLOSED)
+        self.assertEqual(closed["events"][-1]["event"], "approval_invalid")
+        self.assertEqual(h.executor.actions, [])
+
+    def test_self_approval_blocks_execution_end_to_end(self):
+        h = Harness()
+        ticket = h.submit()
+        inst = h.feishu.instances[ticket["approval"]["instance_code"]]
+        inst.update(status="APPROVED", task_list=[{"open_id": "ou_li", "status": "APPROVED"}])
+        done = h.flows.sync(ticket["id"], force=True)
+        self.assertEqual(done["status"], t.FAILED)
+        self.assertEqual(h.executor.actions, [])
+
+    def test_config_allow_self_approval_must_be_bool(self):
+        path = Path(tempfile.mkdtemp()) / "approval.json"
+        base = {"approval_code": "A", "widgets": dict(CONFIG.widgets)}
+        path.write_text(json.dumps({**base, "allow_self_approval": "yes"}), encoding="utf-8")
+        with self.assertRaises(ApprovalError):
+            ApprovalConfig.load(str(path))
+        path.write_text(json.dumps(base), encoding="utf-8")
+        self.assertFalse(ApprovalConfig.load(str(path)).allow_self_approval)
 
     def test_instance_must_match_ticket_applicant_and_definition(self):
         self.feishu.instances[self.code]["status"] = "APPROVED"
