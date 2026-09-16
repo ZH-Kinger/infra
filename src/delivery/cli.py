@@ -224,6 +224,13 @@ def build_parser() -> argparse.ArgumentParser:
     iamx = isub.add_parser(
         "iam-export", help="从人员名册导出给 WUJI IAM 导入的用户属性表（每人各云用户名）"
     )
+    iamx.add_argument(
+        "--adopt-result",
+        default="",
+        metavar="FILE",
+        help="IT 回传的导入结果 CSV（feishu_union_id,email,name,app,value,result）："
+        "把它采纳为新的确认基线，之后的增量直接按 union_id 比对",
+    )
     iamx.add_argument("--people", default="identity/people.json")
     iamx.add_argument(
         "--attributes",
@@ -1237,9 +1244,22 @@ def _cmd_identity_iam_export(args) -> int:
     from . import people as people_mod
 
     if args.confirm_sent:
-        if args.baseline or args.record or args.allow_mass_remove or args.resolved:
+        if (
+            args.baseline
+            or args.record
+            or args.allow_mass_remove
+            or args.resolved
+            or args.adopt_result
+        ):
             raise DeliveryError("--confirm-sent 只做确认，不能和 --baseline / --record 等一起用")
         return _confirm_sent(args.confirm_sent)
+    if args.adopt_result and (
+        args.baseline or args.record or args.resolved or args.allow_mass_remove
+    ):
+        raise DeliveryError(
+            "--adopt-result 只做基线采纳，不能和 --baseline / --record / "
+            "--allow-mass-remove 等一起用（--out 在这个模式下也用不上）"
+        )
     sent_dir = Path(IAM_SENT_DIR).resolve()
     if Path(args.out).resolve().is_relative_to(sent_dir):
         raise DeliveryError(f"--out 不能写到 {IAM_SENT_DIR} 里：那里只放确认过的全量存档")
@@ -1297,6 +1317,8 @@ def _cmd_identity_iam_export(args) -> int:
         raise DeliveryError(f"{attr_file} 里有两个云账号用了同一个应用标识，值会互相覆盖")
 
     full = iam_export.sanitize(_iam_rows(index, specs))
+    if args.adopt_result:
+        return _adopt_result(args.adopt_result, full)
     rows = full
     notes: list = []
     baseline = None
@@ -1351,6 +1373,60 @@ def _cmd_identity_iam_export(args) -> int:
         "  导入须知：match_by=email 的行只按邮箱回填一次，且只用于 IAM 里还没有 union_id 的用户，"
         "回填时同时写下 union_id；remove（match_by=value）删除当前值恰好等于 value 的那个用户的该键"
     )
+    return 0
+
+
+def _adopt_result(path: str, full: list) -> int:
+    """IT 回传的导入结果 → 新的确认基线。
+
+    第一次导出按邮箱回填、基线里没有 union_id；回传结果每行都带 union_id。不采纳的话，
+    下次增量会把所有人「按值删掉再按 union_id 写回」，IT 白导一遍。
+    """
+    import csv
+
+    from . import iam_export
+
+    src = Path(path)
+    if src.is_symlink() or not src.is_file():
+        raise DeliveryError(f"{src} 不存在或是符号链接")
+    try:
+        with src.open(encoding="utf-8-sig", newline="") as fh:
+            reader = csv.DictReader(fh)
+            missing = sorted(set(iam_export.RESULT_COLUMNS) - set(reader.fieldnames or []))
+            if missing:
+                raise DeliveryError(f"{src} 缺列：{'、'.join(missing)}")
+            result_rows = [{k: (r.get(k) or "") for k in iam_export.RESULT_COLUMNS} for r in reader]
+    except OSError as exc:
+        raise DeliveryError(f"读不了 {src}：{exc}") from exc
+    except csv.Error as exc:
+        raise DeliveryError(f"{src} 不是合法 CSV：{exc}") from exc
+
+    sent = Path(IAM_SENT_DIR)
+    previous = iam_export.confirmed_archives(sent)
+    # 旧基线里回传没覆盖的值还在 IAM 里：不带上就再也不会生成它们的 remove
+    old_rows = _read_iam_csv(previous[-1]) if previous else []
+    baseline, notes, carried = iam_export.adopt_result(result_rows, full, old_rows)
+    if len(baseline) <= carried:
+        raise DeliveryError(f"{src} 里没有一条导入成功的记录，不能当基线")
+    archive = sent / time.strftime("%Y%m%d-%H%M%S.csv")
+    n = 1
+    while archive.exists() or (sent / "pending" / archive.name).exists():
+        archive = archive.with_name(f"{archive.stem.split('~')[0]}~{n}.csv")
+        n += 1
+    if previous and iam_export.archive_order(archive) <= iam_export.archive_order(previous[-1]):
+        raise DeliveryError(
+            f"新存档 {archive.name} 排不到最新（当前最新 {previous[-1].name}）：检查系统时间"
+        )
+    _require_identity_dir(archive.resolve())
+    _write_iam_csv(archive, baseline)
+    sets = sum(1 for r in baseline if r["action"] == "set")
+    print(
+        f"已采纳为基线 {archive}（权限 600）：{sets} 条 set"
+        + (f"（其中 {carried} 条沿用旧基线）" if carried else "，全部按 union_id 匹配")
+    )
+    for note in notes:
+        print(f"  ⚠ {note}")
+    print("  之后导增量： delivery identity iam-export --baseline latest --record")
     return 0
 
 

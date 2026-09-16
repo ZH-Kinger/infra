@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from pathlib import Path
 
 from .errors import DeliveryError
@@ -240,6 +241,150 @@ def diff(
                 )
     # remove 必须排在 set 前面：值从 P 转给 Q 时先 set 会让两人同时持有，按值删除就找到两个人
     return removes + out, notes
+
+
+#: IT 回传的导入结果列（第一列是 union_id：IAM 里写进去的是谁）
+RESULT_COLUMNS = ("feishu_union_id", "email", "name", "app", "value", "result")
+#: 导入成功的结果串：ok / OK / ok: created。别的一律不当成功
+_RESULT_OK = re.compile(r"^ok\b", re.IGNORECASE)
+#: 提示最多列多少条，多了只给条数（一份对不上的回传会把整份名册的邮箱刷屏）
+_NOTE_LIMIT = 20
+
+
+def adopt_result(result_rows: list, current: list, baseline: list = ()) -> tuple:
+    """把 IT 回传的导入结果当作新基线。
+
+    第一次导出是按邮箱回填的，基线里没有 union_id；IT 导入后回传的结果每行都带 union_id。
+    直接拿旧基线做增量会输出一大批「按值删掉再按 union_id 写回」的同值行，让 IT 白导一遍，
+    所以采纳回传结果作为基线：IAM 里此刻实际是什么，就记什么。
+
+    **旧基线里回传没覆盖到的 set 行照抄进新基线**：那些值还在 IAM 里。丢掉它们，
+    离职的人就再也不会生成 remove，属性永远留在 IAM（和 --record 的守卫是同一个道理）。
+
+    返回 (基线行, 提示, 沿用的旧基线行数)。IT 那边没导进去的行只做提示，不新增进基线。
+    """
+    notes, baseline_rows, carried = [], [], 0
+    refused: set = set()  # IT 明确说没导入的：IAM 里没有，旧基线里的同一条也不能再算数
+    by_key = {(r["feishu_union_id"], r["app"]): r for r in current if r["action"] == "set"}
+    by_mail = {(r["email"].lower(), r["app"]): r for r in current if r["action"] == "set"}
+    seen: dict = {}
+    for row in result_rows:
+        uid = str(row.get("feishu_union_id") or "").strip()
+        email = str(row.get("email") or "").strip()
+        app = str(row.get("app") or "").strip()
+        value = str(row.get("value") or "").strip()
+        result = str(row.get("result") or "").strip()
+        # 只认 ok 开头为导入成功；其余一律只提示、不进基线（下次增量会重新发）。
+        # 不按「看不懂就拒绝整份」处理：IT 写 failed / not found 都很正常，逼人手改回传文件更糟
+        if not _RESULT_OK.match(result):
+            notes.append(f"IT 未导入：{email} / {app}（{result or '原因未写'}）")
+            if uid and app:
+                refused.add((uid, app))
+            if email and app:
+                refused.add((email.lower(), app))
+            continue
+        if not uid or not app or not value:
+            notes.append(f"回传结果缺字段，跳过：{email or '(无邮箱)'} / {app or '(无应用)'}")
+            continue
+        old = seen.get((uid, app))
+        if old is not None:
+            if old["value"] != value:
+                raise IamDiffError(
+                    f"回传里同一个人同一应用有两个值：{email} / {app}："
+                    f"{old['value']} 和 {value}，整份拒绝"
+                )
+            continue  # 完全重复的行：留一条就够（留两条会让下次增量把其中一条 remove 掉）
+        mine = by_key.get((uid, app)) or by_mail.get((email.lower(), app))
+        if mine is None:
+            notes.append(
+                f"回传里有、名册里没有：{email} / {app} = {value}（有人离职或对应关系变了？）"
+            )
+        elif mine["value"] != value:
+            notes.append(
+                f"IAM 里的值和名册不一致，按 IAM 记：{email} / {app}：{value} ≠ {mine['value']}"
+            )
+        entry = {
+            "feishu_union_id": uid,
+            "email": email,
+            "name": str(row.get("name") or "").strip(),
+            "app": app,
+            "value": value,
+            "action": "set",
+            "match_by": "feishu_union_id",
+            "problem": "",
+        }
+        seen[(uid, app)] = entry
+        baseline_rows.append(entry)
+
+    covered_uid = set(seen)
+    covered_mail = {(r["email"].lower(), r["app"]) for r in baseline_rows if r["email"]}
+    # 同一条 IAM 记录可能对不上 uid / 邮箱（IT 按 union_id 匹配、邮箱列留空），但值是同一个：
+    # 再按 (应用, 值) 认一次，否则旧基线那条会被重复带一份，下次增量把在职的人 remove 掉
+    covered_value = {(r["app"], r["value"]) for r in baseline_rows}
+    # 旧基线里没被回传覆盖的 set 行：IAM 里还留着，照抄，下次增量按名册决定保留还是 remove
+    for r in baseline:
+        if r["action"] != "set":
+            continue
+        uid_key = (r["feishu_union_id"], r["app"]) if r["feishu_union_id"] else None
+        mail_key = (r["email"].lower(), r["app"]) if r["email"] else None
+        if (uid_key and uid_key in covered_uid) or (mail_key and mail_key in covered_mail):
+            continue
+        if (uid_key and uid_key in refused) or (mail_key and mail_key in refused):
+            # IT 这次明确没导入：IAM 里没有这个值，基线不能记着它，否则下次增量不会补发
+            notes.append(f"IT 明确没导入、旧基线里有：{r['email']} / {r['app']}（下次增量会重发）")
+            continue
+        if (r["app"], r["value"]) in covered_value:
+            # 同一个值这次归了别人：号被回收转给了新同事。旧的那条不能带（带上就两个人同值，
+            # 说不清该删谁），但也不能当没发生：旧属性可能还留在 IAM 里，得有人去看一眼
+            owner = next(
+                (
+                    x["email"]
+                    for x in baseline_rows
+                    if (x["app"], x["value"]) == (r["app"], r["value"])
+                ),
+                "",
+            )
+            notes.append(
+                f"{r['app']} 的 {r['value']} 这次记在 {owner or '别人'} 名下，"
+                f"旧基线里是 {r['email']}："
+                "换人或只是换了邮箱都可能，换人的话请确认 IAM 里旧那条属性已经清掉"
+            )
+            continue
+        baseline_rows.append(dict(r))
+        carried += 1
+        covered_value.add((r["app"], r["value"]))
+        if mail_key:
+            covered_mail.add(mail_key)
+        if uid_key:
+            covered_uid.add(uid_key)
+        notes.append(
+            f"回传里没有、旧基线里有：{r['email']} / {r['app']}（沿用旧值，下次增量再定去留）"
+        )
+
+    missing = []
+    for r in current:
+        if r["action"] != "set":
+            continue
+        uid_key = (r["feishu_union_id"], r["app"]) if r["feishu_union_id"] else None
+        mail_key = (r["email"].lower(), r["app"]) if r["email"] else None
+        if (
+            (uid_key and uid_key in covered_uid)
+            or (mail_key and mail_key in covered_mail)
+            or (r["app"], r["value"]) in covered_value
+        ):
+            continue
+        missing.append(r)
+    for r in missing[:_NOTE_LIMIT]:
+        notes.append(f"名册里有、这次没进 IAM：{r['email']} / {r['app']}（下次增量会带上）")
+    if len(missing) > _NOTE_LIMIT:
+        notes.append(f"另有 {len(missing) - _NOTE_LIMIT} 条名册里有、这次没进 IAM 的记录")
+    # 同一个应用里同一个值出现两次：remove 是按值删的，这种基线本身就说不清该删谁
+    dupes = Counter((r["app"], r["value"]) for r in baseline_rows if r["action"] == "set")
+    clash = [k for k, n in dupes.items() if n > 1]
+    if clash:
+        app, value = clash[0]
+        raise IamDiffError(f"基线里 {app} 的值 {value} 属于两个人，说不清该删谁，整份拒绝")
+    return sanitize(baseline_rows), notes, carried
 
 
 def _normalize_name(name: str) -> str:

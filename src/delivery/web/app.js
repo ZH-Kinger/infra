@@ -5,7 +5,7 @@
 //   · 身份和权限数据只存在内存里，不写 localStorage / sessionStorage。
 //   · 非管理员永远不发 /api/admin/* 请求——不靠后端 403 兜底来「隐藏」页面。
 
-import { ApiError, api, apiPost, clear, h, mount, platformTag, requestTitle, safePath } from "./core.js";
+import { ApiError, api, apiPost, clear, h, mount, platformTag, requestTitle, safeHttps, safePath } from "./core.js";
 import { renderAssets } from "./assets.js";
 import { renderHealth } from "./health.js";
 import { permissionRoutes } from "./permissions.js";
@@ -336,6 +336,18 @@ function grantsSection(acct, requests) {
   );
 }
 
+// 「进入控制台」：公司 IAM 发起的 SSO 登录，地址在 identity/accounts.json 里配，只放行 https
+function consoleLink(acct) {
+  const url = safeHttps(acct.console_url);
+  return url
+    ? h(
+        "a",
+        { class: "btn ghost small push", href: url, target: "_blank", rel: "noopener noreferrer" },
+        "进入控制台 ↗",
+      )
+    : null;
+}
+
 function accountCard(acct, requests) {
   const gone = acct.in_snapshot === false;
   const highRisk = acct.high_risk || [];
@@ -351,6 +363,7 @@ function accountCard(acct, requests) {
     ),
     highRisk.length ? h("span", { class: "pill crit" }, `高危 ${highRisk.length}`) : null,
     gone ? h("span", { class: "pill" }, "快照中不存在") : null,
+    consoleLink(acct),
   );
 
   const sections = [];

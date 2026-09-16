@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import urllib.parse
 from typing import Mapping, Optional
 
 from .inventory import Snapshot, is_high_risk
@@ -25,6 +26,13 @@ class Labels:
 
     账号标签来自 gitignored 的 `identity/accounts.json`（形如
     `{"aliyun/1704…": "阿里云主账号"}`）：账号 ID 不写进公开仓库的代码里。
+
+    值也可以写成对象，额外给这个云账号配一条「用公司账号进控制台」的入口（IdP 发起的 SSO 链接）::
+
+        {"aliyun/1704…": {"label": "阿里云主账号",
+                          "console_url": "https://iam.example.com/application/saml/x/sso/binding/init/"}}
+
+    只放行 https：这个地址会直接变成员工页面上的按钮。
     """
 
     def __init__(self, platforms: Optional[Mapping] = None, accounts: Optional[Mapping] = None):
@@ -34,8 +42,23 @@ class Labels:
     def platform(self, pid: str) -> str:
         return self.platforms.get(pid, pid)
 
+    def _entry(self, pid: str, account: str) -> Mapping:
+        value = self.accounts.get(f"{pid}/{account}")
+        return value if isinstance(value, Mapping) else {"label": value or ""}
+
     def account(self, pid: str, account: str) -> str:
-        return self.accounts.get(f"{pid}/{account}") or f"{self.platform(pid)} {account}"
+        entry = self._entry(pid, account)
+        label = entry.get("label") if isinstance(entry.get("label"), str) else ""
+        return label or f"{self.platform(pid)} {account}"
+
+    def console_url(self, pid: str, account: str) -> str:
+        """员工点「进入控制台」用的 IdP 发起登录地址；没配或不是 https 就没有这个按钮。"""
+        url = self._entry(pid, account).get("console_url")
+        if not isinstance(url, str) or not url:
+            return ""
+        parsed = urllib.parse.urlsplit(url)
+        bad = any(c in url for c in ('"', "'", "<", ">", " ", "\\"))
+        return url if parsed.scheme == "https" and parsed.netloc and not bad else ""
 
 
 def _account_card(snapshot: Optional[Snapshot], ref: AccountRef, labels: Labels) -> dict:
@@ -44,6 +67,7 @@ def _account_card(snapshot: Optional[Snapshot], ref: AccountRef, labels: Labels)
         "platform_display": labels.platform(ref.platform),
         "account": ref.account,
         "account_label": labels.account(ref.platform, ref.account),
+        "console_url": labels.console_url(ref.platform, ref.account),
         "name": ref.name,
         "display_name": "",
         "in_snapshot": False,

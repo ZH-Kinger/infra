@@ -514,6 +514,281 @@ class RecordAndLatestTests(_Repo):
 
 
 @unittest.skipUnless(shutil.which("git"), "需要 git")
+class AdoptResultTests(_Repo):
+    """IT 回传的导入结果采纳为基线：之后的增量按 union_id 比对，不再「删了再写回」。"""
+
+    def write_result(self, rows, name="result.csv"):
+        path = self.id_dir / name
+        with path.open("w", encoding="utf-8-sig", newline="") as fh:
+            w = csv.DictWriter(
+                fh, fieldnames=["feishu_union_id", "email", "name", "app", "value", "result"]
+            )
+            w.writeheader()
+            for r in rows:
+                w.writerow(r)
+        return path
+
+    def result_row(self, uid, email, app, value, result="ok"):
+        return {
+            "feishu_union_id": uid,
+            "email": email,
+            "name": "某人",
+            "app": app,
+            "value": value,
+            "result": result,
+        }
+
+    def test_adopted_baseline_makes_next_increment_empty(self):
+        self.write_people(
+            roster(
+                person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P"),
+                person("安娜", "a@wuji.tech", [ali("anna")], union_id="on_A"),
+            )
+        )
+        # 第一次是按邮箱回填导出的（基线里没有 union_id）
+        result = self.write_result(
+            [
+                self.result_row("on_P", "p@wuji.tech", A_APP, "peter"),
+                self.result_row("on_A", "a@wuji.tech", A_APP, "anna"),
+            ]
+        )
+        self.assertEqual(self.export("--adopt-result", str(result)), 0)
+        archives = sorted((self.id_dir / "iam-sent").glob("*.csv"))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(archives[0].stat().st_mode & 0o777, 0o600)
+        adopted = read_rows(archives[0])
+        self.assertEqual({r["match_by"] for r in adopted}, {"feishu_union_id"})
+        self.assertEqual(self.export("--baseline", "latest"), 0)
+        self.assertEqual(read_rows(self.id_dir / "out.csv"), [])
+
+    def test_skipped_rows_and_mismatches_are_reported_not_adopted(self):
+        self.write_people(
+            roster(
+                person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P"),
+                person("离职", "gone@wuji.tech", [ali("gone")], union_id="on_G"),
+            )
+        )
+        result = self.write_result(
+            [
+                self.result_row("on_P", "p@wuji.tech", A_APP, "peter-in-iam"),
+                self.result_row("", "gone@wuji.tech", A_APP, "", "skipped: 账号已停用(离职)"),
+                self.result_row("on_X", "x@wuji.tech", A_APP, "ghost"),
+            ]
+        )
+        self.assertEqual(self.export("--adopt-result", str(result)), 0)
+        self.assertIn("IT 未导入：gone@wuji.tech", self.stdout)
+        self.assertIn("回传里有、名册里没有：x@wuji.tech", self.stdout)
+        self.assertIn("IAM 里的值和名册不一致", self.stdout)
+        adopted = read_rows(sorted((self.id_dir / "iam-sent").glob("*.csv"))[0])
+        self.assertEqual(
+            {(r["email"], r["value"]) for r in adopted},
+            {("p@wuji.tech", "peter-in-iam"), ("x@wuji.tech", "ghost")},
+        )
+        # 基线里那个名册里没有的人 → 增量要删他，但整体消失的守卫先拦一道
+        self.assertEqual(self.export("--baseline", "latest"), 2)
+        self.assertIn("整体消失", self.stderr)
+        self.assertEqual(self.export("--baseline", "latest", "--allow-mass-remove"), 0)
+        rows = read_rows(self.id_dir / "out.csv")
+        # IAM 里存的值和名册不一致的那条，增量里按名册纠正回来
+        self.assertEqual(
+            [(r["email"], r["action"], r["value"]) for r in rows],
+            [
+                ("x@wuji.tech", "remove", "ghost"),
+                ("p@wuji.tech", "set", "peter"),
+                ("gone@wuji.tech", "set", "gone"),
+            ],
+        )
+
+    def test_old_baseline_rows_are_carried_so_removes_survive(self):
+        self.write_people(
+            roster(
+                person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P"),
+                person("离职", "z@wuji.tech", [ali("zack")]),
+            )
+        )
+        # 第一版基线（按邮箱回填，没有 union_id）
+        with mock.patch.object(cli.time, "strftime", side_effect=["20260915-100000.csv"]):
+            self.assertEqual(self.export("--record"), 0)
+        pending = sorted((self.id_dir / "iam-sent" / "pending").glob("*.csv"))[0]
+        self.assertEqual(self.export("--confirm-sent", str(pending)), 0)
+        # 离职的人从名册里消失，IT 的回传里也只有彼得
+        self.write_people(roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P")))
+        result = self.write_result([self.result_row("on_P", "p@wuji.tech", A_APP, "peter")])
+        self.assertEqual(self.export("--adopt-result", str(result)), 0)
+        self.assertIn("回传里没有、旧基线里有：z@wuji.tech", self.stdout)
+        # 采纳后依然会把离职的人从 IAM 里删掉
+        self.assertEqual(self.export("--baseline", "latest", "--allow-mass-remove"), 0)
+        rows = read_rows(self.id_dir / "out.csv")
+        self.assertEqual(
+            [(r["email"], r["action"], r["value"]) for r in rows],
+            [("z@wuji.tech", "remove", "zack")],
+        )
+
+    def test_duplicate_and_conflicting_result_rows(self):
+        self.write_people(roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P")))
+        same = self.write_result(
+            [
+                self.result_row("on_P", "p@wuji.tech", A_APP, "peter"),
+                self.result_row("on_P", "p@wuji.tech", A_APP, "peter"),
+            ]
+        )
+        self.assertEqual(self.export("--adopt-result", str(same)), 0)
+        adopted = read_rows(sorted((self.id_dir / "iam-sent").glob("*.csv"))[-1])
+        self.assertEqual(len(adopted), 1)  # 重复行只留一条，否则下次增量会把它 remove 掉
+        self.assertEqual(self.export("--baseline", "latest"), 0)
+        self.assertEqual(read_rows(self.id_dir / "out.csv"), [])
+        conflict = self.write_result(
+            [
+                self.result_row("on_P", "p@wuji.tech", A_APP, "peter"),
+                self.result_row("on_P", "p@wuji.tech", A_APP, "peter2"),
+            ],
+            "conflict.csv",
+        )
+        self.assertEqual(self.export("--adopt-result", str(conflict)), 2)
+        self.assertIn("两个值", self.stderr)
+
+    def test_result_strings(self):
+        self.write_people(roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P")))
+        upper = self.write_result(
+            [self.result_row("on_P", "p@wuji.tech", A_APP, "peter", "OK: created")]
+        )
+        self.assertEqual(self.export("--adopt-result", str(upper)), 0)
+        # IT 写 failed / 待人工处理 之类：不当成功，只提示，下次增量会重新发，不逼人手改回传文件
+        weird = self.write_result(
+            [
+                self.result_row("on_P", "p@wuji.tech", A_APP, "peter"),
+                self.result_row("on_Q", "q@wuji.tech", A_APP, "q1", "failed: 查无此人"),
+            ],
+            "weird.csv",
+        )
+        self.assertEqual(self.export("--adopt-result", str(weird)), 0)
+        self.assertIn("IT 未导入：q@wuji.tech", self.stdout)
+        adopted = read_rows(sorted((self.id_dir / "iam-sent").glob("*.csv"))[-1])
+        self.assertEqual([r["email"] for r in adopted], ["p@wuji.tech"])
+
+    def test_result_without_email_column_does_not_duplicate_baseline_row(self):
+        """IT 按 union_id 匹配、邮箱列留空：同一条记录不能既算回传又算旧基线，
+        否则下次增量会把在职的人删掉。"""
+        self.write_people(roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P")))
+        with mock.patch.object(cli.time, "strftime", side_effect=["20260915-100000.csv"]):
+            self.assertEqual(self.export("--record"), 0)
+        self.assertEqual(
+            self.export(
+                "--confirm-sent", str(self.id_dir / "iam-sent" / "pending" / "20260915-100000.csv")
+            ),
+            0,
+        )
+        result = self.write_result([self.result_row("on_P", "", A_APP, "peter")])
+        self.assertEqual(self.export("--adopt-result", str(result)), 0)
+        adopted = read_rows(sorted((self.id_dir / "iam-sent").glob("*.csv"))[-1])
+        self.assertEqual(len(adopted), 1)
+        self.assertEqual(self.export("--baseline", "latest"), 0)
+        self.assertEqual(read_rows(self.id_dir / "out.csv"), [])
+
+    def test_account_handover_is_flagged_not_silently_dropped(self):
+        """号回收给了新同事：旧那条不能进基线，但要提示人去确认 IAM 里旧属性清掉了。"""
+        self.write_people(roster(person("离职", "a@wuji.tech", [ali("user0")])))
+        with mock.patch.object(cli.time, "strftime", side_effect=["20260915-100000.csv"]):
+            self.assertEqual(self.export("--record"), 0)
+        self.assertEqual(
+            self.export(
+                "--confirm-sent",
+                str(self.id_dir / "iam-sent" / "pending" / "20260915-100000.csv"),
+            ),
+            0,
+        )
+        self.write_people(roster(person("新人", "b@wuji.tech", [ali("user0")], union_id="on_B")))
+        result = self.write_result([self.result_row("on_B", "b@wuji.tech", A_APP, "user0")])
+        self.assertEqual(self.export("--adopt-result", str(result)), 0)
+        self.assertIn("这次记在 b@wuji.tech 名下，旧基线里是 a@wuji.tech", self.stdout)
+        adopted = read_rows(sorted((self.id_dir / "iam-sent").glob("*.csv"))[-1])
+        self.assertEqual([(r["email"], r["value"]) for r in adopted], [("b@wuji.tech", "user0")])
+
+    def test_result_with_no_successful_rows_is_refused_even_with_old_baseline(self):
+        self.write_people(roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P")))
+        with mock.patch.object(cli.time, "strftime", side_effect=["20260915-100000.csv"]):
+            self.assertEqual(self.export("--record"), 0)
+        self.assertEqual(
+            self.export(
+                "--confirm-sent",
+                str(self.id_dir / "iam-sent" / "pending" / "20260915-100000.csv"),
+            ),
+            0,
+        )
+        nothing = self.write_result(
+            [self.result_row("on_P", "p@wuji.tech", A_APP, "peter", "failed: 接口超时")]
+        )
+        self.assertEqual(self.export("--adopt-result", str(nothing)), 2)
+        self.assertIn("没有一条导入成功", self.stderr)
+        self.assertEqual(len(sorted((self.id_dir / "iam-sent").glob("*.csv"))), 1)
+
+    def test_explicitly_failed_row_is_not_carried_so_it_gets_resent(self):
+        """IT 说「没导入」的那条，基线不能记着它，否则下次增量不会补发。"""
+        both = roster(
+            person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P"),
+            person("小 Q", "q@wuji.tech", [ali("q1")], union_id="on_Q"),
+        )
+        self.write_people(both)
+        with mock.patch.object(cli.time, "strftime", side_effect=["20260915-100000.csv"]):
+            self.assertEqual(self.export("--record"), 0)
+        self.assertEqual(
+            self.export(
+                "--confirm-sent",
+                str(self.id_dir / "iam-sent" / "pending" / "20260915-100000.csv"),
+            ),
+            0,
+        )
+        result = self.write_result(
+            [
+                self.result_row("on_P", "p@wuji.tech", A_APP, "peter", "failed: 查无此人"),
+                self.result_row("on_Q", "q@wuji.tech", A_APP, "q1"),
+            ]
+        )
+        self.assertEqual(self.export("--adopt-result", str(result)), 0)
+        self.assertIn("IT 明确没导入、旧基线里有：p@wuji.tech", self.stdout)
+        adopted = read_rows(sorted((self.id_dir / "iam-sent").glob("*.csv"))[-1])
+        self.assertEqual([r["email"] for r in adopted], ["q@wuji.tech"])
+        self.assertEqual(self.export("--baseline", "latest"), 0)
+        rows = read_rows(self.id_dir / "out.csv")
+        self.assertEqual([(r["email"], r["action"]) for r in rows], [("p@wuji.tech", "set")])
+
+    def test_two_people_same_value_is_refused(self):
+        self.write_people(roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P")))
+        clash = self.write_result(
+            [
+                self.result_row("on_P", "p@wuji.tech", A_APP, "peter"),
+                self.result_row("on_Q", "q@wuji.tech", A_APP, "peter"),
+            ]
+        )
+        self.assertEqual(self.export("--adopt-result", str(clash)), 2)
+        self.assertIn("属于两个人", self.stderr)
+
+    def test_missing_rows_note_is_capped(self):
+        many = [person(f"人{i}", f"u{i}@wuji.tech", [ali(f"u{i}")]) for i in range(25)]
+        self.write_people(
+            roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P"), *many)
+        )
+        result = self.write_result([self.result_row("on_P", "p@wuji.tech", A_APP, "peter")])
+        self.assertEqual(self.export("--adopt-result", str(result)), 0)
+        self.assertIn("另有 5 条", self.stdout)
+
+    def test_bad_result_files_rejected(self):
+        self.write_people(roster(person("彼得", "p@wuji.tech", [ali("peter")], union_id="on_P")))
+        wrong = self.id_dir / "wrong.csv"
+        wrong.write_text("email,app\nx@wuji.tech,aliyun_username\n", encoding="utf-8")
+        self.assertEqual(self.export("--adopt-result", str(wrong)), 2)
+        self.assertIn("缺列", self.stderr)
+        empty = self.write_result(
+            [self.result_row("", "p@wuji.tech", A_APP, "", "skipped: x")], "e.csv"
+        )
+        self.assertEqual(self.export("--adopt-result", str(empty)), 2)
+        self.assertIn("没有一条导入成功", self.stderr)
+        self.assertEqual(self.export("--adopt-result", str(self.id_dir / "nope.csv")), 2)
+        for extra in (["--record"], ["--allow-mass-remove"], ["--baseline", "latest"]):
+            self.assertEqual(self.export("--adopt-result", "identity/result.csv", *extra), 2)
+            self.assertIn("不能和", self.stderr)
+
+
 class GitGuardTests(_Repo):
     def git_init(self, path, ignore):
         subprocess.run(["git", "init", "-q", str(path)], check=True)  # noqa: S603,S607
