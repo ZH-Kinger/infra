@@ -78,7 +78,7 @@ class AliyunFake:
 def aliyun_fixture(**kw):
     base = dict(
         users=[
-            {"UserName": "alice", "DisplayName": "爱丽丝"},
+            {"UserName": "alice", "DisplayName": "爱丽丝", "Email": "alice@wuji.tech"},
             {"UserName": "bob", "DisplayName": "鲍勃"},
         ],
         groups=[{"GroupName": "ops", "Comments": "运维组"}, {"GroupName": "empty"}],
@@ -107,6 +107,8 @@ class AliyunCollectTests(unittest.TestCase):
         self.assertEqual(out["account"], UID)
         self.assertEqual([u["name"] for u in out["users"]], ["alice", "bob"])
         self.assertEqual(out["users"][0]["display_name"], "爱丽丝")
+        # 云上登记的邮箱进快照（只作展示）；没登记的是空串，不是缺字段
+        self.assertEqual([u["email"] for u in out["users"]], ["alice@wuji.tech", ""])
 
     def test_resource_group_scope_suffix_only_when_not_account_level(self):
         users = {u["name"]: u for u in self.collect(aliyun_fixture())["users"]}
@@ -310,7 +312,13 @@ class VolcanoFake:
 def volcano_fixture(**kw):
     base = dict(
         users=[
-            {"UserName": "ShenYi", "DisplayName": "沈一", "AccountId": 2000000001},
+            {
+                "UserName": "ShenYi",
+                "DisplayName": "沈一",
+                "AccountId": 2000000001,
+                "Email": "shen.yi@wuji.tech",
+                "EmailIsVerify": False,
+            },
             {"UserName": "WangEr", "DisplayName": "王二", "AccountId": 2000000001},
         ],
         groups=[{"UserGroupName": "algo", "DisplayName": "算法组"}],
@@ -331,6 +339,27 @@ def volcano_fixture(**kw):
     return VolcanoFake(**base)
 
 
+class OldSnapshotTests(unittest.TestCase):
+    def test_snapshot_without_email_field_still_parses(self):
+        """旧快照没有 email 字段（两个采集器以前都不填）：照常加载，值是空串。"""
+        from delivery.inventory import parse
+
+        snap = parse(
+            {
+                "captured_at": "2026-09-14T15:00:00+08:00",
+                "accounts": [
+                    {
+                        "platform": "aliyun",
+                        "account": "1000000000000001",
+                        "users": [{"name": "alice", "display_name": "爱丽丝", "policies": []}],
+                        "groups": [],
+                    }
+                ],
+            }
+        )
+        self.assertEqual(snap.users[0].email, "")
+
+
 class VolcanoCollectTests(unittest.TestCase):
     def collect(self, fake):
         return collect_volcano(VCREDS, transport=fake)
@@ -340,6 +369,7 @@ class VolcanoCollectTests(unittest.TestCase):
         self.assertEqual(out["platform"], "volcano")
         self.assertEqual(out["account"], "2000000001")
         self.assertEqual([u["name"] for u in out["users"]], ["ShenYi", "WangEr"])
+        self.assertEqual([u["email"] for u in out["users"]], ["shen.yi@wuji.tech", ""])
 
     def test_project_scope_suffix(self):
         users = {u["name"]: u for u in self.collect(volcano_fixture())["users"]}

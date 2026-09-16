@@ -128,6 +128,9 @@ def collect_aliyun(creds, *, transport=None, progress: Optional[Progress] = None
         {
             "name": str(u.get("UserName") or ""),
             "display_name": str(u.get("DisplayName") or ""),
+            # RAM 用户自带的邮箱字段，**只作展示**。注意这里通常是空的：
+            # 公司大多数人的邮箱只存在阿里云「安全邮箱」（IMS）里，映射提案那条链路才读得到
+            "email": str(u.get("Email") or ""),
             "policies": sorted(set(user_policies.get(str(u.get("UserName") or ""), []))),
             "groups": sorted(user_groups.get(str(u.get("UserName") or ""), [])),
         }
@@ -222,6 +225,9 @@ def collect_volcano(creds, *, transport=None, progress: Optional[Progress] = Non
             {
                 "name": name,
                 "display_name": str(u.get("DisplayName") or ""),
+                # 云上这个号自己登记的邮箱，**只作展示**：可能是个人邮箱、可能没验证。
+                # 认人只走名册（people.py），任何判断都要自己过企业域 + 验证态（见 ssomap.py）
+                "email": str(u.get("Email") or ""),
                 "policies": policies,
                 "groups": sorted(user_groups.get(name, [])),
             }

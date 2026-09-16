@@ -70,6 +70,7 @@ def _account_card(snapshot: Optional[Snapshot], ref: AccountRef, labels: Labels)
         "console_url": labels.console_url(ref.platform, ref.account),
         "name": ref.name,
         "display_name": "",
+        "email": "",
         "in_snapshot": False,
         "groups": [],
         "direct_policies": [],
@@ -86,6 +87,8 @@ def _account_card(snapshot: Optional[Snapshot], ref: AccountRef, labels: Labels)
         high += [f"{p}（经组 {g.name}）" for p in g.policies if is_high_risk(p)]
     card.update(
         display_name=user.display_name,
+        # 云上这个号自己登记的邮箱：只作展示，认人不看它
+        email=user.email,
         in_snapshot=True,
         groups=sorted({g.name for g in groups} | set(user.groups)),
         direct_policies=list(user.policies),

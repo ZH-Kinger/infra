@@ -211,6 +211,11 @@ class PersonDetailBoundaryTests(unittest.TestCase):
             [("aliyun", "lisi"), ("volcano", "SiLi")],
         )
 
+    def test_cloud_registered_email_is_shown_on_the_card(self):
+        """云上这个号自己登记的邮箱只作展示：认人不看它（名册才认人）。"""
+        card = {a["name"]: a for a in self._me("on_ls")["accounts"]}["lisi"]
+        self.assertEqual(card["email"], "li.si@wuji.tech")
+
     def test_nobody_elses_name_appears_anywhere_in_the_payload(self):
         """断在整个 JSON 串上：任何字段、任何嵌套里都不能带出别人。"""
         blob = json.dumps(self._me("on_ls"), ensure_ascii=False)

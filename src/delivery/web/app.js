@@ -360,6 +360,7 @@ function accountCard(acct, requests) {
       h("div", { class: "chips" }, platformTag(acct.platform, acct.platform_display), h("span", { class: "muted" }, acct.account_label || acct.account || "")),
       h("span", { class: "acct-name" }, acct.name || ""),
       acct.display_name && acct.display_name !== acct.name ? h("span", { class: "acct-sub" }, acct.display_name) : null,
+      acct.email ? h("span", { class: "acct-sub" }, `云上登记邮箱 ${acct.email}`) : null,
     ),
     highRisk.length ? h("span", { class: "pill crit" }, `高危 ${highRisk.length}`) : null,
     gone ? h("span", { class: "pill" }, "快照中不存在") : null,
