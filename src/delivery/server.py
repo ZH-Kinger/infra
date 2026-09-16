@@ -45,7 +45,7 @@ from typing import Callable, Optional
 
 from . import assets as assets_mod
 from . import health as health_mod
-from . import inventory
+from . import iam_sync, inventory
 from . import notify as notify_mod
 from . import people as people_mod
 from . import policies as policies_mod
@@ -324,6 +324,7 @@ _STATIC = {
     "/assets.js": ("assets.js", "text/javascript; charset=utf-8"),
     "/permissions.js": ("permissions.js", "text/javascript; charset=utf-8"),
     "/health.js": ("health.js", "text/javascript; charset=utf-8"),
+    "/iam.js": ("iam.js", "text/javascript; charset=utf-8"),
 }
 #: 页面只加载同源资源。前端不拼 innerHTML，这条 CSP 是第二道闸。
 _CSP = (
@@ -332,6 +333,8 @@ _CSP = (
 )
 _ADMIN_PEOPLE = "/api/admin/people/"
 _ADMIN_REVIEW = "/api/admin/review"
+_ADMIN_IAM = "/api/admin/iam-attributes"
+_ADMIN_IAM_FILE = "/api/admin/iam-attributes/file"
 
 
 _GZIP_MIN = 16 * 1024
@@ -383,9 +386,13 @@ class Backend:
         assets_path: Optional[str] = None,
         policies_path: Optional[str] = None,
         policy_rules_path: Optional[str] = None,
+        iam_spec_path: Optional[str] = None,
+        iam_out_path: Optional[str] = None,
         notify: Optional[Callable[[str, dict], None]] = None,
     ):
         self._notify = notify
+        self.iam_spec_path = iam_spec_path
+        self.iam_out_path = iam_out_path
         self.assets_path = assets_path
         self.policies_path = policies_path
         self.policy_rules_path = policy_rules_path
@@ -556,6 +563,16 @@ class Backend:
         if user is None:
             return None
         return {g.name for g in snap.groups_of(user)} | set(user.groups)
+
+    def iam_paths(self) -> Optional[iam_sync.SyncPaths]:
+        """属性表同步要写名册所在目录：路径没配（或过不了写盘守卫）就不开这个功能。"""
+        if not (self.people_path and self.iam_spec_path and self.iam_out_path):
+            return None
+        return iam_sync.SyncPaths(
+            people=self.people_path,
+            attributes=self.iam_spec_path,
+            out=self.iam_out_path,
+        )
 
     def review_paths(self) -> Optional[review_mod.ReviewPaths]:
         if not (self.people_path and self.proposal_path and self.manual_path):
@@ -857,6 +874,10 @@ def make_handler(
                     200,
                     assets_mod.summary_view(backend.assets(), scopes=scopes, labels=labels.account),
                 )
+            if path.rstrip("/") == _ADMIN_IAM:
+                return self._iam_attributes("GET")
+            if path == _ADMIN_IAM_FILE:
+                return self._iam_file()
             if path == _ADMIN_REVIEW:
                 if self._require(admin=True) is None:
                     return None
@@ -942,6 +963,76 @@ def make_handler(
                 return self._json(500, {"error": "申请服务出错，请联系管理员查看服务端日志"})
             return self._json(status, payload)
 
+        def _iam_attributes(self, method: str):
+            """管理后台「IAM 属性表」：预览这次要发什么、导出并存档、IT 导入后确认。
+
+            写的是员工属性表（全员邮箱与云用户名），路径守卫、格式规则和 CLI 完全同一套。
+            """
+            if self._require(admin=True) is None:
+                return None
+            paths = backend.iam_paths()
+            if paths is None:
+                return self._json(404, {"error": "服务端没有配置名册或属性表路径"})
+            if method == "GET":
+                # 超阈值的大批移除要勾选才导出，但得先让管理员看见「要移除谁」。
+                # 预览不写任何文件，这个参数只是把被拦下的 remove 行也算出来给人看。
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                allow = (query.get("allow_mass_remove") or [""])[0] == "1"
+                return self._iam_result(lambda: iam_sync.preview(paths, allow_mass_remove=allow))
+            refused = self._same_origin_json()
+            if refused:
+                return self._json(403, {"error": refused})
+            body, sent = self._json_body(allow_empty=True)
+            if body is None:
+                return sent
+            op = str(body.get("op") or "")
+            if op == "export":
+                allow = body.get("allow_mass_remove") is True
+                return self._iam_result(lambda: iam_sync.export(paths, allow_mass_remove=allow))
+            if op == "confirm":
+                name = str(body.get("name") or "")
+                return self._iam_result(lambda: iam_sync.confirm_by_name(paths, name))
+            if op == "discard":
+                name = str(body.get("name") or "")
+                return self._iam_result(lambda: iam_sync.discard(paths, name))
+            return self._json(400, {"error": "op 只能是 export、confirm 或 discard"})
+
+        def _iam_result(self, run):
+            try:
+                return self._json(200, run())
+            except DeliveryError as exc:
+                # 冲突（没基线、超阈值、存档对不上）都是让人去处理的状态，不是服务器故障
+                return self._json(409, {"error": str(exc).splitlines()[0]})
+            except Exception as exc:  # noqa: BLE001 — 不把路径和堆栈回给浏览器
+                print(f"[iam-attributes] {type(exc).__name__}: {exc}", file=sys.stderr)
+                return self._json(500, {"error": "属性表操作失败，请查看服务端日志"})
+
+        def _iam_file(self):
+            """下载一份属性表 CSV。含员工邮箱：管理员限定，不进日志、不进缓存。"""
+            if self._require(admin=True) is None:
+                return None
+            paths = backend.iam_paths()
+            if paths is None:
+                return self._json(404, {"error": "服务端没有配置名册或属性表路径"})
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            name = (query.get("name") or [""])[0]
+            try:
+                real = iam_sync.archive_file(paths, name)
+                body = real.read_bytes()
+            except DeliveryError as exc:
+                return self._json(404, {"error": str(exc).splitlines()[0]})
+            except OSError:
+                return self._json(404, {"error": "没有这份文件"})
+            return self._send(
+                200,
+                body,
+                ctype="text/csv; charset=utf-8",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{real.name}"',
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+
         def _review(self):
             session = self._require(admin=True)
             if session is None:
@@ -977,6 +1068,10 @@ def make_handler(
             path = urllib.parse.urlsplit(self.path).path
             if path == _ADMIN_REVIEW:
                 return self._review()
+            if path.rstrip("/") == _ADMIN_IAM:
+                return self._iam_attributes("POST")
+            if path == _ADMIN_IAM_FILE:
+                return self._json(405, {"error": "不支持的方法"})
             if _is_requests_path(path):
                 return self._requests("POST", path, None)
             if proxy is not None or path != "/auth/exchange":
@@ -1106,6 +1201,8 @@ def serve(
     assets_path: Optional[str] = None,
     policies_path: Optional[str] = None,
     policy_rules_path: Optional[str] = None,
+    iam_spec_path: Optional[str] = None,
+    iam_out_path: Optional[str] = None,
     auth: Optional[str] = None,
     echo=print,
 ) -> None:
@@ -1137,6 +1234,8 @@ def serve(
         assets_path=assets_path,
         policies_path=policies_path,
         policy_rules_path=policy_rules_path,
+        iam_spec_path=iam_spec_path,
+        iam_out_path=iam_out_path,
         feishu_token=token,
         notify=notify,
     )

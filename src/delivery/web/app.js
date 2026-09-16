@@ -8,6 +8,7 @@
 import { ApiError, api, apiPost, clear, h, mount, platformTag, requestTitle, safeHttps, safePath } from "./core.js";
 import { renderAssets } from "./assets.js";
 import { renderHealth } from "./health.js";
+import { renderIam } from "./iam.js";
 import { permissionRoutes } from "./permissions.js";
 import { requestRoutes } from "./requests.js";
 
@@ -136,6 +137,7 @@ function parseHash() {
   if (path === "admin/assets") return { page: "admin-assets", space: "admin" };
   if (path === "admin/policies") return { page: "admin-policies", space: "admin" };
   if (path === "admin/health") return { page: "admin-health", space: "admin" };
+  if (path === "admin/iam") return { page: "admin-iam", space: "admin" };
   if (path === "assets") return { page: "assets", space: "user" };
   if (path === "admin") return { page: "admin", space: "admin" };
   if (path.startsWith("request=")) {
@@ -184,6 +186,10 @@ function route() {
   if (page === "admin-health") {
     markTab("admin-health");
     return renderHealth({ load });
+  }
+  if (page === "admin-iam") {
+    markTab("admin-iam");
+    return renderIam({ load });
   }
   if (page === "admin-policies") {
     markTab("admin-policies");

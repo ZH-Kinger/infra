@@ -16,6 +16,7 @@ import unicodedata
 from pathlib import Path
 from typing import Optional, Sequence
 
+from . import iam_sync
 from .access import STATE_ACTION, STATE_BLOCKED, STATE_READY, guide
 from .capabilities import LOGIN_BIND
 from .errors import DeliveryError
@@ -201,6 +202,16 @@ def build_parser() -> argparse.ArgumentParser:
     srv.add_argument("--templates", default="identity/request-templates.json", help="申请模板目录")
     srv.add_argument(
         "--approval", default="identity/approval.json", help="飞书审批定义与表单控件配置"
+    )
+    srv.add_argument(
+        "--iam-attributes",
+        default=iam_sync.DEFAULT_SPEC,
+        help="云账号 → IAM 属性名配置，管理后台的属性表页要用",
+    )
+    srv.add_argument(
+        "--iam-out",
+        default=iam_sync.DEFAULT_OUT,
+        help="管理后台导出的属性表增量写到哪里",
     )
     srv.add_argument(
         "--labels",
@@ -1105,133 +1116,27 @@ def _cmd_inventory_collect(args) -> int:
     return 1 if snap.incomplete else 0
 
 
-#: 发给 IT 的属性表存档目录（identity/ 整体 gitignore）。
-IAM_SENT_DIR = "identity/iam-sent"
-IAM_CSV_HEADER = [
-    "feishu_union_id",
-    "email",
-    "name",
-    "app",
-    "value",
-    "action",
-    "match_by",
-    "problem",
-]
+#: 发给 IT 的属性表存档目录与表头：实现搬到 iam_sync，面板和 CLI 共用同一套规则。
+IAM_SENT_DIR = iam_sync.SENT_DIR
+#: 管理员名单的兜底路径，与 roles.load_admins 的回落保持一致
+ADMINS_DEFAULT = "identity/admins.json"
+IAM_CSV_HEADER = iam_sync.CSV_HEADER
 
 
 def _iam_rows(index, specs: dict) -> list:
-    """名册 → 属性表的行。一行 = 一个人在一个云账号应用上的一条属性。
-
-    action：set 写入 cloud_accounts[app]=value；skip 不导入（problem 写原因）。
-    属性值直接决定 SSO 进哪个号，有任何疑问一律 skip，宁可登录被拒也不能填错。
-    """
-    rows = []
-    for person in index.people:
-        if not person.accounts and not person.pending:
-            continue
-        match_by = "feishu_union_id" if person.union_id else "email（存量回填）"
-        blocker = ""
-        if person.union_id and index.is_blocked_uid(person.union_id):
-            blocker = "名册里 union_id 重复，需管理员核对"
-        elif not person.union_id and not person.email:
-            blocker = "既没有 union_id 也没有邮箱，IAM 无法匹配"
-        elif not person.union_id and person.email_collision:
-            blocker = "通讯录里多人共用此邮箱，需管理员核对后补 union_id"
-        elif not person.union_id and index.claim_blocked(person):
-            blocker = "登录绑定与名册对不上，需管理员核对后补 union_id"
-
-        def add(app, value, action, problem, person=person, match_by=match_by):
-            rows.append(
-                {
-                    "feishu_union_id": person.union_id,
-                    "email": person.email,
-                    "name": person.name,
-                    "app": app,
-                    "value": value,
-                    "action": action,
-                    "match_by": match_by,
-                    "problem": problem,
-                }
-            )
-
-        by_scope: dict = {}
-        for ref in person.accounts:
-            by_scope.setdefault(ref.scope, []).append(ref.name)
-        for scope, names in sorted(by_scope.items()):
-            spec = specs.get(scope)
-            if spec is None:
-                add("", "", "skip", f"{scope} 未配置应用标识")
-                continue
-            app, suffix = spec
-            if blocker:
-                add(app, "", "skip", blocker)
-            elif len(names) > 1:
-                add(
-                    app,
-                    "",
-                    "skip",
-                    f"同一云账号下有多个号 {'/'.join(sorted(names))}，需先定保留哪个",
-                )
-            elif suffix and "@" in names[0]:
-                add(app, "", "skip", f"用户名 {names[0]} 已含 @，不能再拼后缀")
-            else:
-                add(app, names[0] + suffix, "set", "")
-        confirmed = {specs[sc][0] for sc in by_scope if sc in specs}
-        for ref in person.pending:
-            spec = specs.get(ref.scope)
-            app = spec[0] if spec else ""
-            if app in confirmed:
-                continue
-            add(app, "", "skip", "对应关系待确认，未导出")
-    return rows
+    return iam_sync.build_rows(index, specs)
 
 
 def _resolve_baseline(value: str) -> Path:
-    from .iam_export import confirmed_archives
-
-    if value == "latest":
-        archived = confirmed_archives(Path(IAM_SENT_DIR))
-        if not archived:
-            raise DeliveryError(
-                f"{IAM_SENT_DIR} 里还没有确认过的存档：第一次请导出全量加 --record，"
-                "IT 导入后再 --confirm-sent"
-            )
-        return archived[-1]
-    path = Path(value)
-    if not path.exists():
-        raise DeliveryError(f"基线文件 {path} 不存在")
-    return path
+    return iam_sync.resolve_baseline(value, Path(IAM_SENT_DIR))
 
 
 def _read_iam_csv(path: Path) -> list:
-    import csv
-
-    from .iam_export import uncell
-
-    try:
-        with path.open(encoding="utf-8-sig", newline="") as fh:
-            reader = csv.DictReader(fh)
-            if reader.fieldnames != IAM_CSV_HEADER:
-                raise DeliveryError(f"{path} 不是当前格式的属性表（表头不一致），不能当基线")
-            return [{k: uncell(k, v or "") for k, v in row.items()} for row in reader]
-    except OSError as exc:
-        raise DeliveryError(f"读不了基线 {path}：{exc}") from exc
+    return iam_sync.read_csv(path)
 
 
 def _write_iam_csv(out: Path, rows: list) -> None:
-    import csv
-    import io
-
-    from .iam_export import cell
-
-    out = out.resolve()
-    _require_identity_dir(out)
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(IAM_CSV_HEADER)
-    for r in rows:
-        writer.writerow([cell(k, r[k]) for k in IAM_CSV_HEADER])
-    _atomic_private_write(out, buf.getvalue().encode("utf-8-sig"))
+    iam_sync.write_csv(out, rows)
 
 
 def _cmd_identity_iam_export(args) -> int:
@@ -1241,7 +1146,6 @@ def _cmd_identity_iam_export(args) -> int:
     删号、改名以 remove / set 表达。`--record` 把本次结果存档。
     """
     from . import iam_export
-    from . import people as people_mod
 
     if args.confirm_sent:
         if (
@@ -1272,99 +1176,47 @@ def _cmd_identity_iam_export(args) -> int:
             "已经有确认过的基线：--record 必须和 --baseline latest 一起用。"
             "否则这份存档没有对应的 remove，确认后旧值会永远留在 IAM 里"
         )
-    bindings = Path(args.people).with_name("bindings.json")
-    index = people_mod.load(args.people, bindings_path=str(bindings) if bindings.exists() else None)
-    attr_file = Path(args.attributes)
-    if not attr_file.exists():
-        raise DeliveryError(
-            f"缺 {attr_file}：写明每个云账号对应的 IAM 属性名，"
-            '形如 {"aliyun/<UID>": "aliyun_username", "volcano/<UID>": "volcano_username"}'
-        )
-    try:
-        attrs = json.loads(attr_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise DeliveryError(f"读不了 {attr_file}：{exc}") from exc
-    if not isinstance(attrs, dict) or not attrs:
-        raise DeliveryError(f"{attr_file} 必须是非空对象")
-
-    # 值可以是列名字符串，或 {"key": 应用标识, "suffix": NameID 后缀}。
-    # 后缀写进导出值里（完整 NameID），IAM 侧表达式就不必按账号拼接域名。
-    specs = {}
-    for scope, spec in attrs.items():
-        if scope.startswith("_"):
-            continue
-        if isinstance(spec, str):
-            specs[scope] = (spec, "")
-        elif isinstance(spec, dict) and isinstance(spec.get("key"), str) and spec["key"]:
-            suffix = spec.get("suffix") or ""
-            if not isinstance(suffix, str):
-                raise DeliveryError(f"{attr_file} 里 {scope} 的 suffix 必须是字符串")
-            if suffix and (not suffix.startswith("@") or "@" in suffix[1:] or len(suffix) < 2):
-                raise DeliveryError(f"{attr_file} 里 {scope} 的 suffix 必须形如 @域名：{suffix!r}")
-            platform, _, account = scope.partition("/")
-            expected = f"@{account}.onaliyun.com"
-            if platform == "aliyun" and suffix and suffix != expected:
-                print(
-                    f"  注意：{scope} 的 suffix 是 {suffix}，不是该账号默认域名 {expected}；"
-                    "确认这是它的域名别名，否则 SSO 会找不到用户",
-                    file=sys.stderr,
-                )
-            specs[scope] = (spec["key"], suffix)
-        else:
-            raise DeliveryError(f'{attr_file} 里 {scope} 的配置应为字符串或 {{"key": ...}}')
-    columns = [key for key, _ in specs.values()]
-    if len(set(columns)) != len(columns):
-        raise DeliveryError(f"{attr_file} 里有两个云账号用了同一个应用标识，值会互相覆盖")
-
-    full = iam_export.sanitize(_iam_rows(index, specs))
+    paths = iam_sync.SyncPaths(
+        people=args.people, attributes=args.attributes, out=args.out, sent_dir=IAM_SENT_DIR
+    )
+    warn = lambda line: print(line, file=sys.stderr)  # noqa: E731
     if args.adopt_result:
+        full, _ = iam_sync.full_state(paths, warn=warn)
         return _adopt_result(args.adopt_result, full)
-    rows = full
-    notes: list = []
-    baseline = None
-    base_rows: list = []
     if args.resolved and not args.baseline:
         raise DeliveryError("--resolved 只在增量导出（--baseline latest）时有意义")
-    if args.baseline:
-        baseline = _resolve_baseline(args.baseline)
-        base_rows = _read_iam_csv(baseline)
-        iam_export.check_baseline(baseline, base_rows, Path(IAM_SENT_DIR))
-        rows, notes = iam_export.diff(
-            full,
-            base_rows,
-            current_apps={key for key, _ in specs.values()},
-            allow_mass_remove=args.allow_mass_remove,
-            resolved_emails=frozenset(args.resolved),
-        )
-        print(f"对比基线 {baseline}")
+    increment = iam_sync.compute(
+        paths,
+        baseline=args.baseline,
+        allow_mass_remove=args.allow_mass_remove,
+        resolved_emails=frozenset(args.resolved),
+        warn=warn,
+    )
+    if increment.baseline is not None:
+        print(f"对比基线 {increment.baseline}")
 
     archive = None
     if args.record:
         # 存档路径先过守卫再写主输出：守卫失败时不能留下一份没有存档的输出
-        pending = Path(IAM_SENT_DIR) / "pending"
-        archive = pending / time.strftime("%Y%m%d-%H%M%S.csv")
-        n = 1
-        while archive.exists() or (Path(IAM_SENT_DIR) / archive.name).exists():
-            archive = archive.with_name(f"{archive.stem.split('~')[0]}~{n}.csv")
-            n += 1
+        archive = iam_sync.next_archive(
+            Path(IAM_SENT_DIR), pending=True, stamp=time.strftime("%Y%m%d-%H%M%S.csv")
+        )
         _require_identity_dir(archive.resolve())
         meta = archive.with_name(archive.name + ".meta.json")
         _require_identity_dir(meta.resolve())
 
     out = Path(args.out)
-    _write_iam_csv(out, rows)
-    counts = {a: sum(1 for r in rows if r["action"] == a) for a in ("set", "remove", "skip")}
+    _write_iam_csv(out, increment.rows)
+    counts = increment.counts
     print(
         f"已写入 {out}（权限 600）：set {counts['set']} 条，remove {counts['remove']} 条，"
         f"skip {counts['skip']} 条"
     )
-    for note in notes:
+    for note in increment.notes:
         print(f"  ⚠ {note}")
     if archive is not None:
         # 存档的是全量状态，不是这次的增量：下次比对要靠它发现删号
-        _write_iam_csv(archive, iam_export.recorded_state(full, rows, base_rows))
-        # 记下这份存档是对着哪个基线导出的：确认时基线必须没变，否则中间那次的 remove 会丢
-        _write_private(str(meta), {"baseline": baseline.name if baseline else ""})
+        iam_sync.record(increment, archive)
         print(
             f"  已存入待确认 {archive}。IT 确认导入后执行："
             f"delivery identity iam-export --confirm-sent {archive}"
@@ -1382,44 +1234,9 @@ def _adopt_result(path: str, full: list) -> int:
     第一次导出按邮箱回填、基线里没有 union_id；回传结果每行都带 union_id。不采纳的话，
     下次增量会把所有人「按值删掉再按 union_id 写回」，IT 白导一遍。
     """
-    import csv
-
-    from . import iam_export
-
-    src = Path(path)
-    if src.is_symlink() or not src.is_file():
-        raise DeliveryError(f"{src} 不存在或是符号链接")
-    try:
-        with src.open(encoding="utf-8-sig", newline="") as fh:
-            reader = csv.DictReader(fh)
-            missing = sorted(set(iam_export.RESULT_COLUMNS) - set(reader.fieldnames or []))
-            if missing:
-                raise DeliveryError(f"{src} 缺列：{'、'.join(missing)}")
-            result_rows = [{k: (r.get(k) or "") for k in iam_export.RESULT_COLUMNS} for r in reader]
-    except OSError as exc:
-        raise DeliveryError(f"读不了 {src}：{exc}") from exc
-    except csv.Error as exc:
-        raise DeliveryError(f"{src} 不是合法 CSV：{exc}") from exc
-
-    sent = Path(IAM_SENT_DIR)
-    previous = iam_export.confirmed_archives(sent)
-    # 旧基线里回传没覆盖的值还在 IAM 里：不带上就再也不会生成它们的 remove
-    old_rows = _read_iam_csv(previous[-1]) if previous else []
-    baseline, notes, carried = iam_export.adopt_result(result_rows, full, old_rows)
-    if len(baseline) <= carried:
-        raise DeliveryError(f"{src} 里没有一条导入成功的记录，不能当基线")
-    archive = sent / time.strftime("%Y%m%d-%H%M%S.csv")
-    n = 1
-    while archive.exists() or (sent / "pending" / archive.name).exists():
-        archive = archive.with_name(f"{archive.stem.split('~')[0]}~{n}.csv")
-        n += 1
-    if previous and iam_export.archive_order(archive) <= iam_export.archive_order(previous[-1]):
-        raise DeliveryError(
-            f"新存档 {archive.name} 排不到最新（当前最新 {previous[-1].name}）：检查系统时间"
-        )
-    _require_identity_dir(archive.resolve())
-    _write_iam_csv(archive, baseline)
-    sets = sum(1 for r in baseline if r["action"] == "set")
+    archive, notes, sets, carried = iam_sync.adopt(
+        Path(path), full, Path(IAM_SENT_DIR), stamp=time.strftime("%Y%m%d-%H%M%S.csv")
+    )
     print(
         f"已采纳为基线 {archive}（权限 600）：{sets} 条 set"
         + (f"（其中 {carried} 条沿用旧基线）" if carried else "，全部按 union_id 匹配")
@@ -1432,55 +1249,7 @@ def _adopt_result(path: str, full: list) -> int:
 
 def _confirm_sent(value: str) -> int:
     """IT 确认导入后，把 pending 里的存档转为正式基线。"""
-    from .iam_export import ARCHIVE_NAME, archive_order, check_baseline, confirmed_archives
-
-    src = Path(value)
-    sent = Path(IAM_SENT_DIR)
-    pending = sent / "pending"
-    if src.is_symlink() or not src.is_file():
-        raise DeliveryError(f"{src} 不存在或是符号链接")
-    if src.resolve().parent != pending.resolve() or not ARCHIVE_NAME.match(src.name):
-        raise DeliveryError(f"只能确认 {pending} 里 --record 生成的存档")
-    meta_path = src.with_name(src.name + ".meta.json")
-    try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        recorded = str(meta["baseline"])
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise DeliveryError(f"{src} 缺少存档说明 {meta_path.name}，不能确认") from exc
-    archives = confirmed_archives(sent)
-    latest = archives[-1].name if archives else ""
-    for other in sorted(pending.glob("*.csv.meta.json")):
-        name = other.name[: -len(".meta.json")]
-        if archive_order(Path(name)) >= archive_order(src):
-            continue
-        try:
-            same = json.loads(other.read_text(encoding="utf-8")).get("baseline") == recorded
-        except (OSError, ValueError, AttributeError):
-            same = True
-        if same:
-            raise DeliveryError(
-                f"pending 里还有更早的 {name} 也是对着同一个基线导出的。"
-                "如果两份都发给了 IT：先确认更早的那份，再重新 --baseline latest --record；"
-                "如果更早那份没发，删掉它再确认这份"
-            )
-    if recorded != latest:
-        raise DeliveryError(
-            f"{src.name} 是对着基线「{recorded or '无'}」导出的，"
-            f"但现在的最新基线是「{latest or '无'}」。"
-            "中间有别的存档被确认过，这份的 remove 不完整：请重新 --baseline latest --record"
-        )
-    rows = _read_iam_csv(src)
-    target = sent / src.name
-    check_baseline(target, rows, sent)
-    _require_identity_dir(target.resolve())
-    try:
-        os.link(src.resolve(), target.resolve())  # 目标已存在时失败，不会覆盖
-    except FileExistsError:
-        raise DeliveryError(f"{target} 已存在，不覆盖") from None
-    except OSError as exc:
-        raise DeliveryError(f"确认失败：{type(exc).__name__}（文件系统不支持硬链接？）") from None
-    src.unlink()
-    meta_path.unlink()
+    target = iam_sync.confirm(Path(value), Path(IAM_SENT_DIR))
     print(f"已确认 {target}：之后 --baseline latest 以它为基线")
     return 0
 
@@ -1587,6 +1356,52 @@ def _request_paths(args) -> dict:
         out.update(policies_path=args.policies, policy_rules_path=args.policy_rules)
     except DeliveryError as exc:
         print(f"  ⚠ 按策略申请权限已关闭：{str(exc).splitlines()[0]}")
+    try:
+        # 属性表含全员邮箱与云用户名：写不进 identity/ 就不开这个页面
+        for path in (args.iam_attributes, args.iam_out):
+            _require_identity_dir(Path(path).resolve())
+        # 增量含 remove 行，落进存档目录会被当成基线，check_baseline 随后永久拒绝
+        if Path(args.iam_out).resolve().is_relative_to(Path(IAM_SENT_DIR).resolve()):
+            raise DeliveryError(f"--iam-out 不能写到 {IAM_SENT_DIR} 里：那里只放确认过的全量存档")
+        # 也不能指向面板托管的其它文件：导出是原子替换，指错了直接把名册冲掉
+        # 按名字取：各子命令传进来的 Namespace 不一定带齐所有参数
+        managed = set()
+        # admins 的命令行默认是 None（真正的回落在 roles.load_admins 里），
+        # bindings 根本没有这个参数（按 people 同目录推）—— 两个都要自己补上，
+        # 否则 --iam-out 指过去时守卫放行，第一次导出就把文件冲成 CSV
+        from .roles import ENV_ADMINS
+
+        managed.add(
+            Path(
+                getattr(args, "admins", "") or os.environ.get(ENV_ADMINS, "") or ADMINS_DEFAULT
+            ).resolve()
+        )
+        if getattr(args, "people", ""):
+            managed.add(Path(args.people).resolve().with_name("bindings.json"))
+        for name in (
+            "people",
+            "bindings",
+            "admins",
+            "labels",
+            "inventory",
+            "tickets",
+            "templates",
+            "approval",
+            "proposal",
+            "manual",
+            "assets",
+            "policies",
+            "policy_rules",
+            "iam_attributes",
+        ):
+            value = getattr(args, name, "")
+            if value:
+                managed.add(Path(value).resolve())
+        if Path(args.iam_out).resolve() in managed:
+            raise DeliveryError("--iam-out 不能指向面板管理的其它文件：导出会把它整个覆盖")
+        out.update(iam_spec_path=args.iam_attributes, iam_out_path=args.iam_out)
+    except DeliveryError as exc:
+        print(f"  ⚠ IAM 属性表已关闭：{str(exc).splitlines()[0]}")
     return out
 
 
