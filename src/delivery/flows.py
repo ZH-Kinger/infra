@@ -229,6 +229,16 @@ def _view_comment(*, ticket: dict, tpl: catalog_mod.Template, key: str, cred: di
     )
 
 
+def _imported(ticket: dict) -> bool:
+    """这张单子是从别处（bot 的发放记录、云上对账）导进来的台账，不是面板发的。
+
+    判据是事件表里有 `imported` —— 导入时写的，之后只增不改。这类记录云上那份东西
+    归发放方管，面板不碰：它们没有 `cred_user`，所以本来也删不动，这里只是别让
+    台账写出「已到期回收」这种面板根本没做过的事。
+    """
+    return any(e.get("event") == "imported" for e in ticket.get("events") or ())
+
+
 def password_claims(ticket: dict) -> int:
     """有效的初始密码领取次数：领取事件减去失败作废的事件。"""
     events = [e.get("event") for e in ticket.get("events", [])]
@@ -1451,6 +1461,12 @@ class Flows:
             # 而重试按钮（要求 status == FAILED）就此消失
             if not done:
                 return f"{ticket['id']}：云上没有要清理的东西"
+            if _imported(ticket):
+                # 别人发的凭证，面板只是台账。写「已到期自动失效」是说谎：面板什么都没做，
+                # 而这类凭证（bot 的方案 B）也不会自己失效，是靠 bot 的定时任务硬删的
+                return self._mark_revoked(
+                    ticket, "记录到期。这份凭证不是面板发的，清理由发放方负责，请去那边确认"
+                )
             # 这支不跟 why 拼：拼出来是「临时凭证已管理员作废失效」，不是人话
             note = (
                 "临时凭证已到期自动失效"

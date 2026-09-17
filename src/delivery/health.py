@@ -161,8 +161,9 @@ def collect(
                 "按 identity/request-templates.example.json 写 identity/request-templates.json",
             )
         kinds = Counter(tpl.kind for tpl in items)
-        label = {"permission": "权限包", "credential": "访问凭证", "account": "开账号"}
-        parts = "、".join(f"{label.get(k, k)} {n}" for k, n in kinds.items())
+        # 用 catalog 那份唯一的对照表，别在这儿抄第二份 —— 上一份就漏了 resource，
+        # 体检页把资源模板显示成 "resource 3"
+        parts = "、".join(f"{catalog_mod.KIND_LABELS.get(k, k)} {n}" for k, n in kinds.items())
         return Check("申请内容", "申请模板", OK, f"{len(items)} 个：{parts}")
 
     checks.append(_safe("申请内容", "申请模板", templates))
