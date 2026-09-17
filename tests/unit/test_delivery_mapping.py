@@ -32,9 +32,7 @@ DOMAIN = "@wuji.tech"
 
 
 def u(name, email, platform="aliyun", account="default"):
-    return AccountUser(
-        platform=platform, account=account, name=name, display_name="", email=email
-    )
+    return AccountUser(platform=platform, account=account, name=name, display_name="", email=email)
 
 
 class CandidateTests(unittest.TestCase):
@@ -349,8 +347,9 @@ class FeishuNameParseTests(unittest.TestCase):
 
 
 def v(name, display, email=""):
-    return AccountUser(platform="volcano", account="default", name=name,
-                       display_name=display, email=email)
+    return AccountUser(
+        platform="volcano", account="default", name=name, display_name=display, email=email
+    )
 
 
 FEISHU = {
@@ -379,7 +378,8 @@ class DisplayNameLayerTests(unittest.TestCase):
         """有企业邮箱但规则推不出时，显示名是**确认**不是猜——邮箱已经钉住了人。"""
         got = build(
             [v("YueZhou", "周乐", "zhou.le@wuji.tech")],
-            domain=DOMAIN, feishu_names=FEISHU,
+            domain=DOMAIN,
+            feishu_names=FEISHU,
         )
         self.assertEqual(got[0].source, SOURCE_DISPLAY_NAME)
 
@@ -392,14 +392,16 @@ class DisplayNameLayerTests(unittest.TestCase):
         """显示名是弱标识，只在邮箱推不出时才用。"""
         got = build(
             [v("lisi", "李四", "li.si@wuji.tech")],
-            domain=DOMAIN, feishu_names=FEISHU,
+            domain=DOMAIN,
+            feishu_names=FEISHU,
         )
         self.assertEqual(got[0].source, SOURCE_RULE)
 
     def test_override_wins_over_display_name(self):
         got = build(
             [v("SiLi", "李四"), v("legacy", "旧号")],
-            domain=DOMAIN, feishu_names=FEISHU,
+            domain=DOMAIN,
+            feishu_names=FEISHU,
             overrides={"volcano/default": {"li.si@wuji.tech": "legacy"}},
         )
         m = next(x for x in got if x.email == "li.si@wuji.tech")
@@ -411,9 +413,7 @@ class DisplayNameLayerTests(unittest.TestCase):
 
     def test_unknown_person_is_skipped_not_flagged(self):
         """飞书里没这个人，多半是服务号或已离职，不是映射问题。"""
-        self.assertEqual(
-            build([v("robot", "机器人")], domain=DOMAIN, feishu_names=FEISHU), []
-        )
+        self.assertEqual(build([v("robot", "机器人")], domain=DOMAIN, feishu_names=FEISHU), [])
 
 
 class DisplayNameCollisionTests(unittest.TestCase):
@@ -426,7 +426,8 @@ class DisplayNameCollisionTests(unittest.TestCase):
         feishu = {"zhao.xiaoliu@wuji.tech": "赵小六（Xiaoliu Zhao）"}
         got = build(
             [v("zhaoxl", "赵小六"), v("XiaoliuZhao", "赵小六")],
-            domain=DOMAIN, feishu_names=feishu,
+            domain=DOMAIN,
+            feishu_names=feishu,
         )
         self.assertEqual(len(got), 2)
         self.assertTrue(all(m.source == SOURCE_NONE for m in got))
@@ -456,7 +457,8 @@ class DisplayNameCollisionTests(unittest.TestCase):
         feishu = {"zhao.xiaoliu@wuji.tech": "赵小六（Xiaoliu Zhao）"}
         got = build(
             [v("XiaoliuZhao", "赵小六", "zhao.xiaoliu@wuji.tech"), v("zhaoxl", "赵小六")],
-            domain=DOMAIN, feishu_names=feishu,
+            domain=DOMAIN,
+            feishu_names=feishu,
         )
         m = next(x for x in got if "zhao.xiaoliu" in x.email or x.cloud_name == "XiaoliuZhao")
         self.assertNotEqual(m.source, SOURCE_DISPLAY_NAME)
@@ -468,6 +470,7 @@ class DisplayNameCollisionTests(unittest.TestCase):
                 AccountUser("aliyun", "default", "lisi", "李四", ""),
                 v("SiLi", "李四"),
             ],
-            domain=DOMAIN, feishu_names=FEISHU,
+            domain=DOMAIN,
+            feishu_names=FEISHU,
         )
         self.assertEqual({m.source for m in got}, {SOURCE_DISPLAY_NAME})

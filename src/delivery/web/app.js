@@ -9,6 +9,7 @@ import { ApiError, api, apiPost, clear, h, mount, platformTag, requestTitle, saf
 import { renderAssets } from "./assets.js";
 import { renderHealth } from "./health.js";
 import { renderIam } from "./iam.js";
+import { accessRoutes } from "./access.js";
 import { permissionRoutes } from "./permissions.js";
 import { requestRoutes } from "./requests.js";
 
@@ -139,6 +140,7 @@ function parseHash() {
   if (path === "admin/health") return { page: "admin-health", space: "admin" };
   if (path === "admin/iam") return { page: "admin-iam", space: "admin" };
   if (path === "assets") return { page: "assets", space: "user" };
+  if (path === "access") return { page: "access", space: "user" };
   if (path === "admin") return { page: "admin", space: "admin" };
   if (path.startsWith("request=")) {
     const [id, flag] = path.slice(8).split("&");
@@ -153,6 +155,7 @@ function parseHash() {
 
 const pages = requestRoutes({ load, errorView, route: () => route() });
 const permissionPages = permissionRoutes({ load, errorView });
+const accessPages = accessRoutes({ load, errorView });
 
 function route() {
   if (!state.session || !state.session.authenticated) return renderLogin();
@@ -202,6 +205,10 @@ function route() {
   if (page === "assets") {
     markTab("assets");
     return renderAssets({ load }, { admin: false });
+  }
+  if (page === "access") {
+    markTab("access");
+    return accessPages.access();
   }
   if (page === "admin-requests") {
     markTab("admin-requests");
@@ -532,8 +539,7 @@ function reminders(requests) {
   const items = [];
   for (const r of requests) {
     const link = `#request=${encodeURIComponent(r.id)}`;
-    if (r.actions && r.actions.credential) items.push(["good", "可领取", `${requestTitle(r)}：临时凭证已批准，可以领取`, link, "去领取"]);
-    else if (r.actions && r.actions.password) items.push(["good", "可领取", `${requestTitle(r)}：初始密码可以领取`, link, "去领取"]);
+    if (r.actions && r.actions.password) items.push(["good", "可领取", `${requestTitle(r)}：初始密码可以领取`, link, "去领取"]);
     else if (r.status === "pending_approval") items.push(["accent", "待审批", `${requestTitle(r)}：等审批人在飞书里处理`, link, "查看"]);
     else if (r.status === "failed") items.push(["crit", "开通失败", `${requestTitle(r)}：管理员会处理`, link, "查看"]);
     else if (r.status === "done" && r.expires_at && new Date(r.expires_at).getTime() < soon) {

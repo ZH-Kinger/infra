@@ -66,8 +66,14 @@ class TokenTests(unittest.TestCase):
 
 class ProbeTests(unittest.TestCase):
     def test_denied_is_reported_with_feishus_own_wording(self):
-        fake = _Fake({"im/v1/messages": (403, {"code": 99991672,
-                                               "msg": "需要以下任一权限：im:message:send_as_bot"})})
+        fake = _Fake(
+            {
+                "im/v1/messages": (
+                    403,
+                    {"code": 99991672, "msg": "需要以下任一权限：im:message:send_as_bot"},
+                )
+            }
+        )
         probes = run(app_id="a", app_secret="b", caller=fake)
         p = next(x for x in probes if x.name == "im/v1/messages")
         self.assertEqual(p.status, DENIED)
@@ -76,13 +82,15 @@ class ProbeTests(unittest.TestCase):
     def test_other_error_codes_count_as_permission_ok(self):
         """核心：探针传的是不存在的 receive_id，「用户不存在」证明越过了权限闸门。"""
         fake = _Fake({"im/v1/messages": (400, {"code": 230001, "msg": "user not found"})})
-        p = next(x for x in run(app_id="a", app_secret="b", caller=fake)
-                 if x.name == "im/v1/messages")
+        p = next(
+            x for x in run(app_id="a", app_secret="b", caller=fake) if x.name == "im/v1/messages"
+        )
         self.assertEqual(p.status, OK)
 
     def test_code_zero_is_ok(self):
-        p = next(x for x in run(app_id="a", app_secret="b", caller=_Fake())
-                 if x.name == "im/v1/chats")
+        p = next(
+            x for x in run(app_id="a", app_secret="b", caller=_Fake()) if x.name == "im/v1/chats"
+        )
         self.assertEqual(p.status, OK)
 
     def test_message_probe_targets_a_nonexistent_user(self):
@@ -99,8 +107,9 @@ class ProbeTests(unittest.TestCase):
                 return 200, {"code": 0, "tenant_access_token": "t"}
             raise DoctorError("连不上飞书：timeout")
 
-        p = next(x for x in run(app_id="a", app_secret="b", caller=boom)
-                 if x.name == "im/v1/messages")
+        p = next(
+            x for x in run(app_id="a", app_secret="b", caller=boom) if x.name == "im/v1/messages"
+        )
         self.assertEqual(p.status, FAILED)
 
     def test_probes_carry_the_bearer_token(self):

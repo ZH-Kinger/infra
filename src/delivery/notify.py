@@ -25,7 +25,7 @@ import urllib.request
 from datetime import datetime
 from typing import Callable, Mapping, Optional
 
-from . import alerts
+from . import alerts, platforms
 from .errors import DeliveryError
 
 API = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id"
@@ -33,12 +33,19 @@ API = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id"
 API_BY_USER_ID = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=user_id"
 ENV_NOTIFY = "DELIVERY_NOTIFY"
 ENV_BASE_URL = "DELIVERY_BASE_URL"
-EVENTS = ("done", "claimable", "failed", "rejected", "withdrawn", "expiring", "revoked")
+EVENTS = (
+    "done",
+    "fulfilling",
+    "failed",
+    "rejected",
+    "withdrawn",
+    "expiring",
+    "revoked",
+)
 _TIMEOUT = 10
 _MAX_BODY = 256 * 1024
 _TITLE_MAX = 60
 _LINE_MAX = 200
-_PLATFORMS = {"aliyun": "阿里云", "volcano": "火山引擎"}
 _LOCAL_HOSTS = ("127.0.0.1", "localhost")
 
 #: (method, url, token, body) -> 解析后的 JSON
@@ -117,7 +124,7 @@ def _when(iso: object) -> str:
 
 def _where(ticket: Mapping) -> str:
     tpl = ticket.get("template") or {}
-    platform = _PLATFORMS.get(str(tpl.get("platform") or ""), "")
+    platform = platforms.name_of(str(tpl.get("platform") or ""))
     user = (ticket.get("payload") or {}).get("cloud_user") or (ticket.get("payload") or {}).get(
         "username"
     )
@@ -134,7 +141,12 @@ def message(event: str, ticket: Mapping, *, now: Optional[float] = None) -> tupl
         lines = [where] if where else []
         expires = _when(ticket.get("expires_at"))
         if expires:
-            lines.append(f"{expires} 到期，到期自动收回。")
+            # 资源到期只提醒不回收（删机器不能由定时任务替人决定），别在卡上承诺会收
+            lines.append(
+                f"{expires} 到期，到期前会提醒，不会自动释放。"
+                if kind == "resource"
+                else f"{expires} 到期，到期自动收回。"
+            )
         if kind == "account":
             tpl = ticket.get("template") or {}
             lines.append(
@@ -142,11 +154,17 @@ def message(event: str, ticket: Mapping, *, now: Optional[float] = None) -> tupl
                 if tpl.get("console_login")
                 else "子账号已建好。"
             )
+        if kind == "credential":
+            # 这张卡会进飞书的消息列表，比审批实例好转发得多，所以刻意不带任何
+            # 凭证内容，连查看地址都不带 —— 地址就是凭证
+            lines.append("查看凭证的地址已发在对应飞书审批的评论里。")
         return "green", f"已开通：{title}", lines or ["已开通。"]
-    if event == "claimable":
-        until = _when(ticket.get("valid_until"))
-        tail = f"{until} 前" if until else "领取期内"
-        return "blue", f"凭证已批准：{title}", [f"{tail}可以随时到平台领取临时凭证。"]
+    if event == "fulfilling":
+        return (
+            "blue",
+            f"审批已通过：{title}",
+            ["审批通过了。这类资源由管理员按流程开通，开通后会再通知你。"],
+        )
     if event == "failed":
         return (
             "red",

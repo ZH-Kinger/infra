@@ -37,13 +37,24 @@ INVENTORY_API = "api"
 INVENTORY_CLI = "cli"
 INVENTORY_SSH = "ssh"
 INVENTORY_NONE = "none"
-INVENTORY_MODES = frozenset({INVENTORY_API, INVENTORY_CLI, INVENTORY_SSH, INVENTORY_NONE})
+#: 没有任何机器接口，清单由人维护（曦望这种：有控制台，但没 CLI 也没有可调的 API）。
+#: 和 none 的区别不是程度，是**谁负责**：none 是「读不回来，也没人管」，
+#: manual 是「读不回来，所以由人对账」—— 后者能力矩阵上看得见，前者是个黑洞。
+#: 允许注册，但 apply 必须 false：没有可信的线上状态就不做变更。
+INVENTORY_MANUAL = "manual"
+INVENTORY_MODES = frozenset(
+    {INVENTORY_API, INVENTORY_CLI, INVENTORY_SSH, INVENTORY_MANUAL, INVENTORY_NONE}
+)
 
 # 用户怎么登进这个平台。这一维只影响体验，不影响投递安全。
 LOGIN_SSO = "sso"  # 飞书 SAML → 一键进控制台，不输密码
 LOGIN_BIND = "bind"  # 接不了 SSO：绑定一次凭证，之后系统代跑
 LOGIN_CERT = "cert"  # 签发短期证书（SSH 类）
-LOGIN_MODES = frozenset({LOGIN_SSO, LOGIN_BIND, LOGIN_CERT})
+#: 有控制台、每人一个号，但接不了我们的身份系统，也没有可托管的凭证。
+#: 和 sso + sso_enabled=false 的区别是**没有「以后会好」**：后者的文案写「还没上线」，
+#: 对一个永远接不了的平台那么写，人会一直等一个不会来的东西。
+LOGIN_PASSWORD = "password"  # noqa: S105  # 登录方式的名字，不是口令本身
+LOGIN_MODES = frozenset({LOGIN_SSO, LOGIN_BIND, LOGIN_CERT, LOGIN_PASSWORD})
 
 # 描述符的成熟度。pending-verification 表示这条能力是查文档得来的、尚未真机验证。
 STATUS_VERIFIED = "verified"
@@ -123,7 +134,13 @@ class Capabilities:
                 f"平台 `{_name(platform, self)}`：plan=none 时 apply 必须为 false。"
                 f"没有预览的 apply 等于蒙眼改生产环境。"
             )
-        # ② 读不回来的平台纳进来也只是一份写不回去的清单，对账无从谈起。
+        # ② 人工维护清单的平台，绝不能做变更：没有可信的线上状态，apply 就是蒙眼改
+        if self.inventory == INVENTORY_MANUAL and self.apply:
+            raise PlatformSpecError(
+                f"平台 `{_name(platform, self)}`：inventory=manual 时 apply 必须为 false。"
+                f"清单靠人维护就没有漂移检测，这种平台只做登记和引导。"
+            )
+        # ③ 读不回来的平台纳进来也只是一份写不回去的清单，对账无从谈起。
         if self.inventory == INVENTORY_NONE:
             raise PlatformSpecError(
                 f"平台 `{_name(platform, self)}`：inventory=none 无法纳入投递。"

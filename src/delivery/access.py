@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .capabilities import LOGIN_BIND, LOGIN_CERT, LOGIN_SSO
+from .capabilities import LOGIN_BIND, LOGIN_CERT, LOGIN_PASSWORD, LOGIN_SSO
 from .registry import Platform
 
 # 用户状态。刻意不引入枚举类：这三个值会直接进 JSON 给前端，字符串最省事。
@@ -72,8 +72,43 @@ def guide(
         return _guide_bind(platform, bound=bound)
     if mode == LOGIN_CERT:
         return _guide_cert(platform, has_account=has_account)
+    if mode == LOGIN_PASSWORD:
+        return _guide_password(platform, has_account=has_account)
     # registry 已经校验过取值，走到这里说明 capabilities 和本模块不同步了。
     raise AssertionError(f"未处理的登录方式 {mode!r}（平台 {platform.id}）")
+
+
+def _guide_password(platform: Platform, *, has_account: bool) -> LoginGuidance:
+    """有控制台、每人一个号，但接不了我们的身份系统。
+
+    **不写「单点登录还没上线」**：那是给 aliyun/volcano 用的，它们确实在推进 SAML。
+    对一个接不了的平台那么写，人会一直等一个不会来的东西，而正确的动作
+    （去控制台用自己的号密码登录）反而没人告诉他。
+    """
+    if not has_account:
+        return LoginGuidance(
+            platform_id=platform.id,
+            display=platform.display,
+            mode=LOGIN_PASSWORD,
+            state=STATE_BLOCKED,
+            action_label="申请账号",
+            headline=f"你在{platform.short}还没有账号",
+            hint=f"{platform.short}的账号由管理员开，开好后用账号密码登录它自己的控制台。",
+            next_command="",
+        )
+    return LoginGuidance(
+        platform_id=platform.id,
+        display=platform.display,
+        mode=LOGIN_PASSWORD,
+        state=STATE_READY,
+        action_label="打开控制台",
+        headline=f"用你在{platform.short}的账号密码登录",
+        hint=(
+            f"{platform.short}用的是它自己的身份系统，接不进飞书，所以没有一键直达，"
+            f"也没有凭证可以托管。密码忘了找管理员重置。"
+        ),
+        next_command="",
+    )
 
 
 def _guide_sso(platform: Platform, *, has_account: bool, sso_enabled: bool) -> LoginGuidance:

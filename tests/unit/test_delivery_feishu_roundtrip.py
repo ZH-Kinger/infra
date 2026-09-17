@@ -140,7 +140,8 @@ class RoundTripTests(unittest.TestCase):
 
     def test_identity_falls_back_to_open_id(self):
         _FakeFeishu.user_response = (
-            200, {"code": 0, "data": {"open_id": "ou_only", "name": "x"}},
+            200,
+            {"code": 0, "data": {"open_id": "ou_only", "name": "x"}},
         )
         self.assertEqual(fetch_user("t").identity, "ou_only")
 

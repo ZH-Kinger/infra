@@ -137,7 +137,6 @@ class ReportTests(unittest.TestCase):
         self.assertIn("显示名", lines[0])
 
 
-
 class CollectPermissionTests(unittest.TestCase):
     """401/403 绝不能长得像「这人没填邮箱」。
 
@@ -211,8 +210,9 @@ class CollectPermissionTests(unittest.TestCase):
     def test_action_name_extraction(self):
         from delivery.identity import collect as mod
 
-        self.assertEqual(mod._action_of(["aliyun", "ram", "GetUser", "--UserName", "a"]),
-                         "ram:GetUser")
+        self.assertEqual(
+            mod._action_of(["aliyun", "ram", "GetUser", "--UserName", "a"]), "ram:GetUser"
+        )
 
 
 class CollectTests(unittest.TestCase):

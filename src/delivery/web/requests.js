@@ -3,23 +3,27 @@
 // 体验约定：
 //   · 每一步都说清楚「接下来会发生什么」：提交前预览审批通过后开通的内容，提交后告诉员工去飞书看审批。
 //   · 不能申请的模板照样展示，但置灰并写明原因，而不是让人找不到。
-//   · 凭证和密码只在领取那一刻显示，离开页面就没了；页面上明确提示这一点。
+//   · 初始密码只在领取那一刻显示，离开页面就没了；页面上明确提示这一点。
+//   · **访问凭证不在这里显示**：审批通过后直接发到对应飞书审批的评论里。面板页面会被截图、
+//     被转发，登录态也可能留在别人电脑上；审批实例只有申请人和审批人看得到。
 
 import { ago, api, ApiError, apiPost, copyButton, fill, fmtTime, h, mount, openDrawer, PLATFORM_NAME, platformTag, requestTitle, safeHttps } from "./core.js";
 
-const KIND_ORDER = ["permission", "credential", "account"];
+const KIND_ORDER = ["permission", "credential", "resource", "account"];
 const KIND_INFO = {
   permission: { title: "云账号权限", desc: "给你已有的子账号加上某项权限，比如 OSS 只读。" },
-  credential: { title: "访问凭证", desc: "申请临时 AccessKey，给脚本和 CLI 用，到期自动失效。" },
+  credential: { title: "访问凭证", desc: "申请一份数据访问密钥。审批通过后直接发到审批评论里，到期自动失效。" },
+  resource: { title: "资源开通", desc: "ECS、RDS 这类要单独开的资源。审批通过后由管理员按流程创建。" },
   account: { title: "开账号", desc: "在还没有账号的云上开一个子账号。" },
 };
-const KIND_KEY_LABEL = { permission: "权限包", policy: "权限策略", credential: "访问凭证", account: "开账号" };
+const KIND_KEY_LABEL = { permission: "权限包", policy: "权限策略", credential: "访问凭证", resource: "资源", account: "开账号" };
+const CAP_LABEL = { list: "查看清单", download: "下载", write: "上传" };
 const RISK = { low: ["低风险", "good"], medium: ["中风险", "warn"], high: ["高风险", "crit"] };
 const STATUS_TONE = {
   pending_approval: "accent",
   approved: "accent",
   executing: "accent",
-  claimable: "good",
+  fulfilling: "accent",
   done: "good",
   failed: "crit",
   submit_failed: "crit",
@@ -70,7 +74,6 @@ function pageHead(title, lede, ...extra) {
 const STATE_PILL = {
   owned: ["已拥有", "good"],
   pending: ["申请中", "accent"],
-  ready: ["可领取", "good"],
   unavailable: ["不可申请", ""],
 };
 const STATE_FILTERS = [
@@ -196,7 +199,7 @@ export function requestRoutes(ctx) {
 
     function matchState(o, value) {
       if (value === "all") return true;
-      if (value === "pending") return o.state === "pending" || o.state === "ready";
+      if (value === "pending") return o.state === "pending";
       if (value === "available") return o.state === "available";
       return o.state === value;
     }
@@ -215,7 +218,7 @@ export function requestRoutes(ctx) {
       const ofKind = options.filter((o) => o.kind === filters.kind);
       const shown = ofKind.filter((o) => (filters.category === "all" || o.category === filters.category) && (filters.platform === "all" || o.platform === filters.platform) && matchState(o, filters.state) && matchQuery(o, filters.q.trim()));
       const owned = ofKind.filter((o) => o.state === "owned").length;
-      const pending = ofKind.filter((o) => o.state === "pending" || o.state === "ready").length;
+      const pending = ofKind.filter((o) => o.state === "pending").length;
       const facts = [`共 ${ofKind.length} 项`];
       if (filters.kind !== "account") facts.push(`你已拥有 ${owned} 项`);
       if (pending) facts.push(`${pending} 项在申请中`);
@@ -291,8 +294,8 @@ export function requestRoutes(ctx) {
   function optionRow(o, myAccounts) {
     const [pillText, tone] = STATE_PILL[o.state] || [];
     let action = null;
-    if (o.state === "pending" || o.state === "ready") {
-      action = h("a", { class: "btn ghost small", href: `#request=${encodeURIComponent(o.request_id)}` }, o.state === "ready" ? "去领取" : "查看申请");
+    if (o.state === "pending") {
+      action = h("a", { class: "btn ghost small", href: `#request=${encodeURIComponent(o.request_id)}` }, "查看申请");
     } else if (o.available) {
       action = h("button", { type: "button", class: o.state === "owned" ? "btn ghost small" : "btn small", onclick: () => openForm(o, myAccounts) }, o.state === "owned" ? "续期" : "申请");
     }
@@ -315,13 +318,25 @@ export function requestRoutes(ctx) {
     return o.account_label ? `${PLATFORM_NAME[o.platform] || o.platform} · ${o.account_label}` : accountLabel(o);
   }
 
+  function duration(hours) {
+    if (hours >= 24 && hours % 24 === 0) {
+      const days = hours / 24;
+      return days % 365 === 0 ? `${days / 365} 年` : `${days} 天`;
+    }
+    return `${hours} 小时`;
+  }
+
   function optionMeta(o) {
     const parts = [accountName(o)];
     if (o.kind === "permission") {
       parts.push(`用户组 ${o.groups.join("、")}`);
       parts.push(o.max_days ? `最长 ${o.max_days} 天` : "长期");
     } else if (o.kind === "credential") {
-      parts.push(`每次最长 ${o.max_hours} 小时`, `批准后 ${o.valid_days} 天内可领`);
+      parts.push(`权限 ${(o.cap_labels || []).join("、")}`, `${o.buckets.length} 个桶可选`, `最长 ${duration(o.max_hours)}`);
+    } else if (o.kind === "resource") {
+      if (o.options.length) parts.push(o.options.map((a) => a.label).join(" / ") + " 可选");
+      if (o.cost_centers.length) parts.push("需填成本归属");
+      parts.push(o.max_days ? `最长 ${o.max_days} 天` : "长期", "由管理员按流程开通");
     } else {
       if (o.groups.length) parts.push(`默认加入 ${o.groups.join("、")}`);
       if (o.console_login) parts.push("可登录控制台");
@@ -347,7 +362,7 @@ export function requestRoutes(ctx) {
     if (o.kind === "permission") {
       const mine = myAccounts.filter((a) => a.platform === o.platform && a.account === o.account);
       const select = h("select", { id: "f-user", class: "input" }, mine.map((a) => h("option", { value: a.name }, a.name)));
-      fields.push(field("f-user", "给哪个子账号开通", select, "只能选名册里确认属于你的子账号。"));
+      fields.push(field("f-user", "给哪个子账号开通", select, ""));
       read.cloud_user = () => select.value;
       if (o.max_days) {
         const days = h("input", { id: "f-days", class: "input", type: "number", inputmode: "numeric", min: "1", max: String(o.max_days), value: String(Math.min(30, o.max_days)) });
@@ -372,16 +387,139 @@ export function requestRoutes(ctx) {
             ),
         );
         days.addEventListener("input", update);
-        fields.push(field("f-days", "需要多少天", h("div", { class: "inline" }, days, presets), `最长 ${o.max_days} 天，到期自动收回。`));
+        fields.push(field("f-days", "需要多少天", h("div", { class: "inline" }, days, presets), `最长 ${o.max_days} 天`));
         read.days = () => Number.parseInt(days.value, 10);
         checks.push(() => (Number.isInteger(read.days()) && read.days() >= 1 && read.days() <= o.max_days ? "" : [days, `天数要在 1 到 ${o.max_days} 之间。`]));
       }
     } else if (o.kind === "credential") {
-      const hours = h("select", { id: "f-hours", class: "input" }, Array.from({ length: o.max_hours }, (_, i) => h("option", { value: String(i + 1) }, `${i + 1} 小时`)));
-      hours.value = String(Math.min(o.max_hours, 1));
-      hours.addEventListener("change", update);
-      fields.push(field("f-hours", "每次领取的有效时长", hours, `审批通过后 ${o.valid_days} 天内可以随时领取，每份凭证在这个时长后失效。`));
-      read.hours = () => Number.parseInt(hours.value, 10);
+      const subject = h("input", { id: "f-subject", class: "input", maxlength: "40", autocomplete: "off", placeholder: "留空就是你自己" });
+      subject.addEventListener("input", update);
+      fields.push(field("f-subject", "谁用这份凭证", subject, "外部合作方写对方单位名"));
+      read.subject = () => subject.value.trim();
+
+      const bucket = h("select", { id: "f-bucket", class: "input" }, o.buckets.map((b) => h("option", { value: b.name }, `${b.name}（${b.region}）`)));
+      bucket.addEventListener("change", update);
+      fields.push(field("f-bucket", "哪个桶", bucket, ""));
+      read.bucket = () => bucket.value;
+
+      if (o.allow_prefix) {
+        const prefix = h("input", { id: "f-prefix", class: "input", autocomplete: "off", spellcheck: "false", placeholder: "留空 = 整个桶，例如 datasets/2026/" });
+        prefix.addEventListener("input", update);
+        fields.push(field("f-prefix", "限定到哪个目录（可选）", prefix, "范围越小越好"));
+        read.prefix = () => prefix.value.trim();
+      }
+
+      // 8760 个 <option> 是不能看的。数字 + 单位，再给几个常用档
+      const amount = h("input", { id: "f-hours", class: "input", type: "number", inputmode: "numeric", min: "1", value: "7" });
+      const unit = h("select", { class: "input", "aria-label": "时长单位" }, [h("option", { value: "24" }, "天"), h("option", { value: "1" }, "小时")]);
+      const toHours = () => Math.max(1, Math.round(Number.parseInt(amount.value, 10) || 0)) * Number.parseInt(unit.value, 10);
+      const presets = h(
+        "div",
+        { class: "presets" },
+        [[8, "8 小时"], [24 * 7, "7 天"], [24 * 30, "30 天"], [24 * 90, "90 天"], [24 * 365, "1 年"]]
+          .filter(([hrs]) => hrs <= o.max_hours)
+          .map(([hrs, label]) =>
+            h("button", { type: "button", class: "chip", onclick: () => {
+              if (hrs % 24 === 0) { unit.value = "24"; amount.value = String(hrs / 24); } else { unit.value = "1"; amount.value = String(hrs); }
+              update();
+            } }, label),
+          ),
+      );
+      amount.addEventListener("input", update);
+      unit.addEventListener("change", update);
+      fields.push(field("f-hours", "用多久", h("div", { class: "inline" }, amount, unit, presets), `最长 ${duration(o.max_hours)}`));
+      read.hours = toHours;
+      checks.push(() => (toHours() >= 1 && toHours() <= o.max_hours ? "" : [amount, `时长要在 1 小时到 ${duration(o.max_hours)} 之间。`]));
+    } else if (o.kind === "resource") {
+      // 能选的一律给下拉：自由填写的规格调不了云 API，审批人也判断不了批的是什么
+      const picks = {};
+      if (o.options.length) {
+        const rows = {};
+        // 某些轴只在别的轴选了特定项时才有意义（不要公网 IP 就不用问计费方式）
+        const hiddenNow = (axis) => Object.entries(axis.hidden_when || {}).some(([k, vs]) => vs.includes((picks[k] || {}).value));
+        const sync = () => { for (const a of o.options) rows[a.id].hidden = hiddenNow(a); update(); };
+        const nums = {};
+        for (const axis of o.options) {
+          let el;
+          let hint = "";
+          if (axis.number) {
+            // 连续值给数字框，不给下拉：磁盘大小列成几档只是把「填多少」换成「挑一个最接近的」
+            const n = axis.number;
+            el = h("input", { id: `f-opt-${axis.id}`, class: "input", type: "number", inputmode: "numeric", min: String(n.omit_zero ? 0 : n.min), max: String(n.max), step: String(n.step), value: String(n.default) });
+            hint = n.omit_zero ? `${n.min}–${n.max}${n.unit}，填 0 表示不要` : `${n.min}–${n.max}${n.unit}`;
+            el.addEventListener("input", () => { el.classList.remove("invalid"); sync(); });
+            nums[axis.id] = el;
+            checks.push(() => {
+              if (hiddenNow(axis)) return "";
+              const v = Number.parseInt(el.value, 10);
+              if (!Number.isInteger(v)) return [el, `「${axis.label}」要填整数。`];
+              if (n.omit_zero && v === 0) return "";
+              if (v < n.min || v > n.max) return [el, `「${axis.label}」要在 ${n.min}–${n.max} 之间。`];
+              if (n.step > 1 && v % n.step) return [el, `「${axis.label}」要是 ${n.step} 的整数倍。`];
+              return "";
+            });
+          } else {
+            el = h("select", { id: `f-opt-${axis.id}`, class: "input" }, axis.choices.map((c) => h("option", { value: c.id }, c.label)));
+            el.addEventListener("change", sync);
+            picks[axis.id] = el;
+          }
+          rows[axis.id] = field(`f-opt-${axis.id}`, axis.label, el, hint);
+          fields.push(rows[axis.id]);
+        }
+        queueMicrotask(sync);
+        read.choices = () => Object.fromEntries(o.options.filter((a) => !a.number && !hiddenNow(a)).map((a) => [a.id, picks[a.id].value]));
+        read.numbers = () => Object.fromEntries(o.options.filter((a) => a.number && !hiddenNow(a)).map((a) => [a.id, Number.parseInt(nums[a.id].value, 10)]));
+      } else {
+        const specEl = h("input", { id: "f-spec", class: "input", maxlength: "500", autocomplete: "off", placeholder: o.spec_hint || "写明规格、地域、用途" });
+        specEl.addEventListener("input", () => { specEl.classList.remove("invalid"); update(); });
+        fields.push(field("f-spec", "要什么规格", specEl, o.spec_hint || ""));
+        read.spec = () => specEl.value.trim();
+        checks.push(() => (specEl.value.trim().length >= 2 ? "" : [specEl, "请写明要开什么规格。"]));
+      }
+
+      if (o.cost_centers.length) {
+        const ccList = [...o.cost_centers.map((c) => h("option", { value: c.id }, c.label))];
+        if (o.cost_center_other) ccList.push(h("option", { value: "other" }, "其他（自己填）"));
+        const cc = h("select", { id: "f-cost", class: "input" }, [h("option", { value: "" }, "请选择"), ...ccList]);
+        // 清单里没有时能自己填：不给填的话人只会随便挑一个最像的，那比写清楚更糟
+        const other = h("input", { id: "f-cost-other", class: "input", maxlength: "40", autocomplete: "off", placeholder: "项目名或团队名" });
+        const otherRow = field("f-cost-other", "算在谁头上", other, "");
+        otherRow.hidden = true;
+        const sync = () => { otherRow.hidden = !(o.cost_center_other && cc.value === "other"); update(); };
+        cc.addEventListener("change", sync);
+        other.addEventListener("input", () => { other.classList.remove("invalid"); update(); });
+        fields.push(field("f-cost", "成本归属", cc, ""), otherRow);
+        read.cost_center = () => cc.value;
+        read.cost_center_name = () => other.value.trim();
+        checks.push(() => (cc.value ? "" : [cc, "请选择成本归属。"]));
+        checks.push(() => (cc.value !== "other" || other.value.trim().length >= 2 ? "" : [other, "请写清楚算在谁头上。"]));
+      }
+
+      const detail = h("textarea", { id: "f-detail", class: "input", rows: "2", maxlength: "500", placeholder: "挂载、特殊要求…（可选）" });
+      detail.addEventListener("input", update);
+      fields.push(field("f-detail", "补充说明（可选）", detail, ""));
+      read.detail = () => detail.value.trim();
+
+      if (o.max_days) {
+        // 选日期不是填天数：「用到几月几号」才是人真正在想的事
+        const iso = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10);
+        const plus = (days) => { const d = new Date(); d.setDate(d.getDate() + days); return d; };
+        const until = h("input", { id: "f-until", class: "input", type: "date", min: iso(plus(1)), max: iso(plus(o.max_days)), value: iso(plus(Math.min(90, o.max_days))) });
+        const presets = h("div", { class: "presets" }, [[30, "1 个月"], [90, "3 个月"], [180, "半年"], [365, "1 年"]].filter(([d]) => d <= o.max_days).map(([d, label]) =>
+          h("button", { type: "button", class: "chip", onclick: () => { until.value = iso(plus(d)); update(); } }, label)));
+        const untilHint = h("span", {});
+        const days = () => Math.round((new Date(until.value + "T00:00:00") - new Date(iso(new Date()) + "T00:00:00")) / 864e5);
+        const showDays = () => {
+          const n = days();
+          untilHint.textContent = until.value && Number.isFinite(n)
+            ? `${n} 天（最长 ${o.max_days} 天）` : `最长 ${o.max_days} 天`;
+        };
+        until.addEventListener("input", () => { until.classList.remove("invalid"); showDays(); update(); });
+        showDays();
+        fields.push(field("f-until", "用到哪天", h("div", { class: "inline" }, until, presets), untilHint));
+        read.until = () => until.value;
+        checks.push(() => (until.value && until.value >= iso(plus(1)) && until.value <= iso(plus(o.max_days)) ? "" : [until, `到期日要在明天到 ${o.max_days} 天之内。`]));
+      }
     } else {
       // 模板里的规则按 Python 语法写，浏览器不一定认得：认不得就只做基本检查，交给服务端把关
       let pattern = /^[a-z0-9][a-z0-9._-]{1,63}$/;
@@ -420,7 +558,26 @@ export function requestRoutes(ctx) {
     function update() {
       const p = payload();
       if (o.kind === "permission") preview.textContent = `子账号 ${p.cloud_user || "（未选）"} 加入用户组 ${o.groups.join("、")}${p.days ? `，${p.days} 天后自动收回` : ""}。${o.state === "owned" ? "你现在已有这项权限，这次申请用于续期。" : ""}`;
-      else if (o.kind === "credential") preview.textContent = `${o.valid_days} 天内，你可以随时在「我的申请」里领取 ${p.hours} 小时有效的临时凭证。`;
+      else if (o.kind === "credential") {
+        const who = p.subject || "你自己";
+        const scope = p.prefix ? `${p.bucket}/${p.prefix}` : `${p.bucket} 整个桶`;
+        const how = o.sts_available && p.hours <= o.sts_max_hours ? "临时凭证（到点自动失效，云上不留任何东西）" : "长期凭证（子账号 + 写死时间窗的策略，到期自动失效并清理）";
+        preview.textContent = `审批通过后给「${who}」发一份 ${duration(p.hours)} 的${how}，范围 ${scope}，权限 ${(o.cap_labels || []).join("、")}。凭证会发到这张审批的评论里，不显示在面板上。`;
+      } else if (o.kind === "resource") {
+        const what = o.options.length
+          ? o.options.map((a) => {
+              if (a.number) {
+                const v = (p.numbers || {})[a.id];
+                if (v === undefined) return "";
+                return a.number.omit_zero && v === 0 ? `${a.label} 不要` : `${a.label} ${v}${a.number.unit}`;
+              }
+              const c = (p.choices || {})[a.id];
+              return c ? `${a.label} ${(a.choices.find((x) => x.id === c) || {}).label || "？"}` : "";
+            }).filter(Boolean).join("、")
+          : p.spec || "（未填）";
+        const cc = p.cost_center === "other" ? p.cost_center_name : (o.cost_centers.find((c) => c.id === p.cost_center) || {}).label;
+        preview.textContent = `审批通过后在 ${accountName(o)} 开通 ${what}` + (cc ? `，成本归属 ${cc}` : "") + (p.until ? `，用到 ${p.until}` : "，长期") + "。";
+      }
       else preview.textContent = `在 ${accountName(o)} 新建子账号 ${p.username || "（未填）"}${o.groups.length ? `，加入 ${o.groups.join("、")}` : ""}${o.console_login ? "；你可以领取一次性初始密码登录控制台" : ""}。`;
     }
     update();
@@ -504,7 +661,7 @@ export function requestRoutes(ctx) {
   function listPage(requests, { admin, filter }) {
     const tabs = [
       ["open", "进行中", (r) => r.open],
-      ["attention", admin ? "需要处理" : "待我操作", (r) => (admin ? ["failed", "executing", "submitting"].includes(r.status) || needsLink(r) : Boolean(r.actions.credential || r.actions.password))],
+      ["attention", admin ? "需要处理" : "待我操作", (r) => (admin ? ["failed", "executing", "submitting", "fulfilling"].includes(r.status) || needsLink(r) : Boolean(r.actions.password))],
       ["closed", "已结束", (r) => !r.open],
       ["all", "全部", () => true],
     ];
@@ -625,12 +782,11 @@ export function requestRoutes(ctx) {
 
   function steps(r) {
     const s = r.status;
-    const approvedLike = ["approved", "executing", "done", "failed", "claimable", "expired", "closed"].includes(s);
-    const last = r.kind === "credential" ? "可领取" : "开通";
+    const approvedLike = ["approved", "executing", "done", "failed", "fulfilling", "closed"].includes(s);
     const list = [
       ["提交", "done"],
       ["飞书审批", s === "pending_approval" ? "current" : approvedLike ? "done" : ["rejected", "withdrawn", "submit_failed"].includes(s) ? "stopped" : "todo"],
-      [last, s === "executing" ? "current" : ["done", "claimable"].includes(s) ? "done" : s === "failed" ? "stopped" : "todo"],
+      [r.kind === "credential" ? "签发凭证" : "开通", ["executing", "fulfilling"].includes(s) ? "current" : s === "done" ? "done" : s === "failed" ? "stopped" : "todo"],
     ];
     return h(
       "ol",
@@ -649,18 +805,21 @@ export function requestRoutes(ctx) {
     if (r.status === "failed") nodes.push(h("div", { class: "banner crit" }, h("b", {}, "审批已通过，但开通失败。"), " ", admin ? lastNote(r) : "管理员会处理，处理好后这里会更新。"));
     if (r.status === "rejected") nodes.push(h("div", { class: "banner warn" }, "审批没有通过。可以在飞书里查看审批意见，调整后重新申请。"));
     if (admin && needsLink(r)) nodes.push(h("div", { class: "banner warn" }, h("b", {}, "新账号还没对应到申请人。"), " 请在「人员与名册」里把这个子账号确认给申请人，否则他之后申请权限时选不到这个账号。 ", h("a", { href: "#admin" }, "去人员与名册 →")));
-    if (r.status === "done" && r.result) nodes.push(h("div", { class: "banner good" }, h("b", {}, "已开通。"), " ", r.result));
+    if (r.status === "done" && r.result) nodes.push(h("div", { class: "banner good" }, h("b", {}, r.kind === "credential" ? "凭证已发放。" : "已开通。"), " ", r.result));
+    if (r.status === "fulfilling") nodes.push(h("div", { class: "banner" }, h("b", {}, "审批已通过，等待开通。"), " 这类资源由管理员按 IaC 流程创建，面板不直接创建。开通后这里会更新。"));
+    if (r.kind === "credential" && ["done", "revoked"].includes(r.status)) nodes.push(h("div", { class: "banner" }, h("b", {}, "查看凭证的地址在飞书审批的评论里。"), " 那个链接可以反复打开，每次打开都会记在下面的事件里。面板存的是密文，自己也解不开。"));
 
     const actions = h("div", { class: "actions" });
     const secret = h("div", { class: "secret-slot" });
     const link = feishuLink(r);
     if (link) actions.append(link);
-    if (r.actions.credential) actions.append(credentialAction(r, secret));
     if (r.actions.password) actions.append(passwordAction(r, secret));
+    if (r.actions.fulfil) actions.append(fulfilAction(r));
     if (r.actions.withdraw) actions.append(simpleAction("撤回申请", `/api/requests/${encodeURIComponent(r.id)}/withdraw`, "撤回后飞书里的审批也会撤销。确定撤回？", admin, true));
     if (r.actions.retry) actions.append(simpleAction("重试开通", `/api/admin/requests/${encodeURIComponent(r.id)}/retry`, "会先重新核对飞书审批，通过后再开通。确定重试？", admin));
     if (r.actions.recover) actions.append(simpleAction("标记为失败", `/api/admin/requests/${encodeURIComponent(r.id)}/recover`, "这张单子长时间没有进展。标记为失败后可以核对云上状态再重试。确定？", admin, true));
-    if (r.actions.close) actions.append(simpleAction("关闭申请", `/api/admin/requests/${encodeURIComponent(r.id)}/close`, "关闭后不能再开通或领取。确定关闭？", admin, true));
+    if (r.actions.close) actions.append(simpleAction("关闭申请", `/api/admin/requests/${encodeURIComponent(r.id)}/close`, "关闭后这张单子不会再开通。确定关闭？", admin, true));
+    if (r.actions.revoke) actions.append(simpleAction("作废凭证", `/api/admin/requests/${encodeURIComponent(r.id)}/revoke`, "查看地址立刻失效，云上的子账号、密钥和策略一并删除。使用方要重新申请。确定作废？", admin, true));
     const hint = nextStep(r, admin);
     nodes.push(h("div", { class: "card status-card" }, steps(r), hint || actions.childElementCount ? h("div", { class: "status-foot" }, hint ? h("p", { class: "status-hint" }, hint) : null, actions.childElementCount ? actions : null) : null));
     nodes.push(secret);
@@ -670,8 +829,7 @@ export function requestRoutes(ctx) {
       r.template.policies && r.template.policies.length ? ["授予的权限", policyList(r.template.policies)] : null,
       ["申请理由", r.reason],
       admin ? ["申请人", `${r.applicant.name || ""} ${r.applicant.email || ""}`.trim()] : null,
-      r.valid_until ? ["领取截止", fmtTime(r.valid_until)] : null,
-      r.expires_at ? ["权限到期", `${fmtTime(r.expires_at)}（到期自动收回）`] : null,
+      r.expires_at ? [r.kind === "credential" ? "凭证到期" : r.kind === "resource" ? "使用到期" : "权限到期", `${fmtTime(r.expires_at)}（${r.kind === "resource" ? "到期只提醒，不会自动删资源" : "到期自动收回"}）`] : null,
       ["提交时间", fmtTime(r.created_at)],
       admin && r.approval && r.approval.instance_code ? ["飞书审批实例", r.approval.instance_code] : null,
     ].filter(Boolean);
@@ -702,20 +860,19 @@ export function requestRoutes(ctx) {
         return "等审批人在飞书里处理。通过后自动开通，这里会同步更新。";
       case "approved":
       case "executing":
-        return "审批已通过，正在开通。";
-      case "claimable":
-        return r.valid_until ? `已批准，${fmtTime(r.valid_until)} 前${who}可以随时领取临时凭证。` : "已批准，可以领取临时凭证。";
+        return r.kind === "credential" ? "审批已通过，正在发放凭证。" : "审批已通过，正在开通。";
+      case "fulfilling":
+        return admin ? "审批已通过。按 IaC 流程创建好之后，点「登记开通结果」把实例信息填进台账。" : "审批已通过，等管理员开通。开通后这里会更新。";
       case "done":
         if (r.actions.password) return `子账号已开通。${who}可以领取一次性初始密码，首次登录必须修改。`;
+        if (r.kind === "credential") return r.expires_at ? `凭证已签发，查看地址在飞书审批的评论里，${fmtTime(r.expires_at)} 到期。` : "凭证已签发，查看地址在飞书审批的评论里。";
         return r.expires_at ? `已开通，${fmtTime(r.expires_at)} 到期后自动收回。需要继续用请在到期前重新申请。` : "已开通。";
       case "failed":
         return admin ? "开通失败。核对原因后可以重试，或关闭这张申请。" : "";
       case "withdrawn":
         return "申请已撤回。";
-      case "expired":
-        return "领取期已过，需要的话请重新申请。";
       case "revoked":
-        return "权限已到期收回。";
+        return r.kind === "credential" ? "凭证已到期失效，云上的子账号和密钥已清理。" : "权限已到期收回。";
       default:
         return "";
     }
@@ -750,50 +907,21 @@ export function requestRoutes(ctx) {
     return btn;
   }
 
-  function credentialAction(r, slot) {
-    const btn = h("button", { type: "button", class: "btn small" }, `领取 ${r.payload.hours} 小时临时凭证`);
+  function fulfilAction(r) {
+    const btn = h("button", { type: "button", class: "btn small" }, "登记开通结果");
     btn.addEventListener("click", async () => {
+      const note = window.prompt("开通了什么？写实例 ID、规格、地域——这行会进台账。");
+      if (note === null || !note.trim()) return;
       btn.disabled = true;
-      btn.textContent = "正在签发…";
       try {
-        const res = await apiPost(`/api/requests/${encodeURIComponent(r.id)}/credential`, {});
-        showCredential(slot, res.credential);
+        await apiPost(`/api/admin/requests/${encodeURIComponent(r.id)}/fulfil`, { note: note.trim() });
+        ctx.route();
       } catch (err) {
+        btn.disabled = false;
         window.alert(err.message);
       }
-      btn.disabled = false;
-      btn.textContent = `再领一份（${r.payload.hours} 小时）`;
     });
     return btn;
-  }
-
-  // 单引号包裹，值里的单引号转成 '\'' ——粘进终端不会被 shell 解释
-  function shq(value) {
-    return `'${String(value).replaceAll("'", "'\\''")}'`;
-  }
-
-  function showCredential(slot, c) {
-    const names =
-      c.platform === "volcano"
-        ? ["VOLCENGINE_ACCESS_KEY", "VOLCENGINE_SECRET_KEY", "VOLCENGINE_SESSION_TOKEN"]
-        : ["ALIBABA_CLOUD_ACCESS_KEY_ID", "ALIBABA_CLOUD_ACCESS_KEY_SECRET", "ALIBABA_CLOUD_SECURITY_TOKEN"];
-    const env = [c.access_key_id, c.access_key_secret, c.security_token].map((v, i) => `export ${names[i]}=${shq(v)}`).join("\n");
-    const rows = [
-      ["AccessKey ID", c.access_key_id],
-      ["AccessKey Secret", c.access_key_secret],
-      ["Security Token", c.security_token],
-    ];
-    const panel = h(
-      "div",
-      { class: "card secret", role: "region", "aria-label": "临时凭证" },
-      h("div", { class: "secret-head" }, h("div", {}, h("h2", {}, "临时凭证"), h("p", { class: "muted" }, `${fmtTime(c.expiration)} 失效。只显示这一次，离开页面就看不到了，需要时可以再领。`)), h("button", { type: "button", class: "linkbtn", onclick: () => panel.remove() }, "隐藏")),
-      h("dl", { class: "kv" }, rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, h("code", { class: "secret-value" }, v), copyButton(() => v))])),
-      h("div", { class: "snippet" }, h("div", { class: "snippet-head" }, h("span", {}, "在终端里用（官方 CLI 和 SDK 都认这几个环境变量）"), copyButton(() => env, "复制全部")), h("pre", {}, env)),
-    );
-    fill(slot, panel);
-    // 5 分钟后自动收起，减少凭证在屏幕上停留的时间
-    setTimeout(() => panel.remove(), 5 * 60 * 1000);
-    panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
 
   function passwordAction(r, slot) {

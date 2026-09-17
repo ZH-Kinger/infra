@@ -164,6 +164,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     srv.add_argument("--port", type=int, default=8765, help="监听端口，默认 8765")
     srv.add_argument(
+        "--sessions",
+        default=None,
+        help="登录会话落盘的位置（如 identity/sessions.json）。"
+        "不给则只存内存，进程一重启所有人要重新登录",
+    )
+    srv.add_argument(
         "--host",
         default="127.0.0.1",
         help="监听地址。默认只绑回环——看板会显示账号与权限，不该暴露给网段",
@@ -189,6 +195,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--tickets", default="identity/tickets.json", help="申请单存储（开账号、权限、访问凭证）"
     )
     srv.add_argument("--assets", default="identity/assets.json", help="云账号资产快照")
+    srv.add_argument(
+        "--downloads",
+        default="",
+        help="工具下载目录（如 downloads/）。放九章的 aladdin 这类没有公开下载地址的二进制；"
+        "阿里和火山的 CLI 有官方地址，页面上直接给链接，不在这里放第二份",
+    )
     srv.add_argument(
         "--policies",
         default="identity/policies.json",
@@ -1332,6 +1344,22 @@ def _review_paths(args) -> dict:
     return {"proposal_path": args.proposal, "manual_path": args.manual}
 
 
+def _sessions_path(args) -> Optional[str]:
+    """会话文件里是登录凭证（等同于 cookie 值），和名册同级看待：只允许落在 identity/ 下。
+
+    路径不合规不是致命错误——退回只存内存，重启会把人踢下线，但服务照常起。
+    """
+    value = getattr(args, "sessions", None)
+    if not value:
+        return None
+    try:
+        _require_identity_dir(Path(value).resolve())
+    except DeliveryError as exc:
+        print(f"  ⚠ 会话不落盘（重启后需重新登录）：{str(exc).splitlines()[0]}")
+        return None
+    return value
+
+
 def _request_paths(args) -> dict:
     """申请单含员工信息，模板和审批配置含云账号 ID，资产快照含资源明细：
     路径过不了写盘守卫（必须在 gitignored 的 identity/ 下）就不开对应功能。"""
@@ -1561,6 +1589,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 labels_path=args.labels,
                 **_review_paths(args),
                 **_request_paths(args),
+                sessions_path=_sessions_path(args),
+                downloads_path=args.downloads,
                 auth=args.auth,
             )
             return 0
@@ -1568,7 +1598,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return _cmd_inventory_collect(args)
         if args.command == "refresh":
             return _cmd_refresh(args)
-        if args.command in ("request", "creds", "requests", "approval", "assets", "policies"):
+        if args.command in ("request", "requests", "approval", "assets", "policies"):
             from . import cli_requests
 
             return cli_requests.dispatch(args)

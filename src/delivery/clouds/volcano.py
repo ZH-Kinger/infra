@@ -34,6 +34,9 @@ DEFAULT_REGION = "cn-beijing"
 _TIMEOUT = 25
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
+#: 写操作前缀：这些动作成功时火山不返回 Result，判成败只能看有没有 Error
+_WRITE_PREFIXES = ("Create", "Delete", "Update", "Attach", "Detach", "Add", "Remove", "Put", "Set")
+
 _DENIED = ("accessdenied", "nopermission", "unauthorized", "forbidden", "invalidaccesskey")
 
 
@@ -169,6 +172,15 @@ def call(
     if status == 200 and "Result" in resp:
         return resp["Result"]
     err = (resp.get("ResponseMetadata") or {}).get("Error") or {}
+    # 写操作（AttachUserPolicy / DetachUserPolicy 这类）**成功时不返回 Result**，只有
+    # ResponseMetadata。原先一律按「没有 Result 就是失败」判，于是每一次成功的写都被抛成
+    # 异常，调用方重试、第二次拿到 409 才知道第一次其实成了。
+    #
+    # 读操作**不能**这样放行：ListUsers 回 200 却没有 Result 时静默返回空，会让采集器把
+    # 「接口出问题」报成「这个账号 0 个用户」—— 那正是 test_missing_result_is_an_error
+    # 钉住的行为，别为了修写操作把它一起放宽。
+    if status == 200 and not err and action.startswith(_WRITE_PREFIXES):
+        return {}
     code, message = str(err.get("Code") or ""), _scrub(str(err.get("Message") or ""))
     blob = f"{code} {message}".lower()
     if any(m in blob for m in _DENIED):

@@ -38,9 +38,11 @@ class _Live:
         self.server.shutdown()
         self.server.server_close()
 
-    def get(self, path, *, cookie="", follow=False):
+    def get(self, path, *, cookie="", follow=False, headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        headers = {"Cookie": f"{COOKIE_NAME}={cookie}"} if cookie else {}
+        headers = dict(headers or {})
+        if cookie:
+            headers["Cookie"] = f"{COOKIE_NAME}={cookie}"
         conn.request("GET", path, headers=headers)
         resp = conn.getresponse()
         body = resp.read().decode(errors="replace")
@@ -97,6 +99,25 @@ class RoutingTests(unittest.TestCase):
         with _Live() as live:
             _, headers, _ = live.get("/")
             self.assertIn("no-store", headers.get("Cache-Control", ""))
+            self.assertNotIn("ETag", headers)
+
+    def test_assets_revalidate_instead_of_being_cached_blindly(self):
+        """JS/CSS 不带缓存头的话，浏览器按自己的启发式缓存 —— 部署完用户还是旧的，
+        要人去硬刷新才看得到。那等于没部署，而且没人会记得这一步。"""
+        with _Live() as live:
+            status, headers, body = live.get("/requests.js")
+            self.assertEqual(status, 200)
+            # 必须是覆盖不是追加：发两个 Cache-Control 浏览器按更严的算，协商缓存就白做了
+            self.assertEqual(headers.get("Cache-Control"), "no-cache")
+            etag = headers.get("ETag", "")
+            self.assertTrue(etag.startswith('"'), etag)
+            # 内容没变就 304，不重传
+            status2, headers2, body2 = live.get("/requests.js", headers={"If-None-Match": etag})
+            self.assertEqual(status2, 304)
+            self.assertEqual(body2, "")
+            # ETag 按内容算，不按 mtime —— rsync 保留时间戳，同一份内容重部署不该让所有人重下
+            self.assertEqual(headers.get("ETag"), headers2.get("ETag"))
+            self.assertTrue(body)
 
 
 class LoginRedirectTests(unittest.TestCase):

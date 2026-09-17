@@ -7,8 +7,10 @@
   POST /api/requests                        POST /api/admin/requests/<id>/retry
   GET  /api/requests/<id>                   POST /api/admin/requests/<id>/close
                                             POST /api/admin/requests/<id>/recover（卡住的单子）
-  POST /api/requests/<id>/withdraw
-  POST /api/requests/<id>/credential        （领取临时凭证，响应里直接给，不落盘）
+  POST /api/requests/<id>/withdraw          POST /api/admin/requests/<id>/fulfil
+                                            （资源开通：管理员登记实例信息）
+                                            POST /api/admin/requests/<id>/revoke
+                                            （凭证外泄：删密文 + 删云上的号和密钥）
   POST /api/requests/<id>/password          （领取一次性初始密码）
 
 员工视角的申请单去掉模板里的角色 ARN、执行细节；事件里的操作人显示成「你 / 飞书 / 系统 / 管理员」，
@@ -22,13 +24,17 @@ import sys
 from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
+from . import platforms
 from . import tickets as t
 from .approval import Applicant, ApprovalError
 from .catalog import KIND_LABELS
 from .errors import DeliveryError
 from .flows import FlowError, Flows, password_claims
 
-_ID = re.compile(r"^REQ-\d{8}-[0-9A-F]{8}$")
+#: 申请单号的形状。server.py 的查看凭证接口也用它校验，别在那边再写一份
+#: 尾锚用 \Z 不用 $ —— $ 会放过结尾的换行，"REQ-…-AAAAAAAA\n" 能过校验
+TICKET_ID = re.compile(r"\AREQ-\d{8}-[0-9A-F]{8}\Z")
+_ID = TICKET_ID
 _EVENT_LABELS = {
     "created": "提交申请",
     "approval_created": "发起飞书审批",
@@ -40,18 +46,26 @@ _EVENT_LABELS = {
     "approval_reverted": "审批通过后被撤销",
     "approval_invalid": "审批未经他人同意，已关闭",
     "withdrawn": "撤回申请",
-    "claimable": "可以领取",
+    "fulfilling": "等待管理员开通",
     "execute_start": "开始开通",
     "execute_done": "开通完成",
     "execute_failed": "开通失败",
-    "credential_issued": "领取临时凭证",
+    "credential_sealed": "凭证已加密存放",
+    "credential_viewed": "查看凭证",
+    "cred_user_reserved": "准备发放凭证",
+    "credential_issued": "发放凭证",
     "credential_failed": "签发凭证失败",
+    "credential_revoked": "凭证未送达，已作废",
+    "credential_orphaned": "凭证未送达，作废时没清干净",
+    "credential_sealed_dropped": "管理员作废，查看地址已失效",
+    "credential_reclaimed": "已清理没送达的凭证",
+    "await_fulfil": "等待管理员开通",
+    "fulfilled": "管理员已登记开通结果",
     "password_issued": "领取初始密码",
     "password_failed": "初始密码未生成",
     "user_created": "新建子账号",
     "linked": "对应到申请人",
     "link_needed": "待管理员对应到申请人",
-    "expired": "已过期",
     "closed": "已关闭",
     "groups_checked": "核对原有用户组",
     "policies_checked": "核对原有策略",
@@ -145,21 +159,28 @@ def ticket_view(ticket: dict, *, viewer: Caller, links: Optional[dict] = None) -
         "reason": ticket.get("reason", ""),
         "created_at": ticket.get("created_at", ""),
         "updated_at": ticket.get("updated_at", ""),
-        "valid_until": ticket.get("valid_until", ""),
         "expires_at": ticket.get("expires_at", ""),
         "result": ticket.get("result", ""),
         "events": events,
         "actions": {
             "withdraw": own and status == t.PENDING,
-            "credential": own and status == t.CLAIMABLE,
+            # 凭证不在面板上领取：审批通过即签发，审批评论里给一个带密钥的查看地址
             "password": own
             and status == t.DONE
             and ticket.get("kind") == "account"
             and bool(tpl.get("console_login"))
             and not claimed_password,
             "retry": viewer.admin and status == t.FAILED,
-            "close": viewer.admin and status in (t.FAILED, t.CLAIMABLE),
+            "fulfil": viewer.admin and status == t.FULFILLING and ticket.get("kind") == "resource",
+            "close": viewer.admin and status in (t.FAILED, t.FULFILLING),
             "recover": viewer.admin and status in (t.EXECUTING, t.SUBMITTING),
+            # 链接外泄时管理员要能立刻掐掉。删密文 + 删云上的子账号和密钥，
+            # 不等到期。没有这个按钮的话，唯一的办法是手改申请单或去云控制台。
+            # 要求「还有东西可作废」：清干净之后按钮还亮着的话，再点一次就是空转
+            "revoke": viewer.admin
+            and ticket.get("kind") == "credential"
+            and status in (t.DONE, t.FAILED, t.CLOSED)
+            and bool(ticket.get("cred_user") or (ticket.get("sealed") or {}).get("ciphertext")),
         },
     }
     links = links if (own or viewer.admin) and links else {}
@@ -282,7 +303,7 @@ class RequestsApi:
                         items = [x for x in items if x.get("status") == wanted]
                 else:
                     for item in flows.store.mine(caller.union_id):
-                        if item.get("status") in (t.PENDING, t.CLAIMABLE):
+                        if item.get("status") == t.PENDING:
                             _quiet_sync(flows, item["id"])
                     items = flows.store.mine(caller.union_id)
                 items = sorted(items, key=lambda x: x.get("created_at", ""), reverse=True)
@@ -313,7 +334,7 @@ class RequestsApi:
         action = rest[1] if len(rest) > 1 else ""
 
         if not action and method == "GET":
-            if ticket.get("status") in (t.PENDING, t.CLAIMABLE):
+            if ticket.get("status") == t.PENDING:
                 ticket = _quiet_sync(flows, ticket_id) or ticket
             return 200, {"request": self._view(flows, ticket, caller)}
         if method != "POST":
@@ -328,6 +349,19 @@ class RequestsApi:
         if admin and action == "recover":
             flows.recover_stuck(ticket_id, actor=caller.union_id)
             return 200, {"request": self._view(flows, flows.store.get(ticket_id), caller)}
+        if admin and action == "fulfil":
+            note = str(body.get("note") or "")[:500]
+            return 200, {
+                "request": self._view(
+                    flows, flows.fulfil(ticket_id, actor=caller.union_id, note=note), caller
+                )
+            }
+        if admin and action == "revoke":
+            return 200, {
+                "request": self._view(
+                    flows, flows.revoke_now(ticket_id, actor=caller.union_id), caller
+                )
+            }
         if admin and action == "close":
             note = str(body.get("note") or "")[:200]
             return 200, {
@@ -338,30 +372,10 @@ class RequestsApi:
         if not admin and action == "withdraw":
             done = flows.withdraw(ticket_id, union_id=caller.union_id)
             return 200, {"request": self._view(flows, done, caller)}
-        if not admin and action == "credential":
-            hours = body.get("hours")
-            ticket, cred = flows.claim_credential(
-                ticket_id, union_id=caller.union_id, hours=hours if isinstance(hours, int) else None
-            )
-            tpl = ticket["template"]
-            return 200, {
-                "request": self._view(flows, ticket, caller),
-                "credential": {
-                    "platform": tpl["platform"],
-                    "account": tpl["account"],
-                    "access_key_id": cred.access_key_id,
-                    "access_key_secret": cred.secret,
-                    "security_token": cred.token,
-                    "expiration": cred.expiration,
-                },
-            }
         if not admin and action == "password":
             ticket, password = flows.claim_password(ticket_id, union_id=caller.union_id)
             tpl = ticket["template"]
-            login = {
-                "aliyun": f"https://signin.aliyun.com/{tpl['account']}.onaliyun.com/login.htm",
-                "volcano": f"https://console.volcengine.com/auth/login/user/{tpl['account']}",
-            }.get(tpl["platform"], "")
+            login = platforms.get(tpl["platform"]).login_url(tpl["account"])
             return 200, {
                 "request": self._view(flows, ticket, caller),
                 "login": {

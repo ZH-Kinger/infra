@@ -16,10 +16,13 @@ class AliyunSignTests(unittest.TestCase):
     def test_matches_the_documented_example(self):
         """阿里云 RPC 签名文档里的经典样例（ECS DescribeRegions）。"""
         params = {
-            "Format": "XML", "AccessKeyId": "testid", "Action": "DescribeRegions",
+            "Format": "XML",
+            "AccessKeyId": "testid",
+            "Action": "DescribeRegions",
             "SignatureMethod": "HMAC-SHA1",
             "SignatureNonce": "3ee8c1b8-83d3-44af-a94f-4e0ad82fd6cf",
-            "SignatureVersion": "1.0", "Version": "2014-05-26",
+            "SignatureVersion": "1.0",
+            "Version": "2014-05-26",
             "Timestamp": "2016-02-23T12:46:24Z",
         }
         self.assertEqual(aliyun.sign(params, "testsecret"), "OLeaidS1JvxuMvnyHOwuJ+uX5qY=")
@@ -92,15 +95,17 @@ class AliyunPaginateTests(unittest.TestCase):
             (200, {"Users": {"User": [{"n": 1}]}, "IsTruncated": True, "Marker": "m1"}),
             (200, {"Users": {"User": [{"n": 2}]}, "IsTruncated": False}),
         )
-        out = aliyun.paginate(*aliyun.RAM, "ListUsers", key="User", container="Users",
-                              creds=CREDS, transport=fake)
+        out = aliyun.paginate(
+            *aliyun.RAM, "ListUsers", key="User", container="Users", creds=CREDS, transport=fake
+        )
         self.assertEqual([x["n"] for x in out], [1, 2])
 
     def test_missing_container_is_an_error_not_an_empty_list(self):
         fake = _AliyunFake((200, {"Something": {}}))
         with self.assertRaises(aliyun.AliyunError):
-            aliyun.paginate(*aliyun.RAM, "ListUsers", key="User", container="Users",
-                            creds=CREDS, transport=fake)
+            aliyun.paginate(
+                *aliyun.RAM, "ListUsers", key="User", container="Users", creds=CREDS, transport=fake
+            )
 
     def test_repeated_marker_raises_instead_of_returning_partial(self):
         # IsTruncated 为真但 Marker 不前进：只拿到了一部分，必须报错而不是静默返回半份
@@ -109,8 +114,9 @@ class AliyunPaginateTests(unittest.TestCase):
             (200, {"Users": {"User": [2]}, "IsTruncated": True, "Marker": "m"}),
         )
         with self.assertRaises(aliyun.AliyunError):
-            aliyun.paginate(*aliyun.RAM, "ListUsers", key="User", container="Users",
-                            creds=CREDS, transport=fake)
+            aliyun.paginate(
+                *aliyun.RAM, "ListUsers", key="User", container="Users", creds=CREDS, transport=fake
+            )
 
     def test_truncated_with_empty_marker_raises(self):
         fake = _AliyunFake(
@@ -118,23 +124,38 @@ class AliyunPaginateTests(unittest.TestCase):
             (200, {"Users": {"User": [2]}, "IsTruncated": True, "Marker": ""}),
         )
         with self.assertRaises(aliyun.AliyunError):
-            aliyun.paginate(*aliyun.RAM, "ListUsers", key="User", container="Users",
-                            creds=CREDS, transport=fake)
+            aliyun.paginate(
+                *aliyun.RAM, "ListUsers", key="User", container="Users", creds=CREDS, transport=fake
+            )
 
 
 class VolcanoSignTests(unittest.TestCase):
     def test_signature_is_deterministic(self):
-        kw = dict(params={"Action": "ListUsers", "Version": "2018-01-01"}, secret="s",
-                  region="cn-beijing", service="iam", xdate="20260914T000000Z")
+        kw = dict(
+            params={"Action": "ListUsers", "Version": "2018-01-01"},
+            secret="s",
+            region="cn-beijing",
+            service="iam",
+            xdate="20260914T000000Z",
+        )
         self.assertEqual(volcano.sign(**kw), volcano.sign(**kw))
         self.assertEqual(len(volcano.sign(**kw)), 64)
 
     def test_any_input_change_changes_the_signature(self):
-        base = dict(params={"Action": "ListUsers"}, secret="s", region="cn-beijing",
-                    service="iam", xdate="20260914T000000Z")
+        base = dict(
+            params={"Action": "ListUsers"},
+            secret="s",
+            region="cn-beijing",
+            service="iam",
+            xdate="20260914T000000Z",
+        )
         sig = volcano.sign(**base)
-        for field, value in (("secret", "t"), ("region", "cn-shanghai"),
-                             ("service", "tos"), ("xdate", "20260915T000000Z")):
+        for field, value in (
+            ("secret", "t"),
+            ("region", "cn-shanghai"),
+            ("service", "tos"),
+            ("xdate", "20260915T000000Z"),
+        ):
             changed = dict(base, **{field: value})
             self.assertNotEqual(volcano.sign(**changed), sig, field)
 
@@ -158,8 +179,10 @@ VCREDS = volcano.Credentials("AKLTtestkey", "volc-secret-value")
 class VolcanoCallTests(unittest.TestCase):
     def test_returns_result(self):
         fake = _VolcanoFake((200, {"Result": {"UserMetadata": []}}))
-        self.assertEqual(volcano.call(*volcano.IAM, "ListUsers", creds=VCREDS, transport=fake),
-                         {"UserMetadata": []})
+        self.assertEqual(
+            volcano.call(*volcano.IAM, "ListUsers", creds=VCREDS, transport=fake),
+            {"UserMetadata": []},
+        )
 
     def test_authorization_header_uses_request_scope(self):
         """火山的签名域结尾是 request，不是 AWS 的 aws4_request。"""
@@ -186,8 +209,9 @@ class VolcanoPaginateTests(unittest.TestCase):
         猜错键名把 6 个用户组全报成 0 人。"""
         fake = _VolcanoFake((200, {"Result": {"Users": [{"UserName": "a"}]}}))
         with self.assertRaises(volcano.VolcanoError) as ctx:
-            volcano.paginate(*volcano.IAM, "ListUsersForGroup", key="UserMetadata",
-                             creds=VCREDS, transport=fake)
+            volcano.paginate(
+                *volcano.IAM, "ListUsersForGroup", key="UserMetadata", creds=VCREDS, transport=fake
+            )
         self.assertIn("Users", str(ctx.exception))
 
     def test_stops_on_short_page(self):
@@ -195,8 +219,9 @@ class VolcanoPaginateTests(unittest.TestCase):
             (200, {"Result": {"UserMetadata": [1, 2]}}),
             (200, {"Result": {"UserMetadata": [3]}}),
         )
-        out = volcano.paginate(*volcano.IAM, "ListUsers", key="UserMetadata",
-                               creds=VCREDS, transport=fake, limit=2)
+        out = volcano.paginate(
+            *volcano.IAM, "ListUsers", key="UserMetadata", creds=VCREDS, transport=fake, limit=2
+        )
         self.assertEqual(out, [1, 2, 3])
 
 

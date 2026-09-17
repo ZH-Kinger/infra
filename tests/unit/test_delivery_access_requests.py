@@ -7,19 +7,33 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from delivery import catalog as catalog_mod
+from delivery import notify as notify_mod
 from delivery import people as people_mod
 from delivery import tickets as t
 from delivery.approval import Applicant, ApprovalConfig, ApprovalError, FeishuApproval
 from delivery.clouds import aliyun
 from delivery.flows import FlowError, Flows
-from delivery.provision import AliyunExecutor, ProvisionError, TempCredential, session_name
+from delivery.provision import (
+    AliyunExecutor,
+    LongTermCredential,
+    ProvisionError,
+    TempCredential,
+    session_name,
+)
 
 ACC = "1000000000000001"
+#: 凭证模板的桶白名单。地域写裸名（不带 oss- 前缀），模板校验会拒绝带前缀的写法
+BUCKET = "wuji-train-data"
+REGION = "cn-hangzhou"
+#: 凭证申请的标准 payload：桶必须在模板白名单里，时长决定走 STS 还是长期
+CRED = {"bucket": BUCKET, "hours": 2}
 TEMPLATES = {
     "schema": catalog_mod.SCHEMA,
     "templates": [
@@ -40,7 +54,8 @@ TEMPLATES = {
             "title": "开发临时凭证",
             "role_arn": f"acs:ram::{ACC}:role/dev-readonly",
             "max_hours": 4,
-            "valid_days": 7,
+            "caps": ["list", "download"],
+            "buckets": [{"name": BUCKET, "region": REGION}],
         },
         {
             "id": "new-user",
@@ -56,9 +71,38 @@ TEMPLATES = {
 CONFIG = ApprovalConfig(
     approval_code="APPROVAL-1",
     widgets={"ticket_id": "w1", "kind": "w2", "summary": "w3", "reason": "w4"},
+    # 凭证是作为审批评论下发的，没有这个身份就发不出去
+    comment_open_id="ou_panel_bot",
 )
+#: 写进 identity/approval.json 的内容，和 CONFIG 保持一致
+APPROVAL_JSON = {
+    "approval_code": CONFIG.approval_code,
+    "widgets": dict(CONFIG.widgets),
+    "comment_open_id": CONFIG.comment_open_id,
+}
 LI = Applicant(union_id="on_li", name="李四", open_id="ou_li")
 NEW = Applicant(union_id="on_new", name="新人", open_id="ou_new")
+
+#: 取件地址的前缀。凭证的唯一出口是 `<VIEW_BASE>/c/<单号>#<密钥>`，`DELIVERY_BASE_URL`
+#: 没配（或不是 https）时 flows 在**提交那一刻**就拒 —— 所以跑完整发凭证流程的模块都得配上。
+VIEW_BASE = "https://panel.example.com"
+#: 已开始的 patch 栈。按模块 start/stop 成对出栈，跑完即还原，不污染别的模块
+_BASE_URL_PATCHES = []
+
+
+def setUpModule():
+    """给整个模块配上取件地址。
+
+    模块级而不是全局 autouse：「没配 DELIVERY_BASE_URL 就该拒发」本身是要锁的性质
+    （见 ViewBaseUrlGateTests），全局设死就再也测不到那条路了。
+    """
+    patch = mock.patch.dict(os.environ, {notify_mod.ENV_BASE_URL: VIEW_BASE})
+    patch.start()
+    _BASE_URL_PATCHES.append(patch)
+
+
+def tearDownModule():
+    _BASE_URL_PATCHES.pop().stop()
 
 
 class FakeFeishu:
@@ -67,9 +111,23 @@ class FakeFeishu:
     def __init__(self):
         self.instances = {}
         self.calls = []
+        #: instance_code -> [评论正文]。凭证的唯一出口
+        self.comments = {}
+        self.comment_fail = None
+
+    def texts(self, code=None):
+        if code is not None:
+            return list(self.comments.get(code, ()))
+        return [text for texts in self.comments.values() for text in texts]
 
     def __call__(self, method, url, token, body):
         self.calls.append((method, url, body))
+        if method == "POST" and "/comments" in url:
+            if self.comment_fail:
+                return {"code": 1, "msg": self.comment_fail}
+            code = url.split("/instances/", 1)[1].split("/", 1)[0]
+            self.comments.setdefault(code, []).append(json.loads(body["content"])["text"])
+            return {"code": 0, "data": {"comment_id": f"c{len(self.comments[code])}"}}
         if method == "POST" and url.endswith("/approval/v4/instances"):
             code = f"INST-{len(self.instances) + 1}"
             ids = {k: body[k] for k in ("open_id", "user_id") if k in body}
@@ -99,6 +157,13 @@ class FakeExecutor:
     def __init__(self):
         self.actions = []
         self.fail = None
+        #: assume_role 收到的会话策略（None = 没收窄）
+        self.session_policies = []
+        #: issue_long_term 收到的策略文档，按子账号名
+        self.issued = {}
+        self.issue_fail = None
+        self.revoke_fail = None
+        self.revoke_left = []
 
     def _maybe_fail(self):
         if self.fail:
@@ -125,9 +190,44 @@ class FakeExecutor:
         self.actions.append(("password", user))
         return "Pw-Secret-123!"
 
-    def assume_role(self, role, name, hours):
+    def assume_role(self, role, name, hours, *, policy=None):
         self.actions.append(("sts", role, name, hours))
+        self.session_policies.append(policy)
         return TempCredential("STS.AK1234", "sts-secret", "sts-token", "2026-09-15T12:00:00Z")
+
+    def issue_long_term(self, user, display_name, policy_doc):
+        if self.issue_fail:
+            raise ProvisionError(self.issue_fail)
+        self.actions.append(("issue", user, display_name))
+        self.issued[user] = policy_doc
+        return LongTermCredential(user, f"temp-ak-auto-{user}", "LTAI-AK-9876", "lt-secret")
+
+    def revoke_long_term(self, user):
+        self.actions.append(("revoke", user))
+        if self.revoke_fail:
+            raise ProvisionError(self.revoke_fail)
+        self.issued.pop(user, None)
+        return list(self.revoke_left)
+
+
+def view_lines(feishu, ticket) -> list:
+    """审批评论里所有像「地址」的行。凭证的唯一出口就是这些行中的一条。
+
+    故意按「像地址」而不是按行号取：行号一变测试就跟着改，而「评论里到底有几条地址」
+    正是伪造使用方名称时要盯住的东西 —— 多出来一条就是把人骗去别处。
+    """
+    body = feishu.texts(ticket["approval"]["instance_code"])[-1]
+    # 只认「整行就是一个地址」的行：伪造的内容被压平后只能嵌在别的行里（比如「使用方」
+    # 那一行），嵌着的地址不会被使用方当成可点的凭证地址
+    return [ln.strip() for ln in body.splitlines() if ln.strip().startswith(("/c/", "http"))]
+
+
+def view_key(feishu, ticket) -> str:
+    """从查看地址里取出密钥。密钥在 `#` 之后 —— 服务端只存密文，自己解不开。"""
+    links = view_lines(feishu, ticket)
+    if len(links) != 1 or "#" not in links[0]:
+        raise AssertionError(f"审批评论里应该正好有一条带密钥的查看地址：{links}")
+    return links[0].split("#", 1)[1]
 
 
 def _roster():
@@ -162,6 +262,8 @@ class Harness:
         self.templates = json.loads(json.dumps(templates))
         self.feishu = FakeFeishu()
         self.executor = FakeExecutor()
+        #: 凭证发放身份。不设时沿用开通身份（和 server.Backend 注入自定义 executor 时一致）
+        self.issuer = None
         self.links = []
         self.now = [1_800_000_000.0]
         self.store = t.TicketStore(str(self.dir / "tickets.json"), clock=lambda: self.now[0])
@@ -172,6 +274,7 @@ class Harness:
             approval=lambda: self.approval,
             roster=_roster,
             executor=lambda platform, account: self.executor,
+            issuer=lambda platform, account: self.issuer or self.executor,
             add_manual_link=lambda email, account, ticket: self.links.append(
                 (email, account, ticket)
             ),
@@ -210,7 +313,10 @@ class CatalogTests(unittest.TestCase):
         self.bad(groups=["bad group"])
         self.bad(typo_field=1)
         self.bad(index=1, role_arn="acs:ram::999999999:role/other-account")
-        self.bad(index=1, max_hours=24)
+        self.bad(index=1, max_hours=catalog_mod.MAX_CREDENTIAL_HOURS + 1)
+        # 「领取期」这个概念没有了：留在模板里的 valid_days 必须当成写错、拒绝加载，
+        # 而不是静默忽略——静默忽略会让人以为凭证还有一个领取窗口
+        self.bad(index=1, valid_days=7)
         self.bad(index=2, username_pattern="[a-z]+")
         data = json.loads(json.dumps(TEMPLATES))
         data["templates"].append(dict(data["templates"][0]))
@@ -302,7 +408,7 @@ class ApprovalTests(unittest.TestCase):
 
     def test_self_approved_credential_is_closed_not_claimable(self):
         h = Harness()
-        ticket = h.submit(template="dev-sts", payload={"hours": 2})
+        ticket = h.submit(template="dev-sts", payload=dict(CRED))
         inst = h.feishu.instances[ticket["approval"]["instance_code"]]
         inst.update(status="APPROVED", task_list=[{"open_id": "ou_li", "status": "APPROVED"}])
         closed = h.flows.sync(ticket["id"], force=True)
@@ -334,7 +440,12 @@ class ApprovalTests(unittest.TestCase):
         inst = h.feishu.instances[ticket["approval"]["instance_code"]]
         inst.update(status="APPROVED", task_list=[{"open_id": "ou_li", "status": "APPROVED"}])
         done = h.flows.sync(ticket["id"], force=True)
-        self.assertEqual(done["status"], t.FAILED)
+        # 自审批的单子直接关闭，不落「开通失败」：失败是能重试的，这张单子重试多少次都不该开通
+        self.assertEqual(done["status"], t.CLOSED)
+        self.assertEqual(done["events"][-1]["event"], "approval_invalid")
+        self.assertEqual(h.executor.actions, [])
+        with self.assertRaises(t.TicketError):
+            h.flows.execute(ticket["id"], actor="admin")
         self.assertEqual(h.executor.actions, [])
 
     def test_config_allow_self_approval_must_be_bool(self):
@@ -471,7 +582,7 @@ class FlowTests(unittest.TestCase):
         with self.assertRaises(FlowError):
             self.h.submit(payload={"cloud_user": "lisi", "days": 365})
         with self.assertRaises(FlowError):
-            self.h.submit(template="dev-sts", payload={"hours": 12})
+            self.h.submit(template="dev-sts", payload={**CRED, "hours": 12})
         with self.assertRaises(FlowError):
             self.h.submit(reason="短")
         with self.assertRaises(FlowError):
@@ -512,32 +623,44 @@ class FlowTests(unittest.TestCase):
             self.h.flows.execute(ticket["id"], actor="on_admin")
         self.assertEqual(self.h.executor.actions, [])
 
-    def test_credential_claim_is_not_stored(self):
-        ticket = self.h.submit(template="dev-sts", payload={"hours": 2})
+    def test_credential_is_issued_on_approval_and_delivered_as_a_link(self):
+        """审批通过即签发，但**审批评论里一个字的凭证都没有**：只有带密钥的查看地址。
+
+        评论会留在飞书的审批记录里，搜索、导出、离职交接都翻得到。凭证正文写进去就
+        撤不回；换成查看地址之后，单子里只有密文，密钥只在那条链接里。
+        """
+        ticket = self.h.submit(template="dev-sts", payload=dict(CRED))
         self.h.approve(ticket)
-        ready = self.h.flows.sync(ticket["id"], force=True)
-        self.assertEqual(ready["status"], t.CLAIMABLE)
-        _, cred = self.h.flows.claim_credential(ticket["id"], union_id="on_li")
-        self.assertEqual(cred.secret, "sts-secret")
-        stored = (self.h.dir / "tickets.json").read_text(encoding="utf-8")
-        self.assertNotIn("sts-secret", stored)
-        self.assertNotIn("sts-token", stored)
+        done = self.h.flows.sync(ticket["id"], force=True)
+        self.assertEqual(done["status"], t.DONE)
         self.assertEqual(
             self.h.executor.actions[-1][0:2], ("sts", f"acs:ram::{ACC}:role/dev-readonly")
         )
-        with self.assertRaises(FlowError):  # 不能超过申请的时长
-            self.h.flows.claim_credential(ticket["id"], union_id="on_li", hours=3)
-        with self.assertRaises(FlowError):  # 别人不能领
-            self.h.flows.claim_credential(ticket["id"], union_id="on_new")
+        body = self.h.feishu.texts(ticket["approval"]["instance_code"])[-1]
+        for secret in ("sts-secret", "sts-token", "STS.AK1234"):
+            self.assertNotIn(secret, body, "审批评论里不该出现凭证本身")
+        key = view_key(self.h.feishu, ticket)
+        self.assertIn(f"/c/{ticket['id']}#{key}", view_lines(self.h.feishu, ticket)[0])
+        stored = (self.h.dir / "tickets.json").read_text(encoding="utf-8")
+        self.assertNotIn("sts-secret", stored)
+        self.assertNotIn("sts-token", stored)
+        self.assertNotIn(key, stored, "密钥落盘 = 能读到 tickets.json 的人就能解开凭证")
+        # 凭证只能用链接里的那把密钥解开，服务端自己没有第二条路
+        _, cred = self.h.flows.view_credential(ticket["id"], key)
+        self.assertEqual(cred["access_key_secret"], "sts-secret")
+        self.assertEqual(cred["security_token"], "sts-token")
 
-    def test_credential_expires(self):
-        ticket = self.h.submit(template="dev-sts", payload={"hours": 1})
+    def test_credential_expiry_is_recorded_and_swept(self):
+        ticket = self.h.submit(template="dev-sts", payload={**CRED, "hours": 1})
         self.h.approve(ticket)
-        self.h.flows.sync(ticket["id"], force=True)
-        self.h.now[0] += 8 * 86400
-        with self.assertRaises(FlowError):
-            self.h.flows.claim_credential(ticket["id"], union_id="on_li")
-        self.assertEqual(self.h.store.get(ticket["id"])["status"], t.EXPIRED)
+        done = self.h.flows.sync(ticket["id"], force=True)
+        self.assertEqual(float(done["expires_at_ts"]), self.h.now[0] + 3600)
+        self.assertEqual(self.h.flows.revoke_expired(), [])  # 还没到期
+        self.h.now[0] += 2 * 3600
+        self.assertEqual(len(self.h.flows.revoke_expired()), 1)
+        # STS 凭证到点自灭，没有子账号要删
+        self.assertEqual(self.h.store.get(ticket["id"])["status"], t.REVOKED)
+        self.assertNotIn("revoke", [a[0] for a in self.h.executor.actions])
 
     def test_account_creation_and_one_time_password(self):
         ticket = self.h.submit(applicant=NEW, template="new-user", payload={"username": "xinren"})
@@ -686,9 +809,7 @@ class RequestsHttpTests(unittest.TestCase):
         )
         (d / "admins.json").write_text(json.dumps({"union_ids": ["on_admin"]}))
         (d / "templates.json").write_text(json.dumps(TEMPLATES), encoding="utf-8")
-        (d / "approval.json").write_text(
-            json.dumps({"approval_code": CONFIG.approval_code, "widgets": dict(CONFIG.widgets)})
-        )
+        (d / "approval.json").write_text(json.dumps(APPROVAL_JSON), encoding="utf-8")
         backend = Backend(
             people_path=str(d / "people.json"),
             bindings_path=str(d / "bindings.json"),
@@ -715,8 +836,34 @@ class RequestsHttpTests(unittest.TestCase):
         )
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        # 取件限流表是模块级全局，按来源 IP 记。同一个进程里所有用例都从 127.0.0.1 打，
+        # 不清的话「测限流」那条会把后面的用例全 429 掉
+        self._reset_pickup_limit()
+
+    def _reset_pickup_limit(self):
+        from delivery import server as server_mod
+
+        with server_mod._pickup_lock:
+            # 两张表都要清。`_pickup_tries` 是粗粒度的整体上限（每来源 5 分钟 120 次，
+            # **成功也算**），只清 `_pickup_hits` 的话，前面几条限流用例打掉的几十次会
+            # 攒在 127.0.0.1 这一桶里，把后面的用例整片 429 掉 —— 还是按方法名字母序
+            # 发作，看起来像随机失败
+            server_mod._pickup_hits.clear()
+            server_mod._pickup_tries.clear()
+
+    def one_proxy_hop(self):
+        """按「面板前面只有一层会追加 XFF 的代理」跑。
+
+        默认是 2（线上 nginx → oauth2-proxy）。用例里的 XFF 是手写的最终值、没有真代理
+        往右追加，所以要把跳数调成和用例描述的拓扑一致，否则测的是「跳数对不上→退回 peer」
+        那条兜底路，跟限流按谁分桶无关。
+        """
+        from delivery import server as server_mod
+
+        return mock.patch.dict(os.environ, {server_mod.ENV_PROXY_HOPS: "1"})
 
     def tearDown(self):
+        self._reset_pickup_limit()
         self.server.shutdown()
         self.server.server_close()
 
@@ -740,11 +887,39 @@ class RequestsHttpTests(unittest.TestCase):
         conn.close()
         return out
 
+    def anon(self, method, path, body=None, *, headers=None):
+        """不带 cookie、不带 Bearer、不带 CSRF 头 —— 外部合作方就是这么访问的。"""
+        import http.client
+
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        raw = json.dumps(body).encode() if body is not None else None
+        head = {"Content-Type": "application/json", **(headers or {})}
+        conn.request(method, path, body=raw, headers=head)
+        resp = conn.getresponse()
+        text = resp.read()
+        try:
+            out = (resp.status, json.loads(text or b"{}"))
+        except ValueError:
+            out = (resp.status, {"_text": text.decode(errors="replace")})
+        conn.close()
+        return out
+
     NEW = {
         "template_id": "dev-sts",
-        "payload": {"hours": 2},
+        "payload": dict(CRED),
         "reason": "本地调试脚本需要只读访问",
     }
+
+    def approved_credential(self):
+        """走完提交 + 审批通过，返回 (申请单号, 查看地址里的密钥)。可以连着开好几张。"""
+        status, data = self.call("POST", "/api/requests", self.NEW, bearer=True)
+        self.assertEqual(status, 201, data)
+        rid = data["request"]["id"]
+        ticket = self.h.store.get(rid)
+        self.h.feishu.instances[ticket["approval"]["instance_code"]]["status"] = "APPROVED"
+        status, data = self.call("GET", f"/api/requests/{rid}", bearer=True)
+        self.assertEqual(data["request"]["status"], "done", data)
+        return rid, view_key(self.h.feishu, self.h.store.get(rid))
 
     def test_employee_flow_via_bearer_token(self):
         status, data = self.call("POST", "/api/requests", self.NEW, bearer=True)
@@ -753,12 +928,193 @@ class RequestsHttpTests(unittest.TestCase):
         self.assertNotIn("role_arn", json.dumps(data))
         self.h.feishu.instances["INST-1"]["status"] = "APPROVED"
         status, data = self.call("GET", f"/api/requests/{rid}", bearer=True)
-        self.assertEqual(data["request"]["status"], "claimable")
-        status, data = self.call("POST", f"/api/requests/{rid}/credential", {}, bearer=True)
-        self.assertEqual(status, 200, data)
-        self.assertEqual(data["credential"]["access_key_secret"], "sts-secret")
+        # 审批通过即签发，面板上没有领取按钮：凭证不经过面板这条路
+        self.assertEqual(data["request"]["status"], "done")
+        self.assertNotIn("credential", data["request"]["actions"])
+        # 领取接口已经没有了：不能再从面板上把 secret 取出来
+        self.assertEqual(
+            self.call("POST", f"/api/requests/{rid}/credential", {}, bearer=True)[0], 404
+        )
         stored = (self.h.dir / "tickets.json").read_text(encoding="utf-8")
         self.assertNotIn("sts-secret", stored)
+        self.assertNotIn("sts-secret", json.dumps(data, ensure_ascii=False))
+        # 评论里是查看地址，不是凭证；面板接口也不回密文，密文只在服务端的 tickets.json 里
+        comment = self.h.feishu.texts("INST-1")[-1]
+        self.assertNotIn("sts-secret", comment)
+        box = json.loads(stored)["tickets"][0]["sealed"]
+        self.assertNotIn(box["ciphertext"], json.dumps(data, ensure_ascii=False))
+
+    def test_view_link_works_without_logging_in(self):
+        """查看凭证这条路**不要登录、不要 CSRF 头**：外部合作方没有面板账号。"""
+        rid, key = self.approved_credential()
+        status, data = self.anon("POST", "/api/pickup", {"id": rid, "key": key})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["credential"]["access_key_secret"], "sts-secret")
+        self.assertEqual(data["credential"]["security_token"], "sts-token")
+        # 连接信息要跟着凭证一起给：桶在深圳却配了杭州 endpoint 会被 403，
+        # 使用方只会以为凭证是坏的
+        for field in ("region", "endpoint", "bucket_url", "scope"):
+            self.assertTrue(data["credential"][field], field)
+        # 页面本身也在登录之外，否则拿到链接也打不开
+        self.assertEqual(self.anon("GET", f"/c/{rid}")[0], 200)
+        self.assertEqual(self.anon("GET", "/pickup.js")[0], 200)
+
+    def test_view_link_refuses_wrong_key_and_unknown_id(self):
+        """错密钥 / 别人的单子号 / 畸形 id，对外都是同一句话，不给试密钥的人任何线索。"""
+        rid, key = self.approved_credential()
+        wrong = ("A" * len(key), key[:-1] + ("A" if key[-1] != "A" else "B"), "", "短")
+        for bad in wrong:
+            status, data = self.anon("POST", "/api/pickup", {"id": rid, "key": bad})
+            self.assertEqual(status, 403, (bad, data))
+            self.assertEqual(data["error"], "这个链接打不开这份凭证")
+        for bad_id in ("REQ-20260101-DEADBEEF", "REQ-bad", "../../etc/passwd", ""):
+            status, data = self.anon("POST", "/api/pickup", {"id": bad_id, "key": key})
+            self.assertEqual(status, 404, (bad_id, data))
+            self.assertNotIn("sts-secret", json.dumps(data, ensure_ascii=False))
+
+    def test_view_is_rate_limited_per_source_ip(self):
+        """没有登录这道门，剩下唯一拦暴力试密钥的就是限流。"""
+        from delivery import server as server_mod
+
+        rid, key = self.approved_credential()
+        codes = [
+            self.anon("POST", "/api/pickup", {"id": rid, "key": "A" * 43})[0]
+            for _ in range(server_mod._PICKUP_MAX + 1)
+        ]
+        self.assertEqual(codes[-1], 429, codes)
+        self.assertNotIn(429, codes[: server_mod._PICKUP_MAX])
+        # 限流之后连正确的密钥也进不来：不能靠「猜对了就放行」绕过
+        self.assertEqual(self.anon("POST", "/api/pickup", {"id": rid, "key": key})[0], 429)
+
+    def test_rate_limit_counts_failures_only(self):
+        """「同一条链接能反复打开」是这套设计的全部意义，正常使用不该把自己的配额刷光。
+
+        换机器、重装环境、同事接手 —— 一个使用方一天点十几次很正常。数成功次数的话，
+        他会在某天突然打不开自己的凭证，而我们只会看到一条 429。
+        """
+        from delivery import server as server_mod
+
+        rid, key = self.approved_credential()
+        for i in range(25):
+            self.assertEqual(
+                self.anon("POST", "/api/pickup", {"id": rid, "key": key})[0], 200, f"第 {i + 1} 次"
+            )
+        # 25 次成功之后，失败配额仍是满的
+        fails = [
+            self.anon("POST", "/api/pickup", {"id": rid, "key": "A" * 43})[0]
+            for _ in range(server_mod._PICKUP_MAX)
+        ]
+        self.assertEqual(set(fails), {403}, fails)
+        self.assertEqual(self.anon("POST", "/api/pickup", {"id": rid, "key": "A" * 43})[0], 429)
+
+    def test_rate_limit_is_per_ticket_not_per_source(self):
+        """按 (来源 IP, 单号) 分桶：猜 A 的密钥猜到被封，不该连累同一个人打开 B 的凭证。
+
+        线上所有请求的直连来源都是本机的反向代理 —— 只按 IP 计数等于全员共用一份配额，
+        一个人被封 = 所有人被封。
+        """
+        from delivery import server as server_mod
+
+        first, _ = self.approved_credential()
+        second, key = self.approved_credential()
+        self.assertNotEqual(first, second)
+        for _ in range(server_mod._PICKUP_MAX):
+            self.anon("POST", "/api/pickup", {"id": first, "key": "A" * 43})
+        self.assertEqual(self.anon("POST", "/api/pickup", {"id": first, "key": "A" * 43})[0], 429)
+        # 另一张单子的配额没被动过
+        self.assertEqual(self.anon("POST", "/api/pickup", {"id": second, "key": key})[0], 200)
+
+    def test_rate_limit_keys_on_the_forwarded_client_not_the_proxy(self):
+        """经反向代理时按代理写进 XFF 的那个地址计数，而不是代理自己那个回环地址。
+
+        取 peer 的话，线上每一个请求看起来都来自 127.0.0.1，一个人试密钥试到被封，
+        所有使用方一起打不开凭证。
+
+        跳数**必须显式钉住**：`_client_ip` 按 `DELIVERY_PROXY_HOPS` 从右边数（默认 2 =
+        nginx + oauth2-proxy）。这条用例模拟的是「一层代理」，不设的话整条 XFF 都够不着
+        跳数、一律退回 peer，于是这里测的东西就全落空了。
+        """
+        from delivery import server as server_mod
+
+        rid, key = self.approved_credential()
+        with self.one_proxy_hop():
+            attacker = {"X-Forwarded-For": "8.8.8.8"}
+            for _ in range(server_mod._PICKUP_MAX):
+                self.anon("POST", "/api/pickup", {"id": rid, "key": "A" * 43}, headers=attacker)
+            self.assertEqual(
+                self.anon("POST", "/api/pickup", {"id": rid, "key": key}, headers=attacker)[0], 429
+            )
+            # 换一个真实来源不受影响；直连（没有 XFF）也不受影响
+            other = {"X-Forwarded-For": "1.1.1.1"}
+            self.assertEqual(
+                self.anon("POST", "/api/pickup", {"id": rid, "key": key}, headers=other)[0], 200
+            )
+            self.assertEqual(self.anon("POST", "/api/pickup", {"id": rid, "key": key})[0], 200)
+
+    def test_client_cannot_shake_off_the_limit_by_prepending_fake_hops(self):
+        """客户端只能往 XFF **左边**塞 —— 塞什么都换不掉代理写进来的那一格。
+
+        代理是从右边数第 `DELIVERY_PROXY_HOPS` 格；客户端塞进去的假跳只会把自己往左推。
+        """
+        from delivery import server as server_mod
+
+        rid, key = self.approved_credential()
+        with self.one_proxy_hop():
+            for i in range(server_mod._PICKUP_MAX):
+                # 每次伪造一个不同的「来源」，指望换一份新配额
+                forged = {"X-Forwarded-For": f"9.9.9.{i}, 8.8.8.8"}
+                self.anon("POST", "/api/pickup", {"id": rid, "key": "A" * 43}, headers=forged)
+            blocked = {"X-Forwarded-For": "9.9.9.200, 8.8.8.8"}
+            self.assertEqual(
+                self.anon("POST", "/api/pickup", {"id": rid, "key": key}, headers=blocked)[0], 429
+            )
+
+    def test_every_view_is_recorded_in_the_ticket(self):
+        """「谁什么时候看过」记不下来的话，换成查看地址就白换了。"""
+        rid, key = self.approved_credential()
+        for _ in range(2):
+            self.assertEqual(self.anon("POST", "/api/pickup", {"id": rid, "key": key})[0], 200)
+        events = [e["event"] for e in self.h.store.get(rid)["events"]]
+        self.assertEqual(events.count("credential_viewed"), 2, events)
+        notes = [
+            e["note"] for e in self.h.store.get(rid)["events"] if e["event"] == "credential_viewed"
+        ]
+        self.assertTrue(all("127.0.0.1" in n for n in notes), notes)
+
+    def test_admin_can_revoke_a_leaked_link_and_employees_cannot(self):
+        """链接外泄时管理员要能立刻掐掉。没有这个入口的话，唯一的办法是手改申请单。"""
+        rid, key = self.approved_credential()
+        self.assertEqual(self.anon("POST", "/api/pickup", {"id": rid, "key": key})[0], 200)
+        # 申请人自己不行：作废的是「已经交出去的东西」，得由管理员决定
+        self.assertEqual(self.call("POST", f"/api/admin/requests/{rid}/revoke", {})[0], 403)
+        status, data = self.call("POST", f"/api/admin/requests/{rid}/revoke", {}, sid="admin")
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["request"]["status"], "revoked")
+        # 链接当场失效，而且回的是「打不开任何凭证」—— 不透露这个单号是不是真的
+        status, data = self.anon("POST", "/api/pickup", {"id": rid, "key": key})
+        self.assertEqual(status, 404, data)
+        self.assertNotIn("sts-secret", json.dumps(data, ensure_ascii=False))
+        self.assertNotIn("sts-secret", (self.h.dir / "tickets.json").read_text(encoding="utf-8"))
+
+    def test_revoke_button_only_shows_for_admins_on_issued_credentials(self):
+        rid, _ = self.approved_credential()
+        mine = self.call("GET", f"/api/requests/{rid}")[1]["request"]
+        self.assertFalse(mine["actions"]["revoke"])
+        admin = self.call("GET", "/api/admin/requests", sid="admin")[1]
+        got = {r["id"]: r["actions"]["revoke"] for r in admin["requests"]}
+        self.assertIs(got[rid], True)
+        # 权限单没有凭证可作废
+        perm_req = {
+            "template_id": "oss-read",
+            "payload": {"cloud_user": "lisi", "days": 30},
+            "reason": "项目需要读取训练数据",
+        }
+        status, perm = self.call("POST", "/api/requests", perm_req)
+        self.assertEqual(status, 201, perm)
+        perm_id = perm["request"]["id"]
+        admin = self.call("GET", "/api/admin/requests", sid="admin")[1]
+        got = {r["id"]: r["actions"]["revoke"] for r in admin["requests"]}
+        self.assertIs(got[perm_id], False)
 
     def test_csrf_required_for_cookie_posts(self):
         for headers in (
@@ -803,6 +1159,157 @@ class RequestsHttpTests(unittest.TestCase):
         self.assertEqual(self.call("GET", "/api/requests", sid="nouid")[0], 403)
         self.assertEqual(self.call("POST", "/api/requests", self.NEW, sid="nouid")[0], 403)
         self.assertFalse((self.h.dir / "tickets.json").exists())
+
+
+class ClientIpTests(unittest.TestCase):
+    """`server._client_ip`：反向代理后面谁是真实来源。
+
+    这个返回值有两个去处：取件限流的桶键（没有登录那道门之后，唯一拦暴力试密钥的东西），
+    和申请单里「谁什么时候看过凭证」那条记录。判错的两个方向都很糟 —— 形同虚设（每个人
+    换一串假 IP 就是一份新配额），或者全员共用一份配额（一个人被封等于所有人被封）。
+
+    模型是**按固定跳数从右边数**（`DELIVERY_PROXY_HOPS`，默认 2 = nginx → oauth2-proxy →
+    面板），不是「从右往左找第一个公网地址」。两条约束互相独立，各自都是踩出来的：
+
+      · **不判它是不是公网** —— 内网员工的真实地址本来就是 10.x，按「是不是公网」筛会把
+        他跳过去，于是他自己在左边塞的那个 `8.8.8.8` 成了答案
+      · **但必须解析得出是个地址** —— 跳数一旦配错（少一层代理就要手动改成 1），客户端
+        塞的任意文本就会原样成为限流桶键，每换一串就是一份新配额；还会把伪造内容写进台账
+
+    注意：`ipaddress.is_private` 把 RFC 文档网段（198.51.100.x / 203.0.113.x / 2001:db8::）
+    也算私网，所以用例里必须用真正可路由的地址，不能图省事用文档地址。
+    """
+
+    #: 线上那条链最终到面板时的样子：<真实来源>, <nginx 看到的对端> —— 两层代理各追加一格
+    CHAIN = "{src}, 127.0.0.1"
+
+    def setUp(self):
+        from delivery import server as server_mod
+
+        # 跳数从进程环境读。不钉住的话，别的用例设过的值会漏进来
+        patch = mock.patch.dict(os.environ, {})
+        patch.start()
+        os.environ.pop(server_mod.ENV_PROXY_HOPS, None)
+        self.addCleanup(patch.stop)
+
+    def ip(self, peer, forwarded="", hops=0):
+        from delivery.server import _client_ip
+
+        return _client_ip(peer, forwarded, hops)
+
+    def hops(self, value):
+        from delivery import server as server_mod
+
+        return mock.patch.dict(os.environ, {server_mod.ENV_PROXY_HOPS: value})
+
+    def test_direct_public_peer_wins_over_any_header(self):
+        """直连时 peer 就是真实来源，XFF 只是客户端随手写的一行字，不能采信。"""
+        self.assertEqual(self.ip("8.8.8.8"), "8.8.8.8")
+        self.assertEqual(self.ip("8.8.8.8", "1.1.1.1"), "8.8.8.8")
+        self.assertEqual(self.ip("2606:4700::1111", "1.1.1.1"), "2606:4700::1111")
+
+    def test_takes_the_hop_our_own_proxy_wrote(self):
+        """数着位置取到的那一格，是我们自己的代理亲眼看到的对端 —— 客户端写不进去。"""
+        for peer in ("127.0.0.1", "::1", "10.0.0.7", "172.17.0.1"):
+            # 默认两跳：最右是 nginx 的地址，倒数第二格才是使用方
+            self.assertEqual(self.ip(peer, self.CHAIN.format(src="8.8.8.8")), "8.8.8.8", peer)
+            # 只有一层代理的部署（DELIVERY_PROXY_HOPS=1）：最右那格就是使用方
+            with self.hops("1"):
+                self.assertEqual(self.ip(peer, "8.8.8.8"), "8.8.8.8", peer)
+
+    def test_client_cannot_shift_the_answer_by_prepending_hops(self):
+        """客户端只能往**左边**塞。塞多少格都只是把自己往左推，换不掉被数到的那一格。
+
+        取最左边是常见错法：那个值完全由客户端提供，换一串假 IP 就能绕开限流。
+        """
+        for forged in ("", "1.2.3.4", "1.2.3.4, 5.6.7.8", ", ".join(["9.9.9.9"] * 20)):
+            chain = self.CHAIN.format(src=f"{forged}, 1.1.1.1" if forged else "1.1.1.1")
+            self.assertEqual(self.ip("127.0.0.1", chain), "1.1.1.1", forged)
+
+    def test_an_internal_employee_cannot_forge_a_public_source(self):
+        """这条是「从右往左找第一个公网地址」那版的回归钉子。
+
+        公司内网的人发一个 `X-Forwarded-For: 8.8.8.8`，代理往右追加后链子是
+        `8.8.8.8, 10.1.2.3, 127.0.0.1`。按公网筛会把他真实的 10.1.2.3 当成「我们自己的
+        代理跳」跳过去，取到他伪造的那个 —— 限流键随便换，台账记的「谁看的」也随便编。
+        """
+        self.assertEqual(self.ip("127.0.0.1", "8.8.8.8, 10.1.2.3, 127.0.0.1"), "10.1.2.3")
+        self.assertEqual(self.ip("10.0.0.7", "8.8.8.8, 10.1.2.3, 172.17.0.1"), "10.1.2.3")
+        # 内网地址本身是合法答案：它就是那位员工，按他分桶才对
+        self.assertEqual(self.ip("127.0.0.1", self.CHAIN.format(src="192.168.0.5")), "192.168.0.5")
+
+    def test_too_few_hops_falls_back_to_the_peer(self):
+        """跳数对不上就退回直连地址，**不去猜**：猜错的方向是「采信客户端塞的值」。
+
+        台账里会明显看到一片 127.0.0.1，那是「跳数配错了」看得见的样子。
+        """
+        self.assertEqual(self.ip("127.0.0.1", "8.8.8.8"), "127.0.0.1")  # 默认 2 跳，只有 1 格
+        self.assertEqual(self.ip("127.0.0.1", ""), "127.0.0.1")
+        self.assertEqual(self.ip("127.0.0.1", "   ,  , "), "127.0.0.1")
+        self.assertEqual(self.ip("10.0.0.7", "10.1.1.1"), "10.0.0.7")
+        # 直连部署（没有代理会追加 XFF）：整条链都是客户端自己写的，一格都不能采信
+        for value in ("0", "-3"):
+            with self.subTest(value), self.hops(value):
+                self.assertEqual(self.ip("127.0.0.1", "8.8.8.8, 1.1.1.1, 9.9.9.9"), "127.0.0.1")
+        self.assertEqual(self.ip("", ""), "?")
+
+    def test_hop_count_comes_from_the_env_and_bad_values_fall_back_to_two(self):
+        """`DELIVERY_PROXY_HOPS` 是人手填的。填错时必须退回默认 2，不能把整行当成 0 或崩掉 ——
+        退成 0 等于「所有人一个桶」，崩掉等于取件接口 500。"""
+        chain = "8.8.8.8, 1.1.1.1, 10.1.2.3, 127.0.0.1"
+        for value, expect in (
+            ("1", "127.0.0.1"),
+            ("2", "10.1.2.3"),
+            ("3", "1.1.1.1"),
+            (" 2 ", "10.1.2.3"),  # EnvironmentFile 里常见的空格
+        ):
+            with self.subTest(value), self.hops(value):
+                self.assertEqual(self.ip("127.0.0.1", chain), expect)
+        for bad in ("", "abc", "3.5", "2 跳", "1e2", "0x2"):
+            with self.subTest(bad), self.hops(bad):
+                self.assertEqual(self.ip("127.0.0.1", chain), "10.1.2.3", bad)
+
+    def test_answer_is_always_a_parsable_address_or_the_peer(self):
+        """XFF 是外部输入，而这个返回值既进限流的桶、又进申请单的「谁看过」记录。
+
+        不变式：要么是一个 `ipaddress.ip_address()` **解得开**的串，要么就是 peer。任何一段
+        自由文本（超长串、换行、`10.0.0.1 attacker`、带端口）都不能原样成为答案 ——
+        原样通过的话，每换一串就是一份新配额，取件限流整个失效。
+        """
+        import ipaddress
+
+        garbage = (
+            "x" * 500,
+            "8" * 300,
+            "10.0.0.1 attacker",
+            "8.8.8.8\n注入的一行",
+            "<script>",
+            "8.8.8.8:443",
+            "1.1.1.1/24",
+        )
+        for junk in garbage:
+            # 被数到的那一格是垃圾 → 退回 peer，绝不原样返回
+            got = self.ip("127.0.0.1", self.CHAIN.format(src=junk))
+            self.assertEqual(got, "127.0.0.1", junk)
+            # 混在左边（数不到的位置）无所谓：答案还是代理写的那一格
+            got = self.ip("127.0.0.1", self.CHAIN.format(src=f"{junk}, 1.1.1.1"))
+            self.assertEqual(got, "1.1.1.1", junk)
+            ipaddress.ip_address(got)  # 解析得出来，才谈得上「按来源分桶」
+
+    def test_the_answer_is_the_canonical_spelling_not_the_raw_string(self):
+        """同一个地址的两种写法必须归一成同一个桶键，否则换个写法就是一份新配额。"""
+        same = (
+            "[2606:4700::1111]",
+            "2606:4700:0000:0000:0000:0000:0000:1111",
+            "  2606:4700::1111  ",
+        )
+        for raw in same:
+            with self.subTest(raw):
+                self.assertEqual(
+                    self.ip("127.0.0.1", self.CHAIN.format(src=raw)), "2606:4700::1111"
+                )
+        # 带 zone 的链路本地地址：zone 去掉，剩下的部分仍是合法地址
+        self.assertEqual(self.ip("127.0.0.1", self.CHAIN.format(src="fe80::1%eth0")), "fe80::1")
 
 
 class MemberExecutor(FakeExecutor):
@@ -966,15 +1473,15 @@ class AuditRegressionTests(unittest.TestCase):
         with self.assertRaises(FlowError):  # 大写、斜杠之类不安全字符
             h.submit(applicant=NEW, template="new-user", payload={"username": "a/b"})
 
-    def test_reverted_approval_blocks_claims_and_sync(self):
+    def test_reverted_approval_blocks_issuance_and_sync(self):
         h = self.harness()
-        cred = h.submit(template="dev-sts", payload={"hours": 1})
+        cred = h.submit(template="dev-sts", payload={**CRED, "hours": 1})
         h.approve(cred)
-        h.flows.sync(cred["id"], force=True)
+        # 审批通过后又被撤销：同步时就不该发凭证
         h.feishu.instances[cred["approval"]["instance_code"]]["reverted"] = True
-        with self.assertRaises(ApprovalError):
-            h.flows.claim_credential(cred["id"], union_id="on_li")
+        self.assertEqual(h.flows.sync(cred["id"], force=True)["status"], t.WITHDRAWN)
         self.assertFalse([a for a in h.executor.actions if a[0] == "sts"])
+        self.assertEqual(h.feishu.texts(), [])
 
         pending = h.submit()
         h.approve(pending)
@@ -1078,9 +1585,7 @@ class SweepTests(unittest.TestCase):
             json.dumps({"schema": people_mod.SCHEMA, "people": rows}), encoding="utf-8"
         )
         (ident / "templates.json").write_text(json.dumps(TEMPLATES), encoding="utf-8")
-        (ident / "approval.json").write_text(
-            json.dumps({"approval_code": CONFIG.approval_code, "widgets": dict(CONFIG.widgets)})
-        )
+        (ident / "approval.json").write_text(json.dumps(APPROVAL_JSON), encoding="utf-8")
         store = t.TicketStore(str(ident / "tickets.json"))
         h.flows.store = h.store = store
         ticket = h.submit(applicant=NEW, template="new-user", payload={"username": "xinren"})
@@ -1198,12 +1703,13 @@ class ReauditRegressionTests(unittest.TestCase):
         self.assertEqual(h.flows.execute(ticket["id"], actor="admin")["status"], t.DONE)
         self.assertIn(("lisi", "grp-oss-read"), h.executor.members)
 
-    def test_resume_approved_credential_becomes_claimable(self):
+    def test_resume_approved_credential_is_issued(self):
         h = self.harness()
-        ticket = h.submit(template="dev-sts", payload={"hours": 2})
+        ticket = h.submit(template="dev-sts", payload=dict(CRED))
         self.stall_approved(h, ticket)
         h.flows.resume_approved()
-        self.assertEqual(h.store.get(ticket["id"])["status"], t.CLAIMABLE)
+        self.assertEqual(h.store.get(ticket["id"])["status"], t.DONE)
+        self.assertTrue(h.feishu.texts(ticket["approval"]["instance_code"]))
 
     def test_resume_approved_ignores_fresh_tickets(self):
         h = self.harness()
@@ -1235,9 +1741,7 @@ class ReauditRegressionTests(unittest.TestCase):
             json.dumps({"schema": people_mod.SCHEMA, "people": rows}), encoding="utf-8"
         )
         (ident / "templates.json").write_text(json.dumps(TEMPLATES), encoding="utf-8")
-        (ident / "approval.json").write_text(
-            json.dumps({"approval_code": CONFIG.approval_code, "widgets": dict(CONFIG.widgets)})
-        )
+        (ident / "approval.json").write_text(json.dumps(APPROVAL_JSON), encoding="utf-8")
         h.store = t.TicketStore(str(ident / "tickets.json"), clock=lambda: h.now[0])
         h.flows.store = h.store
         h.now[0] = time.time() - 3 * 86400

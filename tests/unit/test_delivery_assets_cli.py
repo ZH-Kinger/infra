@@ -208,19 +208,10 @@ class PanelClientTests(unittest.TestCase):
             def do_POST(self):  # noqa: N802
                 length = int(self.headers.get("Content-Length") or 0)
                 seen.append((self.path, dict(self.headers), self.rfile.read(length)))
-                if self.path.endswith("/credential"):
+                if self.path.endswith("/withdraw"):
                     return self._reply(
                         200,
-                        {
-                            "credential": {
-                                "platform": "aliyun",
-                                "account": ACC,
-                                "access_key_id": "STS.a",
-                                "access_key_secret": "s'ec ret",
-                                "security_token": "tok",
-                                "expiration": "x",
-                            }
-                        },
+                        {"request": {"id": "REQ-20260915-0000000A", "status_label": "已撤回"}},
                     )
                 return self._reply(403, {"error": "只能给名册里确认属于你自己的子账号申请权限"})
 
@@ -260,14 +251,24 @@ class PanelClientTests(unittest.TestCase):
             code = cli.main(list(argv))
         return code, out.getvalue(), err.getvalue()
 
-    def test_creds_env_output_is_shell_safe_and_uses_bearer(self):
-        code, out, err = self.run_cli("creds", "REQ-20260915-0000000A")
+    def test_requests_carry_bearer_and_panel_header(self):
+        """会话令牌走 Authorization，且带 X-Panel-Request —— 后者是服务端识别 CLI 的依据。
+
+        原来这条用 `delivery creds` 测。凭证已改成审批评论下发、CLI 不再有这条路，
+        但这两个请求头仍然是所有 CLI 写操作的前提，换个还在的命令继续锁住。
+        """
+        code, out, err = self.run_cli("request", "withdraw", "REQ-20260915-0000000A")
         self.assertEqual(code, 0, err)
-        self.assertIn("export ALIBABA_CLOUD_ACCESS_KEY_SECRET='s'\"'\"'ec ret'", out)
-        self.assertNotIn("失效", out)  # 提示走 stderr，eval 不会混进去
         path, headers, _ = self.seen[-1]
+        self.assertTrue(path.endswith("/withdraw"), path)
         self.assertEqual(headers.get("Authorization"), "Bearer session-token")
         self.assertEqual(headers.get("X-Panel-Request"), "1")
+
+    def test_creds_subcommand_is_gone(self):
+        """凭证不再由 CLI 领取。留着这条是防有人「顺手」把它加回来。"""
+        with self.assertRaises(SystemExit) as caught:  # argparse 对未知子命令直接退出
+            self.run_cli("creds", "REQ-20260915-0000000A")
+        self.assertNotEqual(caught.exception.code, 0)
 
     def test_server_error_message_shown(self):
         code, out, err = self.run_cli(

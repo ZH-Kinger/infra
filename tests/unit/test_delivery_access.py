@@ -51,14 +51,20 @@ class GuidanceTests(unittest.TestCase):
         self.assertIn("无需登录", g.headline)
         self.assertIn("--rotate", g.next_command)
 
-    def test_cert_platform_ready(self):
-        g = guide(self.registry.get("xiwang-baremetal"))
+    def test_password_platform_ready(self):
+        """曦望有控制台、每人一个号，但接不了飞书 —— 引导要如实说，不能写「还没上线」。"""
+        g = guide(self.registry.get("xiwang"))
         self.assertEqual(g.state, STATE_READY)
-        self.assertIn("到期自动失效", g.hint)
+        self.assertEqual(g.action_label, "打开控制台")
+        self.assertIn("接不进飞书", g.hint)
+        # 「还没上线」是给 aliyun/volcano 用的，它们确实在推进 SAML。
+        # 对接不了的平台那么写，人会一直等一个不会来的东西
+        self.assertNotIn("还没上线", g.hint + g.headline)
 
-    def test_cert_platform_without_access_is_blocked(self):
-        g = guide(self.registry.get("xiwang-baremetal"), has_account=False)
+    def test_password_platform_without_account_is_blocked(self):
+        g = guide(self.registry.get("xiwang"), has_account=False)
         self.assertEqual(g.state, STATE_BLOCKED)
+        self.assertEqual(g.action_label, "申请账号")
 
     def test_to_dict_is_json_safe(self):
         import json

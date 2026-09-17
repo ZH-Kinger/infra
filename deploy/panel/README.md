@@ -31,6 +31,29 @@ IAM 给的 `feishu_union_id` 来自 IAM 的飞书应用。两个应用属于同�
 切换前拿同一个人核对一次：飞书模式登录面板看 `/api/session` 的 `union_id`，
 和 IAM 里该用户的 `feishu_union_id` 属性比对，一致再切。
 
+## 升级前先跑一遍前置检查
+
+面板有几处「缺了就整个功能不可用、但服务照样起得来」的依赖。**在目标服务器上**跑：
+
+```bash
+python3 deploy/panel/preflight.py \
+  --env /etc/delivery/panel.env --env /etc/delivery/sweep.env \
+  --tickets identity/tickets.json
+```
+
+只读，不改任何东西，不打印任何密钥的值。退出码非 0 就别继续部署。它查四件事：
+
+| 查什么 | 缺了会怎样 |
+|---|---|
+| `cryptography` 装没装 | 面板长期是零运行时依赖，这版起访问凭证要加密存。缺了的话凭证类申请在**提交那一刻**就被拒，而面板本身一切正常，看不出所以然 |
+| `DELIVERY_BASE_URL` 有没有、是不是 https、是不是指向本机 | 凭证的查看地址靠它拼。指向本机的话，发出去的链接使用方打不开 |
+| `DELIVERY_ISSUER_*` 在不在 | 长期凭证发不出去；**定时任务的环境里漏了的话，到期的子账号和密钥永远不会被删** |
+| 现有申请单的状态新代码认不认得 | 停在已删除状态（`claimable` / `expired`）的单子升上去就读不出来了 |
+
+两个 `--env` 分别给面板和定时任务：**这两边的环境经常不一样**，而漏的那一边通常是定时任务。
+
+`/health` 页面在运行时也查前两项（「凭证交付」分组）。
+
 ## 启动
 
 ```bash
@@ -56,7 +79,34 @@ PANEL_PROXY_SECRET="$(cat proxy_secret)" oauth2-proxy --alpha-config=oauth2-prox
 | `DELIVERY_IAM_USERINFO_URL` | 可选。名册里还没有某人 union_id 时，查 IAM 邮箱做首次关联 |
 | `DELIVERY_IAM_EMAIL_DOMAINS` | 配了 userinfo 就必填，逗号分隔。只接受这些域名、且 `email_verified` 为 true 的邮箱 |
 | `DELIVERY_LOGOUT_URL` | 可选，默认 `/oauth2/sign_out`（只清代理会话，不退出 IAM） |
-| `DELIVERY_BASE_URL` | 面板对外地址，如 `https://<面板域名>`。名册审核等写操作会校验请求的 Origin，nginx 改写了 `Host` 时必须设置，否则写操作一律 403 |
+| `DELIVERY_BASE_URL` | 面板对外地址，如 `https://<面板域名>`。三处都要它：写操作的 Origin 校验（nginx 改写了 `Host` 时不设就一律 403）、通知卡的跳转按钮、**访问凭证的查看地址**（拼不出来就一律不受理凭证申请）。定时任务的 EnvironmentFile 里也要写 |
+
+## nginx 那一层
+
+仓库里没有 nginx 配置示例，但有一行**必须**按这里写：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:4180;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    # 覆盖，不是追加。默认那个 $proxy_add_x_forwarded_for 会把客户端自带的
+    # X-Forwarded-For 原样保留、再往后追加，于是客户端能在左边塞任意假地址
+    proxy_set_header X-Forwarded-For   $remote_addr;
+}
+```
+
+面板按**固定跳数**从 X-Forwarded-For 右边数，取我们自己的代理写进去的那一个
+（`DELIVERY_PROXY_HOPS`，默认 2 = nginx + oauth2-proxy）。少一层代理就设成 1。
+设错的表现是「查看凭证」的台账里来源全是 `127.0.0.1`、取件限流变成全员共用一份配额。
+
+这个值同时用于两件事：取件接口的限流分桶，和申请单里 `credential_viewed` 记的「谁看的」。
+
+**面板必须只监听回环**（`delivery serve` 默认 `--host 127.0.0.1`）。面板判断「这个请求是不是
+从我们自己的代理来的」用的是「直连对端是不是内网地址」，而内网包含整个 RFC1918 段 ——
+一旦把面板绑到 LAN 地址，同网段的人就能自己造 X-Forwarded-For 冒充任意来源，
+限流和「谁看过凭证」的记录一起失效。要绑 LAN 就得先把这条信任链重新想清楚。
 
 ## 安全要点
 
@@ -127,6 +177,19 @@ delivery refresh --trust-unverified-when-derivable   # 和手动生成提案时�
    每次写云前会先确认凭证属于目标云账号，配错账号时直接失败（火山确认不了归属时同样失败）。
    凭证文件权限 600，只放在面板服务器上。
 
+   **发放访问凭证用的是另一把 AK**，同样每个云账号一个，只用来建 `tempak-*` 子账号、
+   建时间窗策略、建和删密钥。和开通身份分开是因为开通身份**刻意没有**建用户密钥的权限——
+   共用一把等于把那道闸拆了。
+
+   | 平台 | 变量 |
+   |---|---|
+   | 阿里云 | `DELIVERY_ISSUER_ALIYUN_<UID>_ACCESS_KEY_ID` / `_ACCESS_KEY_SECRET` |
+   | 火山 | `DELIVERY_ISSUER_VOLCANO_<账号ID>_ACCESS_KEY` / `_SECRET_KEY` |
+
+   不配的话访问凭证类申请在提交时就会被拒，`/health` 体检页也会标红。**定时任务
+   （`delivery requests sweep`）的 EnvironmentFile 里同样要有这两个**：到期删子账号和密钥
+   走的是发放身份，缺了的话长期凭证到期不会被清掉，只剩策略里的时间窗兜着。
+
    注意影响范围：示例里 `CreateLoginProfile` / `UpdateLoginProfile` 作用于 `user/*`，
    执行身份泄露时可以重置任何 RAM 用户的控制台密码（包括管理员）。能统一新账号前缀时，
    把 Resource 收窄到该前缀；模板里的角色要把「最大会话时间」设到不小于模板的 `max_hours`。
@@ -154,7 +217,7 @@ delivery refresh --trust-unverified-when-derivable   # 和手动生成提案时�
 5. **定时任务**：在 `delivery-refresh.service` 之外再加两条（同一个 EnvironmentFile）：
 
    ```bash
-   delivery requests sweep     # 同步飞书审批、到期回收权限、标记过期凭证、开账号后对应到名册（建议每 10 分钟）
+   delivery requests sweep     # 同步飞书审批、到期回收权限和凭证、开账号后对应到名册（建议每 10 分钟）
    delivery assets collect     # 采集资产快照（每天一次）
    delivery policies collect   # 采集权限策略目录（每天一次）
    ```
@@ -163,7 +226,7 @@ delivery refresh --trust-unverified-when-derivable   # 和手动生成提案时�
    开启通知后，定时任务还会给 3 天内到期的权限发一次到期提醒。
 
 6. **状态通知**（可选）：环境变量 `DELIVERY_NOTIFY=1`（面板和定时任务的 EnvironmentFile 都要有）。
-   - **申请人**：开通完成、凭证可领取、开通失败、审批未通过 / 被撤销、即将到期、到期收回时收到飞书机器人私信，
+   - **申请人**：开通完成、凭证已发放、开通失败、审批未通过 / 被撤销、即将到期、到期收回时收到飞书机器人私信，
      卡片带「查看申请」按钮。需要 `DELIVERY_FEISHU_APP_ID/SECRET` 和 `https://` 开头的 `DELIVERY_BASE_URL`；
      飞书应用要开通 `im:message:send_as_bot` 权限，**应用可用范围要覆盖全部员工**（不在范围内的人收不到）。公司 IAM 登录模式下没有 open_id，按 IAM 传来的飞书 user_id 发送（oauth2-proxy 要注入 `X-Panel-Feishu-User-Id`，否则收不到）。到期提醒只在能发给申请人时才记「已提醒」。
    - **管理员**：开通失败时发到 `DELIVERY_ALERT_WEBHOOK` 的告警群，带脱敏后的失败原因和管理后台链接。
@@ -179,7 +242,7 @@ delivery request new aliyun-oss-read --user <你的子账号> --days 30 --reason
 delivery request list
 delivery request policies --search oss
 delivery request grant --account aliyun/<UID> --policy AliyunOSSReadOnlyAccess --days 30 --reason "..."
-eval "$(delivery creds <申请单号>)"     # 临时凭证写进当前 shell，官方 aliyun / ve CLI 直接可用
+# 访问凭证不在命令行里领：审批通过即签发，查看地址发在对应飞书审批的评论里
 delivery assets
 ```
 

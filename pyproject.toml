@@ -7,7 +7,10 @@ name = "lakefs-cpfs-dataset-sink"
 version = "0.1.0"
 description = "Materialize immutable lakeFS dataset releases onto CPFS for Alibaba Cloud PAI"
 requires-python = ">=3.9"
-dependencies = []
+# 面板长期是零运行时依赖。加这一个是因为没有替代品：访问凭证要能被使用方反复查看，
+# 就必须存下来；存下来就必须加密（否则 tickets.json 泄漏等于凭证泄漏）；
+# 而标准库里没有 AES，AEAD 自己搓必错。见 src/delivery/sealed.py。
+dependencies = ["cryptography>=41"]
 
 [project.optional-dependencies]
 lakefs = ["lakefs>=0.7"]

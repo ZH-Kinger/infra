@@ -17,8 +17,10 @@ from delivery import tickets as t
 from delivery.approval import FeishuApproval
 from delivery.flows import Flows
 
+from . import test_delivery_access_requests as base
 from .test_delivery_access_requests import (
     CONFIG,
+    CRED,
     LI,
     NEW,
     TEMPLATES,
@@ -26,6 +28,11 @@ from .test_delivery_access_requests import (
     FakeFeishu,
     _roster,
 )
+
+#: 取件地址（DELIVERY_BASE_URL）是凭证的唯一出口：没配 flows 在提交那一刻就拒。
+#: 模块级设、跑完还原 —— 不用全局 autouse，否则「没配就该拒」那条路再也测不到。
+setUpModule = base.setUpModule
+tearDownModule = base.tearDownModule
 
 
 def _templates(**category):
@@ -138,14 +145,18 @@ class OptionStateTests(unittest.TestCase):
         # 别人的申请不影响我
         self.assertNotEqual(env.options("on_new")["oss-read"]["state"], "pending")
 
-    def test_claimable_credential_is_ready(self):
+    def test_issued_credential_frees_the_template_again(self):
+        """凭证没有「可领取」这一档：发放完这张单子就结束，模板立刻能再申请。"""
         env = Env()
-        ticket = env.submit("dev-sts", {"hours": 2})
+        ticket = env.submit("dev-sts", dict(CRED))
+        pending = env.options()["dev-sts"]
+        self.assertEqual((pending["state"], pending["request_id"]), ("pending", ticket["id"]))
+        self.assertFalse(pending["available"])
         env.approve(ticket)
-        env.flows.sync(ticket["id"], force=True)
+        self.assertEqual(env.flows.sync(ticket["id"], force=True)["status"], t.DONE)
         opt = env.options()["dev-sts"]
-        self.assertEqual(opt["state"], "ready")
-        self.assertEqual(opt["request_id"], ticket["id"])
+        self.assertEqual((opt["state"], opt["request_id"]), ("available", ""))
+        self.assertTrue(opt["available"])
 
     def test_no_account_is_unavailable_even_with_open_ticket_elsewhere(self):
         opts = Env(groups={"grp-oss-read"}).options(NEW.union_id)

@@ -266,9 +266,7 @@ class RelaxedPolicyTests(unittest.TestCase):
     """放宽策略：未验证的企业邮箱 + 用户名可由它推出，也直接确认。默认关闭。"""
 
     def test_default_is_strict(self):
-        p = propose(
-            [acc(ALI, "lisi", "", sec("li.si@wuji.tech", verified=False))], domain=DOMAIN
-        )
+        p = propose([acc(ALI, "lisi", "", sec("li.si@wuji.tech", verified=False))], domain=DOMAIN)
         self.assertEqual(p.links[0].status, STATUS_REVIEW)
 
     def test_relaxed_confirms_unverified_when_derivable(self):

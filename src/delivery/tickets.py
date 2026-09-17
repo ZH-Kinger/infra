@@ -5,7 +5,9 @@
   · 读 - 改 - 写在文件锁里完成，多线程、多进程（面板 + 定时同步）不会互相覆盖
   · 每次变化追加一条事件（谁、何时、做了什么），事件只追加不修改
 
-申请单里**不存任何凭证或密码**：临时凭证、初始密码都是领取时现场生成、直接返回。
+申请单里**不存任何明文凭证或密码**。初始密码是领取时现场生成、直接返回；访问凭证存的是
+密文（`sealed` 字段），解密密钥只在发给使用方的链接里，服务端没有主密钥、自己也解不开 ——
+见 `sealed.py`。
 """
 
 from __future__ import annotations
@@ -34,8 +36,8 @@ APPROVED = "approved"
 EXECUTING = "executing"
 DONE = "done"
 FAILED = "failed"
-CLAIMABLE = "claimable"
-EXPIRED = "expired"
+#: 资源开通（ECS/RDS…）审批通过后停在这里：面板不建资源，等管理员按 IaC 建好回来登记
+FULFILLING = "fulfilling"
 CLOSED = "closed"
 REVOKED = "revoked"
 
@@ -49,8 +51,7 @@ LABELS = {
     EXECUTING: "开通中",
     DONE: "已完成",
     FAILED: "开通失败",
-    CLAIMABLE: "可领取",
-    EXPIRED: "已过期",
+    FULFILLING: "待开通",
     CLOSED: "已关闭",
     REVOKED: "已到期回收",
 }
@@ -58,20 +59,21 @@ LABELS = {
 TRANSITIONS = {
     SUBMITTING: {PENDING, SUBMIT_FAILED},
     PENDING: {APPROVED, REJECTED, WITHDRAWN},
-    #: 审批「通过」但核对不过（比如只有申请人自己批）的凭证单直接关闭，不进入可领取
-    APPROVED: {EXECUTING, CLAIMABLE, CLOSED},
-    EXECUTING: {DONE, FAILED},
-    FAILED: {EXECUTING, CLOSED},
-    CLAIMABLE: {EXPIRED, CLOSED},
+    #: 审批「通过」但核对不过（比如只有申请人自己批）的单子直接关闭，不进开通
+    APPROVED: {EXECUTING, CLOSED},
+    EXECUTING: {DONE, FAILED, FULFILLING},
+    #: FAILED / CLOSED 也能进 REVOKED：凭证签发出来了却没送达的单子停在这两个状态，
+    #: 云上那把长期 AK 得有人去删。只让 DONE 能回收的话，它永远等不到定时任务
+    FAILED: {EXECUTING, CLOSED, REVOKED},
+    FULFILLING: {DONE, CLOSED},
     DONE: {REVOKED},
     REVOKED: set(),
     SUBMIT_FAILED: set(),
     REJECTED: set(),
     WITHDRAWN: set(),
-    EXPIRED: set(),
-    CLOSED: set(),
+    CLOSED: {REVOKED},
 }
-OPEN = (SUBMITTING, PENDING, APPROVED, EXECUTING, FAILED, CLAIMABLE)
+OPEN = (SUBMITTING, PENDING, APPROVED, EXECUTING, FAILED, FULFILLING)
 
 
 class TicketError(DeliveryError):

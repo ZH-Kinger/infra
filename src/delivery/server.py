@@ -28,21 +28,28 @@
 
 from __future__ import annotations
 
+import contextlib
 import gzip
+import hashlib
 import html
 import http.cookies
 import http.server
+import ipaddress
 import json
+import math
 import os
+import re
 import secrets
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import access as access_mod
 from . import assets as assets_mod
 from . import health as health_mod
 from . import iam_sync, inventory
@@ -58,7 +65,9 @@ from .feishu import FeishuError, FeishuUser, exchange_code, fetch_user
 from .flows import Flows
 from .login import _pkce_pair, authorize_url
 from .people import BIND_NONE, BIND_UNION_ID
+from .provision import executor_configured as provision_executor_configured
 from .provision import executor_from_env
+from .provision import issuer_configured as provision_issuer_configured
 from .proxy_auth import (
     AUTH_FEISHU,
     AUTH_MODES,
@@ -68,9 +77,169 @@ from .proxy_auth import (
     ProxyIdentity,
 )
 from .registry import PlatformRegistry
+from .requests_api import TICKET_ID as _ID
 from .requests_api import Caller, RequestsApi
 from .roles import ROLE_ADMIN, Admins, load_admins
 from .views import FILTERS, Labels, admin_overview, admin_people, person_detail
+
+#: 工具下载目录（`--downloads`）。九章的 aladdin 没有公开下载地址，只能我们自己托管；
+#: 阿里和火山的 CLI 有官方地址，页面上直接给链接，不在这里放第二份。
+#: **只从这一个目录发文件，文件名走严格白名单** —— 拼接用户给的路径去读文件是
+#: 目录穿越的经典入口，这里连拼接都不做，只在目录列表里按名字精确匹配。
+_DOWNLOAD_NAME = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,80}\Z")
+_DOWNLOAD_CHUNK = 256 * 1024
+
+
+#: sha256 缓存，键含**大小和 mtime** —— 文件换了就自然算新的。
+#: 只按文件名缓存是错的：报一个过期的校验和比不报校验和更糟
+_digests: dict = {}
+
+
+def _sha256(item: Path) -> str:
+    stat = item.stat()
+    key = (str(item), stat.st_size, stat.st_mtime_ns)
+    cached = _digests.get(key)
+    if cached:
+        return cached
+    digest = hashlib.sha256()
+    with item.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(_DOWNLOAD_CHUNK), b""):
+            digest.update(chunk)
+    if len(_digests) > 256:
+        _digests.clear()
+    _digests[key] = digest.hexdigest()
+    return _digests[key]
+
+
+def _downloads(directory: Optional[str]) -> list:
+    """下载目录里的文件清单（名字、大小、sha256）。目录不存在就是空清单。"""
+    if not directory:
+        return []
+    base = Path(directory)
+    if not base.is_dir():
+        return []
+    out = []
+    for item in sorted(base.iterdir()):
+        if not item.is_file() or not _DOWNLOAD_NAME.match(item.name):
+            continue
+        out.append({"name": item.name, "size": item.stat().st_size, "sha256": _sha256(item)})
+    return out
+
+
+#: 取件页。**不在 _STATIC 里**，因为那张表里的页面进了 SPA 的登录流程
+_PICKUP_STATIC = {
+    "/pickup.js": ("pickup.js", "text/javascript; charset=utf-8"),
+}
+#: 查看凭证的地址：/c/<申请单号>#<密钥>。**密钥在 # 之后**，浏览器不会发给服务端
+_VIEW_PREFIX = "/c/"
+#: 取件接口的限流：没有登录这道门，剩下唯一能拦暴力猜令牌的就是它。
+#: 只数**失败**，键是 (来源 IP, 申请单号) —— 正常人反复打开自己的链接不该被自己卡死，
+#: 而线上所有请求的直连来源都是本机的反向代理，只按 IP 计数等于全员共用一份配额。
+_PICKUP_WINDOW = 300.0
+_PICKUP_MAX = 20
+#: 除了「每个来源对每张单子」的失败配额，再留一个**粗粒度的整体上限**：
+#: 按单号分桶之后，换一个格式合法但不存在的单号就能重新开一桶，而每次尝试都会
+#: 走一遍 store.all() —— 那把文件锁是面板和定时任务共用的
+_PICKUP_TRIES = 120
+_pickup_hits: dict = {}
+_pickup_tries: dict = {}
+_pickup_lock = threading.Lock()
+#: 面板前面有几层代理会往 X-Forwarded-For 追加。线上是 nginx → oauth2-proxy → 面板
+ENV_PROXY_HOPS = "DELIVERY_PROXY_HOPS"
+_DEFAULT_HOPS = 2
+
+
+def _client_ip(peer: str, forwarded: str, hops: int = 0) -> str:
+    """反向代理后面的真实来源 IP。
+
+    **按固定跳数从右边数**，不按「第一个看起来像公网的」找。每一跳代理都往右追加自己收到
+    的对端，所以客户端只能往**左边**塞值；数着位置取就永远取到我们自己的代理写进去的那个。
+    早先那版是「从右往左找第一个非内网地址」，对公网使用方是对的，但公司内网的人发一个
+    `X-Forwarded-For: 8.8.8.8`，真实地址（10.x）会被当成「我们自己的代理跳」跳过去，
+    结果取到他伪造的那个 —— 限流键随便换，`credential_viewed` 记的「谁看的」也随便编。
+
+    默认 2 跳，对应线上的 nginx → oauth2-proxy → 面板：nginx 追加真实来源，
+    oauth2-proxy 追加 nginx。跳数不对时退回直连地址（台账里会明显看到一片 127.0.0.1），
+    不去猜 —— 猜错的方向是「采信客户端塞的值」。
+    """
+    if not _is_local(peer):
+        return peer or "?"
+    hops = hops or _forwarded_hops()
+    chain = [x.strip() for x in (forwarded or "").split(",") if x.strip()]
+    if hops and len(chain) >= hops:
+        # 数着位置取到的就是我们自己的代理写进去的值，**不再判它是不是公网地址** ——
+        # 内网员工的真实地址本来就是 10.x，按「是不是公网」筛会把他跳过去。
+        #
+        # 但「解析得出是个地址」这条还是要留。这跟上面那条不冲突：内网地址照样解得出来。
+        # 去掉的话，跳数一旦配错（少一层代理就要手动改成 1），客户端塞的任意文本就会
+        # 原样成为限流的桶键 —— 每换一串就是一份新配额，取件的限流整个失效 ——
+        # 顺带把伪造内容写进申请单里「谁看过凭证」那条记录。
+        hop = chain[-hops]
+        with contextlib.suppress(ValueError):
+            return str(ipaddress.ip_address(hop.strip().strip("[]").split("%")[0]))
+    return peer or "?"
+
+
+def _forwarded_hops() -> int:
+    """面板前面有几层会往 X-Forwarded-For 追加的代理。见 deploy/panel/README.md。"""
+    try:
+        return max(0, int(os.environ.get(ENV_PROXY_HOPS, "") or _DEFAULT_HOPS))
+    except ValueError:
+        return _DEFAULT_HOPS
+
+
+def _pickup_too_many_tries(peer: str) -> bool:
+    """整体上限：这个来源五分钟里打了多少次取件接口（成功也算）。**在读请求体之前判**。"""
+    now = time.time()
+    with _pickup_lock:
+        tries = [x for x in _pickup_tries.get(peer, ()) if now - x < _PICKUP_WINDOW]
+        tries.append(now)
+        _pickup_tries[peer] = tries
+        _prune(_pickup_tries, now)
+        return len(tries) > _PICKUP_TRIES
+
+
+def _pickup_over_limit(peer: str, ticket_id: str) -> bool:
+    """这个来源对这张单子的失败次数是不是已经满了。**不计数**，只看。"""
+    now = time.time()
+    with _pickup_lock:
+        hits = [x for x in _pickup_hits.get((peer, ticket_id), ()) if now - x < _PICKUP_WINDOW]
+        return len(hits) >= _PICKUP_MAX
+
+
+def _prune(table: dict, now: float) -> None:
+    """只丢已经没有有效计数的条目。整张 clear() 的话，拿足够多的来源打一轮
+    就能把别人的计数一起清零 —— 限流就形同虚设。"""
+    if len(table) <= 4096:
+        return
+    for k in [k for k, v in table.items() if not v or now - v[-1] >= _PICKUP_WINDOW]:
+        table.pop(k, None)
+    if len(table) > 4096:  # 全都在窗口内：这时候已经是被打了
+        table.pop(next(iter(table)), None)
+
+
+def _pickup_record_failure(peer: str, ticket_id: str) -> None:
+    now = time.time()
+    key = (peer, ticket_id)
+    with _pickup_lock:
+        hits = [x for x in _pickup_hits.get(key, ()) if now - x < _PICKUP_WINDOW]
+        hits.append(now)
+        _pickup_hits[key] = hits
+        _prune(_pickup_hits, now)
+
+
+def _is_local(addr: str) -> bool:
+    """回环或内网地址 —— 这些只可能是我们自己的代理链，不是使用方。
+
+    注意 `is_private` 把 RFC 文档网段（198.51.100.x / 203.0.113.x / 2001:db8::）也算在内。
+    真实客户端不会用那些地址，生产上没影响，但写用例时要用真正可路由的地址。
+    """
+    try:
+        ip = ipaddress.ip_address(addr.strip().strip("[]").split("%")[0])
+    except ValueError:
+        return True  # 解析不出来的一律不当作真实来源
+    return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified
+
 
 COOKIE_NAME = "delivery_session"
 _STATE_TTL = 600
@@ -95,11 +264,85 @@ class _WebSession:
 
 
 class Store:
-    """进程内状态。开发用；生产要换 Redis 之类。"""
+    """会话与授权中间态。
 
-    def __init__(self):
+    会话可以落盘（`path`）：不落盘的话进程一重启所有人都被踢下线，而这个服务
+    `Restart=always`、加个启动参数也要重启——上线后这事每天都会发生。落盘的是
+    会话 ID（等同于登录凭证），所以只写 0600、只放在本来就 700 的目录里。
+
+    `pending`（授权码流程的 PKCE verifier）**刻意不落盘**：它只活几分钟，重启时
+    正在登录的人重试一次即可；而把它写进文件等于把一次性凭证留在盘上。
+    """
+
+    def __init__(self, path: Optional[str] = None):
+        self.path = Path(path) if path else None
         self.pending: dict = {}
         self.sessions: dict = {}
+        self._lock = threading.Lock()
+        self._load()
+
+    def _load(self) -> None:
+        if self.path is None or not self.path.is_file():
+            return
+        known = {f.name for f in fields(FeishuUser)}
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            items = raw.get("sessions") if isinstance(raw, dict) else None
+            for sid, row in (items or {}).items():
+                # 逐条容错：一条坏记录不该把其他人一起踢下线
+                try:
+                    # 只取认识的字段：以后给 FeishuUser 加字段、再回滚到旧版本时，
+                    # 旧版本读新文件不会因为多了一个键就把**所有人**的会话丢掉
+                    raw_user = row.get("user") or {}
+                    user = FeishuUser(**{k: v for k, v in raw_user.items() if k in known})
+                    created = float(row.get("created") or 0)
+                    if not math.isfinite(created) or created <= 0:
+                        continue
+                    item = _WebSession(user=user, created=created)
+                    if not item.expired:
+                        self.sessions[sid] = item
+                except Exception as exc:  # noqa: BLE001 — 单条坏记录跳过即可
+                    print(f"[store] 跳过一条坏会话记录：{type(exc).__name__}", file=sys.stderr)
+                    continue
+        except Exception as exc:  # noqa: BLE001 — 构造函数里任何意外都不该让服务起不来
+            print(f"[store] 读不了会话文件，忽略：{type(exc).__name__}", file=sys.stderr)
+            self.sessions.clear()
+
+    def save(self) -> None:
+        if self.path is None:
+            return
+        with self._lock:
+            # 先在锁内拍快照：handler 线程随时可能插入新会话，直接遍历活字典会
+            # RuntimeError，而这个异常会穿到登录请求上——人看到 500，其实会话已经建好了
+            snapshot = dict(self.sessions)
+            payload = {
+                "sessions": {
+                    sid: {"user": asdict(v.user), "created": v.created}
+                    for sid, v in snapshot.items()
+                    if not v.expired
+                }
+            }
+            tmp = ""
+            try:
+                target = self.path
+                fd, tmp = tempfile.mkstemp(
+                    dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(payload, fh, ensure_ascii=False)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                Path(tmp).chmod(0o600)
+                Path(tmp).replace(target)
+            except Exception as exc:  # noqa: BLE001 — 见下：这里绝不能让异常穿出去
+                # 落盘失败不能影响登录本身：内存里的会话仍然有效，只是重启会丢。
+                # 必须接住**所有**异常而不只是 OSError：save() 跑在登录请求线程上，而
+                # /auth/callback 不在 do_GET 的 try 里 —— 一个 UnicodeEncodeError 就会让
+                # 连接直接断开、Set-Cookie 发不出去，那个人此后每次登录都死在同一行。
+                with contextlib.suppress(OSError):
+                    if tmp:
+                        Path(tmp).unlink(missing_ok=True)
+                print(f"[store] 会话落盘失败：{type(exc).__name__}", file=sys.stderr)
 
     def put_pending(self, state: str, item: _Pending) -> None:
         self._sweep()
@@ -116,9 +359,13 @@ class Store:
         for key, v in list(self.pending.items()):
             if now - v.created > _STATE_TTL:
                 self.pending.pop(key, None)
+        dropped = False
         for key, v in list(self.sessions.items()):
             if v.expired:
                 self.sessions.pop(key, None)
+                dropped = True
+        if dropped:
+            self.save()
 
 
 #: 页面样式。跟着苹果的设计语言走（macOS 系统设置 / apple.com）：
@@ -321,6 +568,7 @@ _STATIC = {
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/core.js": ("core.js", "text/javascript; charset=utf-8"),
     "/requests.js": ("requests.js", "text/javascript; charset=utf-8"),
+    "/access.js": ("access.js", "text/javascript; charset=utf-8"),
     "/assets.js": ("assets.js", "text/javascript; charset=utf-8"),
     "/permissions.js": ("permissions.js", "text/javascript; charset=utf-8"),
     "/health.js": ("health.js", "text/javascript; charset=utf-8"),
@@ -401,6 +649,13 @@ class Backend:
         self.approval_path = approval_path
         self._feishu_token = feishu_token
         self._executor = executor or executor_from_env
+        # 凭证发放身份：和开通身份是两把不同的 AK（云上策略分开收窄）。
+        # 测试注入自定义 executor 时沿用同一个，免得每个用例都要再造一份
+        self._issuer = (
+            (lambda platform, account: executor(platform, account))
+            if executor
+            else (lambda platform, account: executor_from_env(platform, account, issuer=True))
+        )
         self._approval_transport = approval_transport
         self._flows: Optional[Flows] = None
         self.proposal_path = proposal_path
@@ -545,12 +800,15 @@ class Backend:
                 approval=self.approval,
                 roster=self.people,
                 executor=self._executor,
+                issuer=self._issuer,
                 add_manual_link=link,
                 current_groups=self.current_groups,
                 policy_snapshot=self.policies,
                 policy_rules=self.policy_rules,
                 current_policies=self.current_policies,
                 notify=self._notify,
+                executor_ready=provision_executor_configured,
+                issuer_ready=provision_issuer_configured,
             )
         return self._flows
 
@@ -607,6 +865,7 @@ def make_handler(
     base_url: str,
     backend: Optional[Backend] = None,
     proxy: Optional[ProxyIdentity] = None,
+    downloads_dir: str = "",
 ):
     """proxy 不为空即代理登录模式：只认 oauth2-proxy 注入的请求头，飞书登录路由关闭。"""
     backend = backend or Backend(platforms={p.id: p.display for p in registry})
@@ -620,12 +879,15 @@ def make_handler(
 
         # ── 工具 ──────────────────────────────────────────────────────────
         def _send(self, code: int, body: bytes, *, ctype="text/html; charset=utf-8", headers=None):
+            headers = dict(headers or {})
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
-            # 看板会显示账号与权限，不该进任何缓存
-            self.send_header("Cache-Control", "no-store")
-            for key, value in (headers or {}).items():
+            # 看板会显示账号与权限，不该进任何缓存。JS/CSS 这类不含数据的会传自己的
+            # Cache-Control 覆盖它 —— 必须是**覆盖**不是追加：发两个 Cache-Control 的话
+            # 浏览器按更严的那个算，协商缓存就白做了
+            self.send_header("Cache-Control", headers.pop("Cache-Control", "no-store"))
+            for key, value in headers.items():
                 self.send_header(key, value)
             self.end_headers()
             self.wfile.write(body)
@@ -673,13 +935,63 @@ def make_handler(
             """默认实现会把**含授权码的完整 URL** 打到 stderr。"""
 
         # ── 路由 ──────────────────────────────────────────────────────────
+        def _pickup(self):
+            """用链接里的密钥解开凭证。**刻意不要求登录** —— 凭证常发给外部合作方，
+            他们没有面板账号。链接本身就是凭据：密钥是 256 位随机数，服务端不存。
+
+            限流只数**失败**，按 (来源 IP, 申请单号) 分桶：没有登录这道门，剩下唯一能拦
+            暴力试密钥的就是它。只数失败是刻意的 —— 「同一个链接能反复打开」是这套设计的
+            全部意义，正常使用不该把自己的配额刷光。
+            """
+            peer = _client_ip(
+                self.client_address[0] if self.client_address else "",
+                self.headers.get("X-Forwarded-For", ""),
+            )
+            # 整体上限先判：再往下每一次尝试都会读一遍 tickets.json（还带着文件锁）。
+            # **这里提前 return 时请求体还没读**，安全的前提是 protocol_version 保持
+            # 默认的 HTTP/1.0（每个响应后关连接）。哪天为了性能改成 HTTP/1.1，
+            # 没读完的 body 会被当成下一个请求行去解析 —— 到时候这里要先把 body 读掉再返回
+            if _pickup_too_many_tries(peer):
+                return self._json(429, {"error": "试得太频繁了，过一会儿再来"})
+            flows = backend.flows()
+            if flows is None:
+                return self._json(503, {"error": "还没有配置申请流程"})
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                payload = json.loads(self.rfile.read(length).decode() or "{}")
+            except ValueError:
+                return self._json(400, {"error": "请求体不是合法 JSON"})
+            ticket_id = str(payload.get("id") or "")
+            if not _ID.match(ticket_id):
+                return self._json(404, {"error": "这个链接打不开任何凭证"})
+            if _pickup_over_limit(peer, ticket_id):
+                return self._json(429, {"error": "试得太频繁了，过一会儿再来"})
+            try:
+                # 记一笔谁看的。没有登录态，能记的只有来源 —— 有总比没有强
+                _, cred = flows.view_credential(ticket_id, str(payload.get("key") or ""), who=peer)
+            except DeliveryError as exc:
+                _pickup_record_failure(peer, ticket_id)
+                status = getattr(exc, "status", 400)
+                first = next((ln for ln in str(exc).splitlines() if ln.strip()), "取件失败")
+                return self._json(status, {"error": first})
+            except Exception as exc:  # noqa: BLE001 — 细节只进服务端日志
+                print(f"[pickup] {type(exc).__name__}: {exc}", file=sys.stderr)
+                return self._json(500, {"error": "签发凭证失败，请联系管理员"})
+            return self._json(200, {"credential": cred})
+
         def do_GET(self):  # noqa: N802
             path = urllib.parse.urlsplit(self.path).path
             if path == "/healthz":
                 return self._json(200, {"ok": True})
             if path in _STATIC:
                 return self._static(*_STATIC[path])
-            if path.startswith("/api/"):
+            # 查看凭证的页面在登录之外：凭证常发给外部合作方，他们没有面板账号
+            if path in _PICKUP_STATIC:
+                return self._static(*_PICKUP_STATIC[path])
+            if path.startswith(_VIEW_PREFIX):
+                return self._static("pickup.html", "text/html; charset=utf-8")
+            # /download/ 也走 _api：它要登录、要统一的异常兜底，和接口是一类东西
+            if path.startswith(("/api/", "/download/")):
                 try:
                     return self._api(path)
                 except Exception as exc:  # noqa: BLE001 — 任何异常都要回 JSON，不能断连接
@@ -708,7 +1020,8 @@ def make_handler(
                     session_id = morsel.value if morsel else ""
                 except http.cookies.CookieError:
                     session_id = ""
-                store.sessions.pop(session_id, None)
+                if store.sessions.pop(session_id, None) is not None:
+                    store.save()
                 return self._send(
                     302,
                     b"",
@@ -718,20 +1031,33 @@ def make_handler(
 
         # ── 前端与 API ────────────────────────────────────────────────────
         def _static(self, name: str, ctype: str):
+            """前端文件。**每次都带按内容算的 ETag**。
+
+            不带缓存头的话浏览器会按自己的启发式缓存 —— 部署完新代码，用户那边还是旧的，
+            要人去硬刷新才看得到。那等于没部署，而且没人会记得这一步。
+
+            用内容哈希而不是 mtime：rsync 会保留时间戳，同一份内容重新部署不该让所有人重下；
+            而内容真变了时，哈希一定变。`no-cache` 不是「不缓存」，是「每次都回来问一句」，
+            没变就是 304，几十字节。
+            """
             try:
                 body = (WEB_DIR / name).read_bytes()
             except OSError:
                 return self._send(500, _page("前端缺失", "<h1>前端文件缺失</h1>"))
-            return self._send(
-                200,
-                body,
-                ctype=ctype,
-                headers={
-                    "Content-Security-Policy": _CSP,
-                    "X-Content-Type-Options": "nosniff",
-                    "Referrer-Policy": "no-referrer",
-                },
-            )
+            extra = {
+                "Content-Security-Policy": _CSP,
+                "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+            }
+            # **页面本身保持 no-store**：看板上有账号和权限，共用电脑上进了缓存
+            # 会被下一个人翻出来。只有 JS/CSS 这类不含数据的走 ETag 协商缓存
+            if not ctype.startswith("text/html"):
+                etag = '"' + hashlib.blake2s(body, digest_size=16).hexdigest() + '"'
+                if self.headers.get("If-None-Match") == etag:
+                    return self._send(304, b"", ctype=ctype, headers={"ETag": etag})
+                extra["ETag"] = etag
+                extra["Cache-Control"] = "no-cache"
+            return self._send(200, body, ctype=ctype, headers=extra)
 
         def _require(self, *, admin: bool = False) -> Optional[_WebSession]:
             session = self._session()
@@ -803,6 +1129,68 @@ def make_handler(
                         for line in detail["snapshot_incomplete"]
                     ]
                 return self._json(200, detail)
+            if path == "/api/access":
+                # 「怎么用起来」：每个平台对这个人的下一步动作。
+                # 引导文案从 access.guide() 来，和 `delivery login-guide` 同一份逻辑 ——
+                # 网页上手写第二份的话，两边迟早对不上，而这正是用户照着做的东西
+                session = self._require()
+                if session is None:
+                    return None
+                user = session.user
+                found = backend.people().resolve(
+                    union_id=user.union_id, enterprise_email=user.enterprise_email
+                )
+                mine: dict = {}
+                for ref in found.person.accounts if found.person else ():
+                    mine.setdefault(ref.platform, []).append(ref.name)
+                out = []
+                for platform in registry:
+                    names = mine.get(platform.id, [])
+                    got = access_mod.guide(
+                        platform,
+                        has_account=bool(names),
+                        # 凭证托管是 CLI 本机的事，服务端不知道也不该知道 ——
+                        # 一律按「还没绑」给引导，多说一次比说错强
+                        bound=False,
+                        sso_enabled=platform.sso_enabled,
+                    ).to_dict()
+                    got.update(
+                        short=platform.short,
+                        console_url=platform.console_url,
+                        accounts=sorted(names),
+                        notes=list(platform.notes),
+                    )
+                    out.append(got)
+                return self._json(200, {"platforms": out})
+            if path == "/api/downloads":
+                if self._require() is None:
+                    return None
+                return self._json(200, {"files": _downloads(downloads_dir)})
+            if path.startswith("/download/"):
+                # **要登录**：这些是内部工具，而且不登录就能下等于把面板变成公开文件站
+                if self._require() is None:
+                    return None
+                name = path[len("/download/") :]
+                item = next(
+                    (f for f in _downloads(downloads_dir) if f["name"] == name),
+                    None,
+                )
+                if item is None:
+                    return self._send(404, _page("没有这个文件", "<h1>没有这个文件</h1>"))
+                # 文件名来自上面那份目录清单，不是请求里的字符串拼出来的
+                target = Path(downloads_dir) / item["name"]
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(item["size"]))
+                self.send_header("Content-Disposition", f'attachment; filename="{item["name"]}"')
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                with target.open("rb") as fh:
+                    # 分块写：这些文件十几 MB，整个读进内存没必要
+                    for chunk in iter(lambda fh=fh: fh.read(_DOWNLOAD_CHUNK), b""):
+                        self.wfile.write(chunk)
+                return None
             if path == "/api/admin/overview":
                 if self._require(admin=True) is None:
                     return None
@@ -1066,6 +1454,8 @@ def make_handler(
 
         def do_POST(self):  # noqa: N802
             path = urllib.parse.urlsplit(self.path).path
+            if path == "/api/pickup":
+                return self._pickup()
             if path == _ADMIN_REVIEW:
                 return self._review()
             if path.rstrip("/") == _ADMIN_IAM:
@@ -1099,6 +1489,7 @@ def make_handler(
                 return self._json(502, {"error": str(exc)})
             session_id = secrets.token_urlsafe(32)
             store.sessions[session_id] = _WebSession(user=user)
+            store.save()
             return self._json(
                 200,
                 {
@@ -1158,6 +1549,7 @@ def make_handler(
                 )
             session_id = secrets.token_urlsafe(32)
             store.sessions[session_id] = _WebSession(user=user)
+            store.save()
             cookie = (
                 f"{COOKIE_NAME}={session_id}; Path=/; HttpOnly; SameSite=Lax; "
                 f"Max-Age={_SESSION_TTL}"
@@ -1203,6 +1595,8 @@ def serve(
     policy_rules_path: Optional[str] = None,
     iam_spec_path: Optional[str] = None,
     iam_out_path: Optional[str] = None,
+    sessions_path: Optional[str] = None,
+    downloads_path: Optional[str] = None,
     auth: Optional[str] = None,
     echo=print,
 ) -> None:
@@ -1241,15 +1635,17 @@ def serve(
     )
     handler = make_handler(
         registry,
-        Store(),
+        Store(sessions_path),
         app_id=app_id,
         app_secret=app_secret,
         base_url=base_url,
         backend=backend,
         proxy=proxy,
+        downloads_dir=downloads_path or os.environ.get("DELIVERY_DOWNLOADS", ""),
     )
     # 只绑回环：这是开发服务器，绑 0.0.0.0 会把还没做访问控制的看板暴露给整个网段。
     server = http.server.ThreadingHTTPServer((host, port), handler)
+    echo(f"  工具下载    {downloads_path or '未配置（--downloads）'}")
     echo(f"  权限快照    {inventory_path or '未配置（--inventory）'}")
     echo(f"  人员名册    {people_path or '未配置（--people）'}")
     if proxy is not None:

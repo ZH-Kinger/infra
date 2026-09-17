@@ -123,7 +123,7 @@ class ShippedDescriptorTests(unittest.TestCase):
             self.assertTrue(platform.display)
 
     def test_expected_platforms_present(self):
-        for pid in ("aliyun", "volcano", "jiuzhang", "xiwang-baremetal"):
+        for pid in ("aliyun", "volcano", "jiuzhang", "xiwang"):
             self.assertIn(pid, self.registry)
 
     def test_volcano_stays_read_only_until_verified(self):
@@ -149,10 +149,37 @@ class ShippedDescriptorTests(unittest.TestCase):
         depends = self.registry.get("jiuzhang").adapter.get("depends_on") or {}
         self.assertEqual(depends.get("TrainingInstance"), ["NASInstance"])
 
-    def test_baremetal_has_no_plan_and_no_apply(self):
-        bm = self.registry.get("xiwang-baremetal")
-        self.assertEqual(bm.capabilities.plan, "none")
-        self.assertFalse(bm.capabilities.apply)
+    def test_xiwang_is_manual_and_read_only(self):
+        """曦望有控制台但没 CLI 也没有可调的接口：清单靠人维护，绝不做变更。
+
+        inventory=manual 和 none 的区别不是程度，是谁负责 —— manual 在能力矩阵上
+        看得见，none 是个黑洞。之前这条描述符写的是 ssh，那是错的。
+        """
+        xw = self.registry.get("xiwang")
+        self.assertEqual(xw.capabilities.inventory, "manual")
+        self.assertEqual(xw.capabilities.login, "password")
+        self.assertEqual(xw.capabilities.plan, "none")
+        self.assertFalse(xw.capabilities.apply)
+
+    def test_manual_inventory_cannot_apply(self):
+        from delivery.capabilities import Capabilities
+        from delivery.errors import PlatformSpecError
+
+        with self.assertRaises(PlatformSpecError):
+            Capabilities.from_mapping(
+                {
+                    "auth": "static-secret",
+                    "iac": "none",
+                    "plan": "dryrun",
+                    "inventory": "manual",
+                    "login": "password",
+                    "apply": True,
+                    "policy_as_code": False,
+                    "require_approval": True,
+                    "status": "verified",
+                },
+                platform="probe",
+            )
 
     # 注：规则④（非 OIDC + apply ⇒ 必须审批）不在这里断言。
     # 真出现违规描述符时 setUp 的 load() 会先抛 PlatformSpecError，这里只会得到

@@ -11,7 +11,11 @@
 #     --email-domain='*' --redirect-url=https://<面板域名>/oauth2/callback \
 #     --whitelist-domain=<IAM 域名> \
 #     --skip-provider-button=true --api-route='^/api/' \
-#     --skip-jwt-bearer-tokens=true
+#     --skip-jwt-bearer-tokens=true \
+#     --skip-auth-route='^/c/' \
+#     --skip-auth-route='^/api/pickup$' \
+#     --skip-auth-route='^/pickup\.js$' \
+#     --skip-auth-route='^/app\.css$'
 # 环境变量：
 #   PANEL_PROXY_SECRET   和面板 DELIVERY_PROXY_SECRET 同一个值
 #
@@ -26,6 +30,14 @@
 #   api-route            /api/ 未登录回 401，前端能识别；不加会回 HTML 登录页
 #   skip-jwt-bearer-tokens  CLI（delivery login --iam）带 IAM 签发的 JWT 访问；按下面同一个 provider 校验、
 #                        注入同样的身份头。IAM 侧设置见 README「CLI 登录（公司 IAM 模式）」
+#   skip-auth-route      查看凭证的那几条路径**必须**绕过登录：凭证发给外部合作方，
+#                        他们没有公司 IAM 账号。不放行的话链接发得出去、点开被弹到 IAM
+#                        登录页（/api/pickup 命中 api-route 直接回 401 JSON），整条交付在
+#                        生产上不通 —— 而开发机和单测里看不出来。
+#                        这几条路径本身不泄露任何东西：密钥在链接的 # 之后，浏览器不会发给
+#                        服务端，密钥是 256 位随机数、服务端不存也解不开密文。
+#                        **注意这是命令行参数**，alpha 配置文件里没有对应字段。
+#                        改完用一个未登录的浏览器真开一次 /c/... 链接确认。
 
 upstreamConfig:
   upstreams:

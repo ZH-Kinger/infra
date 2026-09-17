@@ -16,13 +16,20 @@ from delivery import notify as n
 from delivery import people as people_mod
 from delivery import tickets as t
 
+from . import test_delivery_access_requests as base
 from .test_delivery_access_requests import (
-    CONFIG,
+    APPROVAL_JSON,
+    CRED,
     TEMPLATES,
     Harness,
     MemberExecutor,
     _roster,
 )
+
+#: 取件地址（DELIVERY_BASE_URL）是凭证的唯一出口：没配 flows 在提交那一刻就拒。
+#: 模块级设、跑完还原 —— 不用全局 autouse，否则「没配就该拒」那条路再也测不到。
+setUpModule = base.setUpModule
+tearDownModule = base.tearDownModule
 
 BASE = "https://panel.example.com"
 
@@ -67,7 +74,6 @@ class CardTests(unittest.TestCase):
     def test_each_event_has_colour_title_and_plain_text(self):
         colours = {
             "done": "green",
-            "claimable": "blue",
             "failed": "red",
             "rejected": "orange",
             "withdrawn": "grey",
@@ -289,13 +295,13 @@ class FlowNotifyTests(unittest.TestCase):
         h.flows._notify = h.rec
         return h
 
-    def test_done_claimable_rejected_withdrawn(self):
+    def test_done_rejected_withdrawn(self):
         h = self.harness()
         ticket = h.submit()
         self.assertEqual(h.rec.events(), [])  # 提交本身不通知（员工自己刚点的）
         h.approve(ticket)
         h.flows.sync(ticket["id"], force=True)
-        cred = h.submit(template="dev-sts", payload={"hours": 2})
+        cred = h.submit(template="dev-sts", payload=dict(CRED))
         h.approve(cred)
         h.flows.sync(cred["id"], force=True)
         rejected = h.submit(payload={"cloud_user": "lisi", "days": 7})
@@ -304,7 +310,13 @@ class FlowNotifyTests(unittest.TestCase):
         canceled = h.submit(payload={"cloud_user": "lisi", "days": 8})
         h.approve(canceled, "CANCELED")
         h.flows.sync(canceled["id"], force=True)
-        self.assertEqual(h.rec.events(), ["done", "claimable", "rejected", "withdrawn"])
+        # 凭证单和权限单一样走到「已完成」，不再有「可领取」这一档
+        self.assertEqual(h.rec.events(), ["done", "done", "rejected", "withdrawn"])
+        card = n.build_card("done", h.store.get(cred["id"]), base_url=BASE)
+        body = json.dumps(card, ensure_ascii=False)
+        self.assertIn("审批", body)  # 提示去审批里看凭证
+        self.assertNotIn("sts-secret", body)
+        self.assertNotIn("STS.AK1234", body)
 
     def test_failed_then_retry_done(self):
         h = self.harness()
@@ -454,9 +466,7 @@ class SweepNotifyTests(unittest.TestCase):
             json.dumps({"schema": people_mod.SCHEMA, "people": rows}), encoding="utf-8"
         )
         (ident / "templates.json").write_text(json.dumps(TEMPLATES), encoding="utf-8")
-        (ident / "approval.json").write_text(
-            json.dumps({"approval_code": CONFIG.approval_code, "widgets": dict(CONFIG.widgets)})
-        )
+        (ident / "approval.json").write_text(json.dumps(APPROVAL_JSON), encoding="utf-8")
         h.store = t.TicketStore(str(ident / "tickets.json"), clock=lambda: h.now[0])
         h.flows.store = h.store
         h.now[0] = time.time() - 8 * 86400  # 8 天前开通的 10 天权限：还剩 2 天

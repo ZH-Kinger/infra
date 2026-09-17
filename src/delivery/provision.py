@@ -21,13 +21,15 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
 import string
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
 
+from . import grants, platforms
 from .clouds import aliyun, volcano
 from .errors import DeliveryError
 
@@ -73,6 +75,48 @@ def exec_env_prefix(platform: str, account: str) -> str:
     return f"DELIVERY_EXEC_{platform.upper()}_{account}"
 
 
+def issuer_env_prefix(platform: str, account: str) -> str:
+    """凭证发放身份的环境变量前缀。
+
+    **和开通身份是两把不同的 AK，云上的策略也是分开收窄的**，这不是洁癖：
+    开通身份（panel-executor）被明确禁止建子账号、发 AccessKey、造策略，
+    就是为了面板逻辑出漏洞时炸不到真人账号；而长期凭证恰恰需要这三样。
+    共用一把 = 把那道闸拆了，面板任何一处越权都能直接造出一个带 AK 的子账号。
+    """
+    return f"DELIVERY_ISSUER_{platform.upper()}_{account}"
+
+
+def executor_configured(platform: str, account: str, environ: Optional[Mapping] = None) -> bool:
+    """这个云账号的执行身份配了没有。**只看环境变量在不在，不调云 API**。
+
+    给「申请」页用：没配的模板要提前置灰。否则员工能提交、能等到审批通过，
+    最后卡在开通那一步失败 —— 白等一轮，还留下一张要人工处理的失败单。
+    """
+    env = os.environ if environ is None else environ
+    names = platforms.cred_env_names(platform, exec_env_prefix(platform, account))
+    return all(env.get(n) for n in names)
+
+
+def issuer_configured(platform: str, account: str, environ: Optional[Mapping] = None) -> bool:
+    """凭证发放身份配了没有。同样只看环境变量，给凭证模板提前置灰用。"""
+    env = os.environ if environ is None else environ
+    names = platforms.cred_env_names(platform, issuer_env_prefix(platform, account))
+    return all(env.get(n) for n in names)
+
+
+@dataclass(frozen=True)
+class LongTermCredential:
+    """长期凭证。**secret 只在发放那一刻存在于内存里**，绝不落库、不进日志、不进通知。"""
+
+    user: str
+    policy: str
+    access_key_id: str
+    access_key_secret: str
+
+    def __repr__(self) -> str:  # 防止误打日志把 secret 带出去
+        return f"LongTermCredential(user={self.user!r}, ak=…{self.access_key_id[-4:]}, sk=<hidden>)"
+
+
 class AliyunExecutor:
     platform = "aliyun"
 
@@ -83,13 +127,14 @@ class AliyunExecutor:
         self._checked = False
 
     @classmethod
-    def from_env(cls, account: str, environ=None) -> AliyunExecutor:
+    def from_env(cls, account: str, environ=None, *, issuer: bool = False) -> AliyunExecutor:
         env = os.environ if environ is None else environ
-        prefix = exec_env_prefix("aliyun", account)
+        prefix = (issuer_env_prefix if issuer else exec_env_prefix)("aliyun", account)
         ak = env.get(f"{prefix}_ACCESS_KEY_ID", "")
         sk = env.get(f"{prefix}_ACCESS_KEY_SECRET", "")
         if not ak or not sk:
-            raise ProvisionError(f"没有配置阿里云 {account} 的执行身份（{prefix}_ACCESS_KEY_ID）")
+            what = "凭证发放身份" if issuer else "执行身份"
+            raise ProvisionError(f"没有配置阿里云 {account} 的{what}（{prefix}_ACCESS_KEY_ID）")
         return cls(account, aliyun.Credentials(ak, sk))
 
     def _call(self, api, action: str, params: dict) -> dict:
@@ -197,17 +242,111 @@ class AliyunExecutor:
             self._call(aliyun.RAM, "UpdateLoginProfile", params)
         return password
 
-    def assume_role(self, role_arn: str, name: str, hours: int) -> TempCredential:
+    # ── 长期凭证：建号 + 时间窗策略 + 长期 AK；到期删干净 ──────────────────
+    #
+    # 这些方法**只能用凭证发放身份（panel-issuer）调**，别用开通身份（panel-executor）：
+    # 云上那两把 AK 的策略是分开收窄的，executor 明确禁止建号/发 AK/造策略，
+    # 就是为了面板逻辑出漏洞时炸不到真人账号。
+
+    def issue_long_term(self, user: str, display_name: str, policy_doc: dict) -> LongTermCredential:
+        """建子账号 → 造带时间窗的自定义策略 → 挂上 → 发一对长期 AK。
+
+        顺序不能反：**AK 必须最后发**。先发 AK 再挂策略的话，中间那一刻存在一把
+        什么都能干不了、但已经交付出去的凭证；更糟的是挂策略失败时 AK 已经存在，
+        清理不及时就是一把裸奔的长期密钥。
+        """
         self._check_account()
-        body = self._call(
-            aliyun.STS,
-            "AssumeRole",
+        policy = grants.policy_name(user)
+        self.create_user(user, display_name)
+        self._call(
+            aliyun.RAM,
+            "CreatePolicy",
             {
-                "RoleArn": role_arn,
-                "RoleSessionName": session_name(name),
-                "DurationSeconds": str(hours * 3600),
+                "PolicyName": policy,
+                "PolicyDocument": json.dumps(policy_doc, separators=(",", ":")),
+                "Description": f"面板长期数据访问凭证 {user}",
             },
         )
+        self._call(
+            aliyun.RAM,
+            "AttachPolicyToUser",
+            {"UserName": user, "PolicyName": policy, "PolicyType": "Custom"},
+        )
+        body = self._call(aliyun.RAM, "CreateAccessKey", {"UserName": user})
+        ak = body.get("AccessKey") or {}
+        try:
+            return LongTermCredential(user, policy, ak["AccessKeyId"], ak["AccessKeySecret"])
+        except KeyError:
+            raise ProvisionError("CreateAccessKey 返回缺少凭证字段") from None
+
+    def revoke_long_term(self, user: str) -> list:
+        """到期清理：删 AK → 摘策略 → 删策略 → 删用户。返回没删掉的东西（供告警）。
+
+        顺序同样不能反：阿里云不允许删除仍挂在用户身上的策略，也不允许删除还有 AK 的用户。
+        每一步单独 try：**一处失败不能中断后面的**，否则一个已经手动删掉的策略会让
+        用户和 AK 永远留在云上——那正是我们要清理的东西。
+        """
+        self._check_account()
+        policy = grants.policy_name(user)
+        left = []
+
+        def step(label, fn):
+            try:
+                fn()
+            except aliyun.AliyunError as exc:
+                # 已经不存在 = 目标达成，不算失败
+                if "NotExist" not in exc.code:
+                    left.append(f"{label}：{exc.code}")
+
+        body = {}
+        try:
+            body = self._call(aliyun.RAM, "ListAccessKeys", {"UserName": user})
+        except aliyun.AliyunError as exc:
+            if "NotExist" not in exc.code:
+                left.append(f"列 AccessKey：{exc.code}")
+        for key in (body.get("AccessKeys") or {}).get("AccessKey") or []:
+            kid = key.get("AccessKeyId")
+            step(
+                f"删 AccessKey {str(kid)[-4:]}",
+                lambda kid=kid: self._call(
+                    aliyun.RAM, "DeleteAccessKey", {"UserName": user, "UserAccessKeyId": kid}
+                ),
+            )
+        step(
+            "摘策略",
+            lambda: self._call(
+                aliyun.RAM,
+                "DetachPolicyFromUser",
+                {"UserName": user, "PolicyName": policy, "PolicyType": "Custom"},
+            ),
+        )
+        step(
+            "删策略",
+            lambda: self._call(
+                aliyun.RAM, "DeletePolicy", {"PolicyName": policy, "PolicyType": "Custom"}
+            ),
+        )
+        step("删用户", lambda: self._call(aliyun.RAM, "DeleteUser", {"UserName": user}))
+        return left
+
+    def assume_role(
+        self, role_arn: str, name: str, hours: int, *, policy: Optional[dict] = None
+    ) -> TempCredential:
+        """扮演角色换一组临时凭证。
+
+        `policy` 是**会话策略**：最终权限是「角色策略 ∩ 会话策略」，只会更小不会更大。
+        凭证申请都带它——角色本身覆盖十来个桶，而一张单子只批了一个桶下的一个目录，
+        不收窄就等于把角色的全部范围发出去了。
+        """
+        self._check_account()
+        params = {
+            "RoleArn": role_arn,
+            "RoleSessionName": session_name(name),
+            "DurationSeconds": str(hours * 3600),
+        }
+        if policy is not None:
+            params["Policy"] = grants.session_policy(policy)
+        body = self._call(aliyun.STS, "AssumeRole", params)
         c = body.get("Credentials") or {}
         try:
             return TempCredential(
@@ -231,13 +370,14 @@ class VolcanoExecutor:
         self._checked = False
 
     @classmethod
-    def from_env(cls, account: str, environ=None) -> VolcanoExecutor:
+    def from_env(cls, account: str, environ=None, *, issuer: bool = False) -> VolcanoExecutor:
         env = os.environ if environ is None else environ
-        prefix = exec_env_prefix("volcano", account)
+        prefix = (issuer_env_prefix if issuer else exec_env_prefix)("volcano", account)
         ak = env.get(f"{prefix}_ACCESS_KEY", "")
         sk = env.get(f"{prefix}_SECRET_KEY", "")
         if not ak or not sk:
-            raise ProvisionError(f"没有配置火山 {account} 的执行身份（{prefix}_ACCESS_KEY）")
+            what = "凭证发放身份" if issuer else "执行身份"
+            raise ProvisionError(f"没有配置火山 {account} 的{what}（{prefix}_ACCESS_KEY）")
         return cls(account, volcano.Credentials(ak, sk))
 
     def _call(self, api, action: str, params: dict, **kw) -> dict:
@@ -377,7 +517,95 @@ class VolcanoExecutor:
             self._call(volcano.IAM, "UpdateLoginProfile", params)
         return password
 
-    def assume_role(self, role_trn: str, name: str, hours: int) -> TempCredential:
+    # ── 长期凭证：建号 + 时间窗策略 + 长期 AK；到期删干净 ──────────────────
+    #
+    # 与阿里那边同一套顺序和同一套理由（见 AliyunExecutor.issue_long_term），
+    # 只有三处火山方言：策略文档不带 Version、DeletePolicy 不收 PolicyType、
+    # 建 AK 必须显式传 UserName（不传会给**调用者自己**建一把 AK —— 那是主控 AK）。
+
+    def issue_long_term(self, user: str, display_name: str, policy_doc: dict) -> LongTermCredential:
+        """建子账号 → 造带时间窗的自定义策略 → 挂上 → 发一对长期 AK。**AK 必须最后发。**"""
+        self._check_account()
+        policy = grants.policy_name(user)
+        self.create_user(user, display_name)
+        self._call(
+            volcano.IAM,
+            "CreatePolicy",
+            {
+                "PolicyName": policy,
+                "PolicyDocument": json.dumps(policy_doc, separators=(",", ":")),
+                "Description": f"面板长期数据访问凭证 {user}"[:128],
+            },
+        )
+        self._call(
+            volcano.IAM,
+            "AttachUserPolicy",
+            {"UserName": user, "PolicyName": policy, "PolicyType": "Custom"},
+        )
+        # UserName 不是可选的：火山文档里它标「否」，但不传就是给调用者自己建 AK。
+        # 调用者是发放身份，那把 AK 能建号能发 AK —— 会把一把主控级密钥当成凭证发出去
+        body = self._call(volcano.IAM, "CreateAccessKey", {"UserName": user})
+        ak = body.get("AccessKey") or {}
+        try:
+            return LongTermCredential(user, policy, ak["AccessKeyId"], ak["SecretAccessKey"])
+        except KeyError:
+            raise ProvisionError("CreateAccessKey 返回缺少凭证字段") from None
+
+    def revoke_long_term(self, user: str) -> list:
+        """到期清理：删 AK → 摘策略 → 删策略 → 删用户。返回没删掉的东西（供告警）。
+
+        每一步单独 try：一处失败不能中断后面的，否则一个已经手动删掉的策略会让
+        用户和 AK 永远留在云上 —— 那正是我们要清理的东西。
+        """
+        self._check_account()
+        policy = grants.policy_name(user)
+        left = []
+
+        def step(label, fn):
+            try:
+                fn()
+            except volcano.VolcanoError as exc:
+                if "notexist" not in _volcano_code(exc):
+                    left.append(f"{label}：{exc}")
+
+        body = {}
+        try:
+            body = self._call(volcano.IAM, "ListAccessKeys", {"UserName": user})
+        except volcano.VolcanoError as exc:
+            if "notexist" not in _volcano_code(exc):
+                left.append(f"列 AccessKey：{exc}")
+        for key in body.get("AccessKeyMetadata") or []:
+            kid = key.get("AccessKeyId")
+            if not kid:
+                continue
+            step(
+                f"删 AccessKey {str(kid)[-4:]}",
+                lambda kid=kid: self._call(
+                    volcano.IAM, "DeleteAccessKey", {"UserName": user, "AccessKeyId": kid}
+                ),
+            )
+        step(
+            "摘策略",
+            lambda: self._call(
+                volcano.IAM,
+                "DetachUserPolicy",
+                {"UserName": user, "PolicyName": policy, "PolicyType": "Custom"},
+            ),
+        )
+        # 火山的 DeletePolicy 只收 PolicyName，没有 PolicyType（阿里要）
+        step("删策略", lambda: self._call(volcano.IAM, "DeletePolicy", {"PolicyName": policy}))
+        step("删用户", lambda: self._call(volcano.IAM, "DeleteUser", {"UserName": user}))
+        return left
+
+    def assume_role(
+        self, role_trn: str, name: str, hours: int, *, policy: Optional[dict] = None
+    ) -> TempCredential:
+        """火山 STS。**不接受会话策略**——火山的 AssumeRole 到底认不认 Policy 参数没有取证过，
+        静默忽略它就等于把整个角色的范围发出去，所以宁可在这里报错。
+        需要按桶按目录收窄的火山凭证一律走 issue_long_term（策略里写死时间窗和范围）。
+        """
+        if policy is not None:
+            raise ProvisionError("火山 STS 的会话策略还没有验证过，这类申请请走长期凭证")
         self._check_account()
         body = self._call(
             self.STS,
@@ -427,11 +655,12 @@ def _aliyun_policy_params(user: str, policy_type: str, policy: str) -> dict:
 Factory = Callable[[str, str], object]
 
 
-def executor_from_env(platform: str, account: str) -> object:
+def executor_from_env(platform: str, account: str, *, issuer: bool = False) -> object:
+    """开通身份（默认）或凭证发放身份（issuer=True）。两把 AK 的权限在云上是分开收窄的。"""
     if platform == "aliyun":
-        return AliyunExecutor.from_env(account)
+        return AliyunExecutor.from_env(account, issuer=issuer)
     if platform == "volcano":
-        return VolcanoExecutor.from_env(account)
+        return VolcanoExecutor.from_env(account, issuer=issuer)
     raise ProvisionError(f"不支持的平台 {platform}")
 
 

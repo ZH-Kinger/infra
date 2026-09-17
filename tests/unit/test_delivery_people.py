@@ -232,8 +232,10 @@ class ResolveTests(_TmpDir):
             ),
             encoding="utf-8",
         )
-        idx = parse(roster(row("张三", "zhangsan@wuji.tech", accounts=[ACC_A])),
-                    bindings_path=str(self.bindings))
+        idx = parse(
+            roster(row("张三", "zhangsan@wuji.tech", accounts=[ACC_A])),
+            bindings_path=str(self.bindings),
+        )
         before = self.bindings.read_text(encoding="utf-8")
         res = idx.resolve(union_id="on_me", enterprise_email="zhangsan@wuji.tech")
         self.assertEqual(res.binding, BIND_CONFLICT)
@@ -254,8 +256,10 @@ class ResolveTests(_TmpDir):
             ),
             encoding="utf-8",
         )
-        idx = parse(roster(row("张三", "zhangsan@wuji.tech", accounts=[ACC_A])),
-                    bindings_path=str(self.bindings))
+        idx = parse(
+            roster(row("张三", "zhangsan@wuji.tech", accounts=[ACC_A])),
+            bindings_path=str(self.bindings),
+        )
         res = idx.resolve(union_id="on_me", enterprise_email="zhangsan@wuji.tech")
         self.assertEqual(res.binding, BIND_NOW)
         data = json.loads(self.bindings.read_text(encoding="utf-8"))
@@ -487,10 +491,16 @@ class ParseTests(unittest.TestCase):
         与 N 的指纹一致，但邮箱不一致 → 不能套到 N 身上；on_P 登录判冲突。"""
         idx = parse(
             roster(
-                row("新人", "n@wuji.tech", accounts=[{"platform": "aliyun", "account": "1",
-                                                     "name": "p"}]),
-                row("彼得", "p@wuji.tech", accounts=[{"platform": "aliyun", "account": "1",
-                                                     "name": "p1"}]),
+                row(
+                    "新人",
+                    "n@wuji.tech",
+                    accounts=[{"platform": "aliyun", "account": "1", "name": "p"}],
+                ),
+                row(
+                    "彼得",
+                    "p@wuji.tech",
+                    accounts=[{"platform": "aliyun", "account": "1", "name": "p1"}],
+                ),
             ),
             bindings={
                 "schema": BINDINGS_SCHEMA,
@@ -506,13 +516,9 @@ class ParseTests(unittest.TestCase):
     def test_binding_not_applied_by_email_when_fingerprint_differs(self):
         bindings = {
             "schema": BINDINGS_SCHEMA,
-            "bindings": {
-                "on_b": {"accounts": ["aliyun/9/other"], "email": "zhangsan@wuji.tech"}
-            },
+            "bindings": {"on_b": {"accounts": ["aliyun/9/other"], "email": "zhangsan@wuji.tech"}},
         }
-        idx = parse(
-            roster(row("张三", "zhangsan@wuji.tech", accounts=[ACC_A])), bindings=bindings
-        )
+        idx = parse(roster(row("张三", "zhangsan@wuji.tech", accounts=[ACC_A])), bindings=bindings)
         self.assertEqual(idx.by_key("email:zhangsan@wuji.tech").union_id, "")
         self.assertEqual(len(idx.warnings), 1)
         self.assertIn("on_b", idx.warnings[0])  # 无 name 时用 union_id 指代
@@ -549,8 +555,9 @@ class ParseTests(unittest.TestCase):
         bindings = {"schema": BINDINGS_SCHEMA, "bindings": {"on_b": {"accounts": []}}}
         idx = parse(roster(row("无号", "n@wuji.tech")), bindings=bindings)
         self.assertEqual(idx.people[0].union_id, "")
-        self.assertEqual(idx.resolve(union_id="on_b", enterprise_email="n@wuji.tech").binding,
-                         BIND_CONFLICT)
+        self.assertEqual(
+            idx.resolve(union_id="on_b", enterprise_email="n@wuji.tech").binding, BIND_CONFLICT
+        )
 
     def test_bound_person_uses_bound_union_id_not_other_bindings(self):
         # 两条绑定、两个人，各按指纹对上自己
@@ -952,7 +959,6 @@ class BuildTests(unittest.TestCase):
         res = idx.resolve(union_id="on_2", enterprise_email="shared@wuji.tech")
         self.assertNotEqual(res.binding, BIND_NOW)
 
-
     def test_empty_domain_never_backfills(self):
         # 没有公司域就分不清企业邮箱和个人联系邮箱，宁可不回填
         out = build(
@@ -1212,8 +1218,10 @@ class ApplyManualTests(unittest.TestCase):
         roster_data = build(out, [DirectoryEntry("on_zs", "张三", "zhangsan@wuji.tech")])
         idx = parse(roster_data)
         zs = idx.by_key("on_zs")
-        self.assertIn(("volcano", "2000000001", "SanZhang"),
-                      [(a.platform, a.account, a.name) for a in zs.accounts])
+        self.assertIn(
+            ("volcano", "2000000001", "SanZhang"),
+            [(a.platform, a.account, a.name) for a in zs.accounts],
+        )
         self.assertNotIn("SanZhang", [u.name for u in idx.unlinked])
 
 
@@ -1228,15 +1236,13 @@ class BindingHoleTests(unittest.TestCase):
         acc_x = {"platform": "volcano", "account": "2000000009", "name": "Peter"}
         people.write_text(json.dumps(roster(row("彼得", "p@wuji.tech", accounts=[ACC_A]))))
         first = load(str(people), bindings_path=str(bindings))
-        self.assertEqual(first.resolve(union_id="on_P", enterprise_email="p@wuji.tech").binding,
-                         BIND_NOW)
-        people.write_text(
-            json.dumps(roster(row("彼得", "p@wuji.tech", accounts=[ACC_A, acc_x])))
+        self.assertEqual(
+            first.resolve(union_id="on_P", enterprise_email="p@wuji.tech").binding, BIND_NOW
         )
+        people.write_text(json.dumps(roster(row("彼得", "p@wuji.tech", accounts=[ACC_A, acc_x]))))
         idx = load(str(people), bindings_path=str(bindings))
         res = idx.resolve(union_id="on_Q", enterprise_email="p@wuji.tech")
         self.assertNotEqual(res.binding, BIND_NOW)
-
 
     def test_case_only_username_change_still_blocks_other_identity(self):
         """已知缺口：_demote_shared_accounts（people.py:411）按用户名小写比对，但

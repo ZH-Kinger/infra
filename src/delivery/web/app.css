@@ -267,6 +267,8 @@ dialog.drawer::backdrop{background:rgba(0,0,0,.28)}
 .drawer-tip{margin:0; font-size:.75rem; text-align:right}
 .inline{display:flex; gap:.5rem; align-items:center; flex-wrap:wrap}
 .inline .input{width:7rem}
+/* 日期框 7rem 装不下 yyyy/mm/dd 加日历图标，浏览器会把「日」那段截掉 */
+.inline input[type=date]{width:auto; min-width:10.5rem}
 .presets{display:flex; gap:.35rem; flex-wrap:wrap}
 select.input,input.input{height:2.625rem}
 
@@ -487,3 +489,16 @@ dl.kv dd{margin:0; display:flex; gap:.5rem; align-items:center; min-width:0}
 @media (prefers-reduced-motion:reduce){
   *{transition:none!important; animation:none!important}
 }
+
+/* 「怎么用起来」页 */
+.opt-notes{margin:.5rem 0 0; padding-left:1.1rem; color:var(--ink-2); font-size:.8125rem; line-height:1.6}
+.opt-notes li{margin:.15rem 0}
+.snippet-body{margin:.35rem 0 .6rem; padding:.6rem .75rem; border-radius:8px; background:var(--surface-2);
+  border:1px solid var(--hair); font-size:.8125rem; line-height:1.5; overflow-x:auto; white-space:pre}
+
+/* 查看凭证页。CSP 是 style-src 'self'（没有 unsafe-inline）—— 内联 style= 会被浏览器
+   直接丢掉，样式静默失效。这一页是外部合作方唯一会看到的界面，别在那边写内联样式 */
+.pad-body{padding:.8rem 1.25rem 0}
+.pad-block{margin:.8rem 1.25rem}
+.pad-notes{margin:0 1.25rem 1rem}
+.pad-foot{padding:0 1.25rem 2rem}

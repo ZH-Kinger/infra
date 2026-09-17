@@ -9,16 +9,13 @@
                                              权限列表：全部权限策略，标出已有 / 申请中 / 不开放
   delivery request grant --account 平台/ID --policy 策略名 [--policy ...] --days N --reason ...
                                              按策略申请权限（以你的名义发起飞书审批）
-  delivery creds <申请单号> [--format env|json] [--hours N]
-                                             领取临时凭证。env 格式可以直接 eval，
-                                             官方 aliyun / ve CLI 和 SDK 都认这些环境变量
-
   delivery requests sweep                    服务端定时任务：同步审批、到期回收权限、过期凭证
   delivery policies collect                  服务端：采集两家云的权限策略目录（只读）
   delivery approval widgets --code <审批定义编号>
                                              管理员配置飞书审批表单时查控件 ID
 
-凭证只打印到标准输出，不写本地文件；提示信息走标准错误，`eval "$(delivery creds ...)"` 不会混进去。
+访问凭证**不在这里领**：审批通过后由服务端直接发放，凭证作为飞书审批的评论下发。
+面板和 CLI 都不保存 secret，这是刻意的 —— 页面会被截图转发，审批实例只有申请人和审批人看得到。
 """
 
 from __future__ import annotations
@@ -26,7 +23,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shlex
 import sys
 import urllib.error
 import urllib.parse
@@ -207,16 +203,9 @@ def add_parsers(commands) -> None:
         p = sub.add_parser(name, help=help_text)
         p.add_argument("id", help="申请单号")
 
-    creds = commands.add_parser("creds", help="领取已批准的临时访问凭证")
-    creds.add_argument("id", help="访问凭证申请的申请单号")
-    creds.add_argument("--format", choices=("env", "json"), default="env")
-    creds.add_argument(
-        "--hours", type=int, default=None, help="这次要多长时间（不超过申请时的时长）"
-    )
-
     reqs = commands.add_parser("requests", help="服务端维护：同步审批、到期回收")
     rsub = reqs.add_subparsers(dest="requests_command", required=True)
-    sweep = rsub.add_parser("sweep", help="定时任务：同步待审批、回收到期权限、标记过期凭证")
+    sweep = rsub.add_parser("sweep", help="定时任务：同步待审批、回收到期的权限和凭证")
     sweep.add_argument("--tickets", default="identity/tickets.json")
     sweep.add_argument("--templates", default="identity/request-templates.json")
     sweep.add_argument("--approval", default="identity/approval.json")
@@ -256,8 +245,6 @@ def dispatch(args: argparse.Namespace):
     """返回退出码；不是本模块的命令返回 None。"""
     if args.command == "request":
         return _request(args)
-    if args.command == "creds":
-        return _creds(args)
     if args.command == "requests":
         return _sweep(args)
     if args.command == "approval":
@@ -323,49 +310,19 @@ def _request(args) -> int:
         print(f"{r['id']}  {r['status_label']}  {r['kind_label']} · {r['template']['title']}")
         print(f"  内容：{r['summary']}")
         print(f"  理由：{r['reason']}")
-        if r.get("valid_until"):
-            print(f"  领取截止：{r['valid_until']}")
         if r.get("expires_at"):
             print(f"  权限到期：{r['expires_at']}")
         for e in r.get("events", []):
             note = f"  {e['note']}" if e.get("note") and e["note"] != e["label"] else ""
             print(f"  · {e['at']}  {e['label']}（{e['actor']}）{note}")
-        if r["actions"].get("credential"):
-            print(f'\n  领取凭证： eval "$(delivery creds {r["id"]})"')
+        if r.get("kind") == "credential" and r.get("status") == "done":
+            print("\n  凭证已发到对应飞书审批的评论里，面板和 CLI 都不保存。")
         return 0
     if cmd == "withdraw":
         r = client.request("POST", path + "/withdraw")["request"]
         print(f"{r['id']}：{r['status_label']}")
         return 0
     raise DeliveryError(f"未知子命令 {cmd}")
-
-
-def _creds(args) -> int:
-    client = PanelClient.from_session()
-    body = {"hours": args.hours} if args.hours is not None else {}
-    data = client.request(
-        "POST", f"/api/requests/{urllib.parse.quote(args.id, safe='')}/credential", body
-    )
-    c = data["credential"]
-    print(f"# 临时凭证 {c['platform']}/{c['account']}，{c['expiration']} 失效", file=sys.stderr)
-    if args.format == "json":
-        print(json.dumps(c, ensure_ascii=False))
-        return 0
-    if c["platform"] == "volcano":
-        pairs = {
-            "VOLCENGINE_ACCESS_KEY": c["access_key_id"],
-            "VOLCENGINE_SECRET_KEY": c["access_key_secret"],
-            "VOLCENGINE_SESSION_TOKEN": c["security_token"],
-        }
-    else:
-        pairs = {
-            "ALIBABA_CLOUD_ACCESS_KEY_ID": c["access_key_id"],
-            "ALIBABA_CLOUD_ACCESS_KEY_SECRET": c["access_key_secret"],
-            "ALIBABA_CLOUD_SECURITY_TOKEN": c["security_token"],
-        }
-    for key, value in pairs.items():
-        print(f"export {key}={shlex.quote(value)}")
-    return 0
 
 
 def _sweep(args) -> int:
@@ -378,8 +335,8 @@ def _sweep(args) -> int:
     from .cli import _require_identity_dir
     from .flows import Flows
     from .identity.directory import tenant_token
-    from .provision import executor_from_env
-    from .tickets import CLAIMABLE, PENDING, TicketStore
+    from .provision import executor_configured, executor_from_env, issuer_configured
+    from .tickets import PENDING, TicketStore
 
     # 申请单、名册、人工记录都含员工信息：路径必须在 gitignored 的 identity/ 下
     policies_path = getattr(args, "policies", "identity/policies.json")
@@ -418,14 +375,21 @@ def _sweep(args) -> int:
         approval=lambda: approval,
         roster=lambda: people_mod.load(args.people, bindings_path=bindings),
         executor=executor_from_env,
+        # 发放身份必须显式接上。不接的话 _sign_credential 会回落成开通身份 ——
+        # 而开通身份在云上没有 CreatePolicy/CreateAccessKey/DeleteUser：
+        # 子账号建得出来、策略建不上，清理和到期回收也全失败，留一地孤儿 AK。
+        # sweep 是无人值守的那条路，这里回落没人会看见。
+        issuer=lambda platform, account: executor_from_env(platform, account, issuer=True),
         add_manual_link=link,
         policy_snapshot=lambda: policies_mod.load(policies_path),
         policy_rules=lambda: policies_mod.load_rules(rules_path),
         notify=notify,
+        executor_ready=executor_configured,
+        issuer_ready=issuer_configured,
     )
     # 每一步、每张单子都隔离：一张单子出错不能挡住后面的到期回收
     for ticket in flows.store.all():
-        if ticket.get("status") not in (PENDING, CLAIMABLE):
+        if ticket.get("status") != PENDING:
             continue
         try:
             after = flows.sync(ticket["id"], force=True)

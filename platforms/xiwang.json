@@ -1,0 +1,36 @@
+{
+  "id": "xiwang",
+  "display": "曦望",
+  "short": "曦望",
+  "console_url": "",
+  "accounts": [
+    "default"
+  ],
+  "capabilities": {
+    "auth": "static-secret",
+    "iac": "none",
+    "plan": "none",
+    "inventory": "manual",
+    "login": "password",
+    "apply": false,
+    "policy_as_code": false,
+    "require_approval": true,
+    "status": "verified"
+  },
+  "sso_enabled": false,
+  "scopes": {
+    "foundation": {
+      "apply": false,
+      "require_approval": true
+    }
+  },
+  "adapter": {
+    "kind": "none"
+  },
+  "notes": [
+    "有自己的控制台，每人一个账号，用账号密码登录。",
+    "接不了飞书身份系统，也没有 CLI 和可调的接口 —— 面板只做账号登记和引导，不代登录、不盘点。",
+    "apply 恒为 false：没有可信预览就不做变更。"
+  ],
+  "_console": "控制台地址待填：面板只做登记和引导，不代登录。填上之后「怎么用」页会出现直达按钮。"
+}

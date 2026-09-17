@@ -15,11 +15,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Mapping, Optional
 
+from . import catalog as catalog_mod
+from . import flows as flows_mod
+from . import platforms, sealed
 from . import tickets as t
 from .approval import ApprovalConfig
 from .errors import DeliveryError
 from .notify import ENV_BASE_URL, ENV_NOTIFY, safe_base_url
-from .provision import exec_env_prefix
+from .provision import exec_env_prefix, issuer_env_prefix
 
 OK, WARN, CRIT, OFF = "ok", "warn", "crit", "off"
 #: 快照超过这么久算过期（定时任务每天跑，两天没更新说明任务停了）
@@ -256,17 +259,34 @@ def collect(
 
     checks.append(_safe("数据", "云资产", assets))
 
-    # ── 执行身份（只看环境变量是否存在）───────────────────────────────────
+    # ── 执行身份与发放身份（只看环境变量是否存在，不调云）─────────────────
+    #
+    # 两把是分开的：开通身份在云上被**故意**禁掉建号/发 AK/造策略，而长期访问凭证
+    # 恰恰需要这三样。只体检开通身份的话，一个只发长期凭证的模板可以一路显示正常，
+    # 却在开通那一刻才失败。
+    # 模板目录读不了时按空集算：体检页本来就有专门一项报模板的问题，
+    # 不该因为同一个原因让整页打不开
+    # 哪些云账号**必须**有发放身份：模板没配角色（只能走长期凭证）→ 缺了就完全发不出，
+    # 算 crit；配了角色但允许超过 12 小时 → 短的能发、长的会失败，算 warn。
+    # 不分级的话，一个只发 12 小时以内凭证的正常平台会被报成严重故障。
+    needs_issuer: dict = {}
+    #: 有没有凭证模板。「查看地址」和「加密」两项对**所有**凭证都必需（STS 也要），
+    #: 挂在 needs_issuer 下面是错的：一个配了角色、max_hours=12 的部署那张表是空的
+    has_credential = False
+    try:
+        for tpl in backend.catalog().of_kind("credential"):
+            has_credential = True
+            key = (tpl.platform, tpl.account)
+            if not tpl.role_arn:
+                needs_issuer[key] = CRIT
+            elif tpl.max_hours > catalog_mod.STS_MAX_HOURS:
+                needs_issuer.setdefault(key, WARN)
+    except Exception:  # noqa: BLE001 — 体检页任何一项都不能让整页挂掉
+        needs_issuer = {}
     for platform, account in sorted(a for a in accounts if a[0] and a[1]):
+        title = f"{platforms.name_of(platform)} {account}"
         prefix = exec_env_prefix(platform, account)
-        names = (
-            (f"{prefix}_ACCESS_KEY_ID", f"{prefix}_ACCESS_KEY_SECRET")
-            if platform == "aliyun"
-            else (f"{prefix}_ACCESS_KEY", f"{prefix}_SECRET_KEY")
-        )
-        present = [bool(env.get(n)) for n in names]
-        title = f"{'阿里云' if platform == 'aliyun' else '火山引擎'} {account}"
-        if all(present):
+        if all(env.get(n) for n in platforms.cred_env_names(platform, prefix)):
             checks.append(Check("执行身份", title, OK, "已配置（开通前会核对凭证属于这个云账号）"))
         else:
             checks.append(
@@ -279,6 +299,60 @@ def collect(
                     f"配置 {prefix}_*",
                 )
             )
+        level = needs_issuer.get((platform, account))
+        if level is None:
+            continue
+        prefix = issuer_env_prefix(platform, account)
+        if all(env.get(n) for n in platforms.cred_env_names(platform, prefix)):
+            checks.append(
+                Check("发放身份", title, OK, "已配置（只能动 tempak-* 子账号和它的策略）")
+            )
+        else:
+            checks.append(
+                Check(
+                    "发放身份",
+                    title,
+                    level,
+                    "没有配置：这个云账号的长期访问凭证发不出去"
+                    + (
+                        "" if level == CRIT else f"（{catalog_mod.STS_MAX_HOURS} 小时以内的仍可发）"
+                    ),
+                    f"建一把只能动 tempak-* 的身份，配置 {prefix}_*",
+                )
+            )
+
+    # ── 凭证交付 ──────────────────────────────────────────────────────────
+    # 这两项任何一项缺了，访问凭证类申请就会在审批通过那一刻失败。放在这里是因为
+    # 它们和云账号无关、装完就不会再变，而缺的时候症状（「申请提交被拒」）很难指回原因
+    if has_credential:
+        try:
+            flows_mod.view_base(env)
+        except DeliveryError as exc:
+            checks.append(
+                Check(
+                    "凭证交付",
+                    "查看地址",
+                    CRIT,
+                    f"{exc}：访问凭证一律不受理",
+                    f"把 {ENV_BASE_URL} 配成面板的对外 https 地址",
+                )
+            )
+        else:
+            checks.append(Check("凭证交付", "查看地址", OK, "已配置面板对外地址"))
+        try:
+            sealed.selfcheck()
+        except Exception as exc:  # noqa: BLE001 — 体检页任何一项都不能让整页挂掉
+            checks.append(
+                Check(
+                    "凭证交付",
+                    "加密",
+                    CRIT,
+                    f"加密不可用：访问凭证一律不受理（{exc}）",
+                    "在面板的运行环境里装 cryptography",
+                )
+            )
+        else:
+            checks.append(Check("凭证交付", "加密", OK, "AES-256-GCM 自检通过"))
 
     # ── 通知 ──────────────────────────────────────────────────────────────
     if env.get(ENV_NOTIFY) != "1":

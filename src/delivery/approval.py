@@ -84,6 +84,10 @@ class ApprovalConfig:
     instance_url_mobile: str = ""
     #: 默认要求至少有一位**不是申请人**的审批人点了通过；审批定义里只有申请人自己或自动通过时不开通
     allow_self_approval: bool = False
+    #: 发凭证评论用的身份。飞书审批的评论接口 `user_id` 是必填的、**没有"以应用名义发"的选项**，
+    #: 所以凭证评论必然挂在某个自然人名下。这个 open_id 必须是**面板这个飞书应用下的**——
+    #: open_id 按应用隔离，拿别的应用的 open_id 过来会回 `open_id cross app`。
+    comment_open_id: str = ""
 
     @classmethod
     def load(cls, path: Optional[str]) -> Optional[ApprovalConfig]:
@@ -112,10 +116,14 @@ class ApprovalConfig:
         self_ok = data.get("allow_self_approval", False)
         if not isinstance(self_ok, bool):
             raise ApprovalError("审批配置的 allow_self_approval 必须是 true / false")
+        commenter = data.get("comment_open_id", "")
+        if not isinstance(commenter, str) or (commenter and not commenter.startswith("ou_")):
+            raise ApprovalError("审批配置的 comment_open_id 必须是 ou_ 开头的 open_id")
         return cls(
             approval_code=code.strip(),
             widgets=dict(widgets),
             allow_self_approval=self_ok,
+            comment_open_id=commenter.strip(),
             **urls,
         )
 
@@ -286,6 +294,30 @@ class FeishuApproval:
                 "审批没有经过申请人以外的审批人同意（只有本人或自动通过），拒绝开通。"
                 "请检查飞书审批定义的审批人设置"
             )
+
+    def comment(self, instance_code: str, text: str) -> None:
+        """把凭证贴到审批实例的评论里。**这是凭证的唯一出口**。
+
+        为什么不回写面板：secret 一旦进了面板的工单或日志，就多一处要防守的地方，而审批实例
+        本身已经是这次发放的权威记录——谁申请、谁批准、发了什么，在同一个地方对齐。面板侧
+        只留 AccessKeyId，**绝不存 secret**。
+
+        代价（明知故选）：评论对所有能看到这张审批单的人可见，包括审批人和抄送人。
+        """
+        if not self.config.comment_open_id:
+            raise ApprovalError(
+                "没有配置 comment_open_id，凭证发不出去。在 identity/approval.json 里填一个"
+                "本应用下的 open_id（飞书审批的评论必须挂在某个人名下，没有以应用名义发的选项）"
+            )
+        url = (
+            f"{API}/approval/v4/instances/{urllib.parse.quote(instance_code, safe='')}"
+            "/comments?user_id_type=open_id&user_id="
+            f"{urllib.parse.quote(self.config.comment_open_id, safe='')}"
+        )
+        # content 不是纯文本：飞书要的是 `{"text": "..."}` **序列化后的 JSON 字符串**。
+        # 直接传纯文本回 60001 content invalid，传字典回 9499 Invalid parameter type。
+        body = {"content": json.dumps({"text": text}, ensure_ascii=False)}
+        _data(self._send("POST", url, self._token(), body), "发送凭证评论")
 
     def widgets(self, approval_code: str) -> list:
         """管理员配置用：列出审批定义里的表单控件（id、类型、名称）。"""
