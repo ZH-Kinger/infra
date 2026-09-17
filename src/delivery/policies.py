@@ -26,9 +26,13 @@ identity/policy-rules.example.json）。内置的禁用清单挡住提权、身�
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import fnmatch
 import json
+import os
 import re
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -225,6 +229,125 @@ def load_rules(path: Optional[str]) -> Rules:
     except (OSError, json.JSONDecodeError) as exc:
         raise PolicyError(f"读不了策略规则：{type(exc).__name__}") from exc
     return parse_rules(data)
+
+
+def rules_view(rules: Rules) -> dict:
+    """规则的可编辑视图。**内置禁用（DEFAULT_DENY / DEFAULT_DENY_FAMILIES）单列出来且不可改** ——
+    它们是代码里的地板，规则文件只能在其上追加，不能往下挖。"""
+    return {
+        # deny 是**合并后**的（内置在前、文件在后）。前端要判断「这条策略改不改得动」，
+        # 得知道它是文件写的还是代码里的地板 —— 所以 file_deny 单独给一份
+        "deny": list(rules.deny),
+        "file_deny": [n for n in rules.deny if n not in DEFAULT_DENY],
+        "deny_families": list(DEFAULT_DENY_FAMILIES),
+        "allow": list(rules.allow),
+        "risk": dict(rules.risk),
+        "max_days": dict(rules.max_days),
+        "allow_custom": bool(rules.allow_custom),
+        "max_per_request": int(rules.max_per_request),
+        "builtin_deny": list(DEFAULT_DENY),
+        "builtin_deny_families": list(DEFAULT_DENY_FAMILIES),
+    }
+
+
+#: 平台自己那几把身份用的策略名。放开它们等于让员工申请到平台的管理权限，
+#: 所以**不接受**通过接口写进 allow —— 真要放开只能上服务器改文件，那是一道人肉门槛。
+SELF_POLICY = ("wuji-panel-*", "wuji-oss-auto-*", "temp-ak-auto-*")
+
+
+def write_rules(path: str, data: Mapping, *, actor: str) -> tuple:
+    """把规则写回文件。
+
+    返回 `(生效后的规则, 本次放开的内置禁用项)`。第二项非空时调用方应当发告警。
+
+    三道闸，缺一不可：
+      · **先 parse_rules 验一遍**，验不过直接抛、不落盘 —— 规则文件写坏会让整个权限列表
+        加载失败，而那时员工看到的是「权限列表打不开」，没人知道是谁在什么时候写坏的
+      · `allow` 里不许出现平台自己的策略（见 SELF_POLICY）
+      · `allow_custom` 只认文件里原有的值，接口改不了它 —— 那个开关等于「自定义策略全放开」，
+        而执行身份、发放身份的策略都是自定义策略
+    """
+    # 先确认它是个对象再 dict() —— 传 `[]` / `"x"` 进来时 dict() 抛的是 ValueError/TypeError，
+    # 而 HTTP 层只接 DeliveryError，那会变成 500 断连而不是一句「格式不对」
+    if not isinstance(data, Mapping):
+        raise PolicyError("策略规则必须是对象")
+    parsed = parse_rules(dict(data))
+    bad = [n for n in parsed.allow if _glob(n, SELF_POLICY)]
+    if bad:
+        raise PolicyError(f"不能放开平台自己的策略：{'、'.join(bad)}")
+    file = Path(path)
+    file.parent.mkdir(parents=True, exist_ok=True)
+    lock = file.with_suffix(".lock")
+    fd = os.open(lock, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        current = load_rules(path) if file.exists() else Rules()
+        before_allow = set(current.allow)
+        # **只写文件自己那部分的 deny**。parse_rules 会把 DEFAULT_DENY 前置进来，
+        # 原样写回去的话每存一次内置项就翻一倍（自验时 21 条变成 42 条）
+        extra_deny = [n for n in parsed.deny if n not in DEFAULT_DENY]
+        body = {
+            "schema": RULES_SCHEMA,
+            "deny": extra_deny,
+            "allow": list(parsed.allow),
+            "risk": dict(parsed.risk),
+            "max_days": dict(parsed.max_days),
+            # 刻意用**文件里原有的值**，不接受接口传进来的
+            "allow_custom": bool(current.allow_custom),
+            "max_per_request": int(parsed.max_per_request),
+        }
+        # 再验一次真正要落盘的那份：上面拼的时候可能引入了新问题
+        out = parse_rules(body)
+        # 放开一条**内置禁用**的策略：以前这要 SSH 到服务器改文件，现在一个管理员会话就够了。
+        # 台账记了，但那是事后追溯 —— 单独标出来，让调用方能当场发告警
+        opened = [
+            n
+            for n in set(out.allow) - set(before_allow)
+            if _glob(n, DEFAULT_DENY) or _glob(n, DEFAULT_DENY_FAMILIES)
+        ]
+        fd2, tmp = tempfile.mkstemp(prefix=f".{file.name}.", suffix=".tmp", dir=file.parent)
+        try:
+            os.write(fd2, (json.dumps(body, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd2)
+        Path(tmp).chmod(0o600)
+        Path(tmp).replace(file)
+        _log_rules(file, actor, current, out)
+        return out, sorted(opened)
+    finally:
+        os.close(fd)
+
+
+def _log_rules(file: Path, actor: str, before: Rules, after: Rules) -> None:
+    """改了什么、谁改的，追加一行。台账在规则旁边，不进 git（identity/ 已整个忽略）。"""
+    diff = {
+        "deny_added": sorted(set(after.deny) - set(before.deny)),
+        "deny_removed": sorted(set(before.deny) - set(after.deny)),
+        "allow_added": sorted(set(after.allow) - set(before.allow)),
+        "allow_removed": sorted(set(before.allow) - set(after.allow)),
+    }
+    if after.max_days != before.max_days:
+        diff["max_days"] = {"before": dict(before.max_days), "after": dict(after.max_days)}
+    if after.risk != before.risk:
+        # 只记改了哪些策略的风险等级，不记全表
+        both = set(before.risk) & set(after.risk)
+        keys = sorted(
+            (set(before.risk) ^ set(after.risk))
+            | {k for k in both if before.risk[k] != after.risk[k]}
+        )
+        diff["risk_changed"] = {k: after.risk.get(k, "（删除）") for k in keys}
+    if not any(diff.values()):
+        return
+    line = {
+        "at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "actor": actor,
+        **{k: v for k, v in diff.items() if v},
+    }
+    with contextlib.suppress(OSError):
+        log = file.with_name("policy-rules.log")
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(line, ensure_ascii=False) + "\n")
+        log.chmod(0o600)
 
 
 # ── 采集 ─────────────────────────────────────────────────────────────────

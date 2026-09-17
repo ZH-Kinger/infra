@@ -50,9 +50,9 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import access as access_mod
+from . import alerts, iam_sync, inventory
 from . import assets as assets_mod
 from . import health as health_mod
-from . import iam_sync, inventory
 from . import notify as notify_mod
 from . import people as people_mod
 from . import policies as policies_mod
@@ -109,6 +109,64 @@ def _sha256(item: Path) -> str:
         _digests.clear()
     _digests[key] = digest.hexdigest()
     return _digests[key]
+
+
+def _alert_rules_opened(user, opened: list) -> None:
+    """有人放开了内置禁用的策略 —— 发到管理员告警群。
+
+    以前放开这类策略要 SSH 到服务器改文件（两种能力：服务器访问 + 审批），
+    现在一个管理员会话就够了。审批那道门还在（员工申请到它仍要人批），
+    但「谁在什么时候把护栏拆了一格」这件事必须当场有人看见。
+    """
+    conf = alerts.from_env(os.environ)
+    if conf is None:
+        print(f"[rules] 放开了内置禁用项 {opened}，但没配告警地址", file=sys.stderr)
+        return
+    who = getattr(user, "name", "") or getattr(user, "union_id", "")
+    text = (
+        f"【云权限面板】{who} 放开了默认不开放的权限策略：{'、'.join(opened)}\n"
+        f"员工现在可以在权限列表里申请它们（仍需飞书审批）。"
+        f"如果不是预期的改动，去管理后台「权限规则」页收回。"
+    )
+    try:
+        alerts.send_feishu(text, webhook=conf[0], secret=conf[1])
+    except Exception as exc:  # noqa: BLE001 — 告警发不出去不能影响已经落盘的规则
+        print(f"[rules] 告警发送失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+
+
+def _owned_by(backend, email: str) -> dict:
+    """指给这个人的资源，按 (平台, 云账号) 分好。
+
+    资产快照可能没采、归属表可能还没建 —— 那是正常的初始状态，返回空表就好，
+    绝不能让「资产没配」把首页整个弄挂。
+
+    但**「文件坏了」不在此列**：那时返回空表的表现是「指派过的资源全都不见了」，
+    和「还没指派过」一模一样，没人会发现。坏文件一律往上抛，让页面明确报错。
+    """
+    me = str(email or "").strip().lower()
+    if not me:
+        return {}
+    owners = backend.asset_owners()
+    snap = backend.assets()
+    if not owners or not snap:
+        return {}
+    out: dict = {}
+    for acc in snap.get("accounts") or []:
+        key = (str(acc.get("platform") or ""), str(acc.get("account") or ""))
+        for r in acc.get("resources") or []:
+            own = owners.get(f"{key[0]}/{key[1]}/{r.get('id', '')}") or {}
+            if str(own.get("email") or "").lower() != me:
+                continue
+            out.setdefault(key, []).append(
+                {
+                    "id": r.get("id", ""),
+                    "name": r.get("name", ""),
+                    "type_label": assets_mod.type_label(r.get("type", "")),
+                    "region": r.get("region", ""),
+                    "note": str(own.get("note") or ""),
+                }
+            )
+    return out
 
 
 def _downloads(directory: Optional[str]) -> list:
@@ -581,6 +639,8 @@ _CSP = (
 )
 _ADMIN_PEOPLE = "/api/admin/people/"
 _ADMIN_REVIEW = "/api/admin/review"
+_ADMIN_ASSET_OWNER = "/api/admin/assets/owner"
+_ADMIN_POLICY_RULES = "/api/admin/policies/rules"
 _ADMIN_IAM = "/api/admin/iam-attributes"
 _ADMIN_IAM_FILE = "/api/admin/iam-attributes/file"
 
@@ -597,6 +657,10 @@ def _approval_ready(backend) -> Optional[bool]:
 
 
 def _is_requests_path(path: str) -> bool:
+    # 规则的读写不是申请单接口，尽管它以 /api/admin/policies/ 开头。
+    # 不先排掉的话它会被 _requests 接走，然后因为「没配申请单存储路径」回 503
+    if path == _ADMIN_POLICY_RULES:
+        return False
     return any(
         path == p or path.startswith(p + "/")
         for p in ("/api/requests", "/api/admin/requests", "/api/policies", "/api/admin/policies")
@@ -727,6 +791,18 @@ class Backend:
             return Labels(self.platforms, accounts)
 
         return self._cached("labels", self._stamp(self.labels_path), build)
+
+    @property
+    def asset_owners_path(self) -> Optional[str]:
+        """资源归属表。和资产快照同目录 —— 它们是同一件事的两半：快照说有什么，这张表说是谁的。"""
+        if not self.assets_path:
+            return None
+        return str(Path(self.assets_path).with_name("asset-owners.json"))
+
+    def asset_owners(self) -> dict:
+        """归属表。**读坏了就抛**，不降级成空表 —— 空表的表现是「指派过的全都显示未指定」，
+        而那正是「表坏了」和「还没指派过」分不出来的那种失败。和本类其余数据同一个原则。"""
+        return assets_mod.load_owners(self.asset_owners_path)
 
     def assets(self):
         return self._cached(
@@ -1122,6 +1198,14 @@ def make_handler(
                         "union_id": user.union_id,
                     },
                 )
+                # 名下资源：管理员在资产页逐个指派的那些。放进账号卡片是因为「我在这个云账号里
+                # 有哪台机器」和「我在这个云账号里有什么权限」是同一个问题的两半，
+                # 分在两页看，人就得自己在脑子里拼
+                # 同上：按名册邮箱匹配。found.person 是本 handler 已经解析好的那个人
+                # 同上：只认名册邮箱，不回落会话邮箱
+                mine_res = _owned_by(backend, found.person.email if found.person else "")
+                for card in detail.get("accounts") or []:
+                    card["resources"] = mine_res.get((card["platform"], card["account"]), [])
                 if backend.role(user) != ROLE_ADMIN:
                     # 采集错误原文可能带接口返回片段；普通用户只需要知道「哪个账号没采全」
                     detail["snapshot_incomplete"] = [
@@ -1255,12 +1339,34 @@ def make_handler(
                     return None
                 labels = backend.labels()
                 scopes = None
+                mail = session.user.email
                 if not admin:
                     person = backend.people().resolve(union_id=session.user.union_id).person
                     scopes = {(r.platform, r.account) for r in (person.accounts if person else ())}
+                    # **只认名册邮箱，取不到就当没有**。会话邮箱在代理（公司 IAM）登录下压根没有，
+                    # 飞书登录下可能退化成私人联系邮箱 —— 而企业邮箱是会被回收给新同事的
+                    # （people.py 里那条「邮箱对应的账号已绑到另一个飞书身份」就是为它写的）。
+                    # 回落到会话邮箱换不来任何可用性：名册里没邮箱的人本来也没法被指派资源
+                    mail = person.email if person else ""
                 return self._json(
                     200,
-                    assets_mod.summary_view(backend.assets(), scopes=scopes, labels=labels.account),
+                    assets_mod.summary_view(
+                        backend.assets(),
+                        scopes=scopes,
+                        labels=labels.account,
+                        owners=backend.asset_owners(),
+                        viewer_email=mail,
+                    ),
+                )
+            if path == _ADMIN_POLICY_RULES:
+                if self._require(admin=True) is None:
+                    return None
+                return self._json(
+                    200,
+                    {
+                        "rules": policies_mod.rules_view(backend.policy_rules()),
+                        "path": backend.policy_rules_path or "",
+                    },
                 )
             if path.rstrip("/") == _ADMIN_IAM:
                 return self._iam_attributes("GET")
@@ -1452,10 +1558,99 @@ def make_handler(
                 return self._json(500, {"error": "名册审核失败，请查看服务端日志"})
             return self._json(200, result)
 
+        def _asset_owner(self):
+            """管理员把一个资源指给某人（email 留空＝取消指派）。
+
+            资源中心不告诉我们一台机器是谁的，所以归属只能人工记。这里**不做任何推断** ——
+            指过的就是指过的，没指过就显示「未指定」。
+            """
+            session = self._require(admin=True)
+            if session is None:
+                return None
+            refused = self._same_origin_json()
+            if refused:
+                return self._json(403, {"error": refused})
+            path = backend.asset_owners_path
+            if not path:
+                return self._json(404, {"error": "服务端没有配置资产快照路径"})
+            payload, sent = self._json_body()
+            if payload is None:
+                return sent
+            try:
+                key = assets_mod.owner_key(
+                    payload.get("platform"), payload.get("account"), payload.get("id")
+                )
+                email = str(payload.get("email") or "").strip().lower()
+                # 指给的人必须在名册里：随手打错一个邮箱，那台机器就永远认不回来了
+                name = ""
+                if email:
+                    hits = [p for p in backend.people().people if p.email.lower() == email]
+                    if not hits:
+                        return self._json(404, {"error": f"名册里没有 {email}"})
+                    if len(hits) > 1 or hits[0].email_collision:
+                        # 多人共用一个企业邮箱（名册里有这个标记）。按邮箱指派会指给错的人，
+                        # 而资源归属是要拿去问责和算成本的，宁可让管理员先去把名册理清楚
+                        return self._json(409, {"error": f"{email} 在名册里对应多个人，先理清名册"})
+                    name = hits[0].name
+                assets_mod.set_owner(
+                    path,
+                    key,
+                    email=email,
+                    name=name,
+                    note=str(payload.get("note") or ""),
+                    actor=session.user.union_id,
+                )
+            except DeliveryError as exc:
+                return self._json(getattr(exc, "status", 400), {"error": str(exc)})
+            return self._json(200, {"ok": True, "key": key, "email": email, "name": name})
+
+        def _policy_rules(self):
+            """管理员改「哪些权限不能被申请」。
+
+            这是面板最危险的一个写接口：规则决定员工能申请到什么。所以除了
+            policies.write_rules 里那三道闸（先校验再落盘、不许放开平台自己的策略、
+            allow_custom 接口改不了），这里再加一条 —— **改完立刻重新加载并回读**，
+            让管理员当场看到生效后的样子（含内置禁用），而不是「保存成功」四个字。
+            """
+            session = self._require(admin=True)
+            if session is None:
+                return None
+            refused = self._same_origin_json()
+            if refused:
+                return self._json(403, {"error": refused})
+            if not backend.policy_rules_path:
+                return self._json(404, {"error": "服务端没有配置策略规则文件路径"})
+            payload, sent = self._json_body()
+            if payload is None:
+                return sent
+            try:
+                _, opened = policies_mod.write_rules(
+                    backend.policy_rules_path, payload, actor=session.user.union_id
+                )
+                # 回读也收进 try：规则文件是刚写的，这里再抛说明写出来的东西读不回来
+                fresh = policies_mod.rules_view(backend.policy_rules())
+            except DeliveryError as exc:
+                return self._json(getattr(exc, "status", 400), {"error": str(exc)})
+            except Exception as exc:  # noqa: BLE001 — do_POST 没有兜底，漏出去就是断连
+                # 写盘会抛 PermissionError / OSError（目录归属不对、磁盘满）。不兜的话
+                # 异常穿过 do_POST，连接被直接关掉，管理员看到的是「网络错误」
+                print(f"[rules] 保存失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+                return self._json(500, {"error": "保存失败，请查看服务端日志"})
+            if opened:
+                # 放开了内置禁用项。台账已经记了，但那是事后翻的 —— 这种事要当场有人知道。
+                # 发不出去不影响保存：规则已经落盘了，这里失败只是少一条通知
+                _alert_rules_opened(session.user, opened)
+            # 不用手动清缓存：_cached 的键带文件 mtime，写完自然失效
+            return self._json(200, {"rules": fresh})
+
         def do_POST(self):  # noqa: N802
             path = urllib.parse.urlsplit(self.path).path
             if path == "/api/pickup":
                 return self._pickup()
+            if path == _ADMIN_POLICY_RULES:
+                return self._policy_rules()
+            if path == _ADMIN_ASSET_OWNER:
+                return self._asset_owner()
             if path == _ADMIN_REVIEW:
                 return self._review()
             if path.rstrip("/") == _ADMIN_IAM:

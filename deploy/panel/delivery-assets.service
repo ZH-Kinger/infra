@@ -1,0 +1,19 @@
+# 云资产快照采集（由 delivery-assets.timer 触发）
+# 安装：复制到 /etc/systemd/system/，改 WorkingDirectory、EnvironmentFile、User 后
+#   systemctl daemon-reload && systemctl enable --now delivery-assets.timer
+#
+# EnvironmentFile 给的必须是**只读采集身份**的凭证，不是开通身份 —— 那把 AK 能建号、
+# 能授权，拿它采资产等于把三把 AK 分开的设计作废。线上踩过：曾经就是开通身份在采。
+[Unit]
+Description=Cloud panel: collect cloud asset snapshot (read-only)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=delivery
+WorkingDirectory=/opt/infra
+EnvironmentFile=/etc/delivery/refresh.env
+Environment=PYTHONPATH=/opt/infra/src
+# 采不到的账号记 error，不写成「没有资源」—— 和权限快照同一个原则
+ExecStart=/usr/bin/python3 -m delivery.cli assets collect --out identity/assets.json

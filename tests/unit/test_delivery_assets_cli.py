@@ -144,6 +144,36 @@ class VolcanoPostSigningTests(unittest.TestCase):
         self.assertEqual(sts_host, "sts.volcengineapi.com")
 
 
+ME = "li.si@wuji.tech"
+MINE = "aliyun/1000000000000001/i-2"
+
+
+class TypeLabelTests(unittest.TestCase):
+    """`assets.type_label` 是公开的：server 要跨模块用它给首页卡片标类型。"""
+
+    def test_aliyun_three_segment_types_are_shortened(self):
+        self.assertEqual(assets.type_label("ACS::ECS::Instance"), "ECS Instance")
+        self.assertEqual(assets.type_label("ACS::OSS::Bucket"), "OSS Bucket")
+
+    def test_anything_else_is_left_alone(self):
+        """火山的 `ecs.instance`、以及任何不是 ACS::x::y 的串都原样显示 ——
+        猜着改写类型名，页面上会出现云控制台里根本不存在的说法。"""
+        for raw in ("ecs.instance", "", "ACS::ECS", "AWS::EC2::Instance", "A::B::C::D"):
+            self.assertEqual(assets.type_label(raw), raw, raw)
+
+    def test_no_private_alias_left_behind(self):
+        """改名要改干净：留着旧私有名的引用，跨模块引私有名这件事下次又会被照抄。"""
+        needle = "_type" + "_label"  # 拼出来：让人工 grep 旧名时零命中
+        self.assertFalse(hasattr(assets, needle))
+        root = Path(__file__).resolve().parents[2]
+        hits = [
+            str(f.relative_to(root))
+            for f in list((root / "src").rglob("*.py")) + list((root / "tests").rglob("*.py"))
+            if f != Path(__file__) and needle in f.read_text(encoding="utf-8")
+        ]
+        self.assertEqual(hits, [])
+
+
 class SummaryViewTests(unittest.TestCase):
     DATA = {
         "captured_at": "2026-09-15T10:00:00+08:00",
@@ -164,31 +194,136 @@ class SummaryViewTests(unittest.TestCase):
                         "name": "web",
                         "region": "cn-hangzhou",
                     },
+                    {"type": "ACS::OSS::Bucket", "id": "b-1", "name": "colleague-bucket"},
                 ],
             },
             {"platform": "volcano", "account": "2000000001", "error": "AccessDenied 细节"},
         ],
     }
+    #: i-2 指给我；b-1 指给同事；i-1 从没指过。
+    #: 后两条键是陷阱：同一个资源 ID 换平台 / 换账号，不能被当成「我的 i-1」。
+    OWNERS = {
+        MINE: {"email": ME, "name": "李四", "note": "训练机", "at": "2026-09-16T09:00:00+08:00"},
+        "aliyun/1000000000000001/b-1": {"email": "wang.wu@wuji.tech", "name": "王五"},
+        "volcano/1000000000000001/i-1": {"email": ME, "name": "李四"},
+        "aliyun/9000000000000009/i-1": {"email": ME, "name": "李四"},
+    }
 
     def label(self, platform, account):
         return f"{platform} {account}"
 
-    def test_employee_sees_counts_only_for_own_accounts(self):
-        view = assets.summary_view(self.DATA, scopes={("aliyun", ACC)}, labels=self.label)
-        self.assertEqual(len(view["accounts"]), 1)
+    _DEFAULT = object()
+
+    def view(self, *, scopes, owners=_DEFAULT, me=ME):
+        return assets.summary_view(
+            self.DATA,
+            scopes=scopes,
+            labels=self.label,
+            owners=self.OWNERS if owners is self._DEFAULT else owners,
+            viewer_email=me,
+        )
+
+    def employee(self, **kw):
+        return self.view(scopes={("aliyun", ACC)}, **kw)["accounts"][0]
+
+    def test_employee_sees_only_resources_assigned_to_them(self):
+        """员工能看到指给自己的那些的明细——别人的和未指定的一条都不给。
+
+        同事的资源名往往就是业务名（`colleague-bucket`、`secret-db`），泄漏出去
+        等于把别的组在做什么告诉了全公司，所以这里连 JSON 里出现都不允许。
+        """
+        acc = self.employee()
+        self.assertEqual([r["id"] for r in acc["resources"]], ["i-2"])
+        self.assertEqual(acc["resources"][0]["owner_email"], ME)
+        self.assertEqual(acc["resources"][0]["owner_name"], "李四")
+        self.assertEqual(acc["resources"][0]["owner_note"], "训练机")
+        self.assertEqual(acc["resources"][0]["owner_at"], "2026-09-16T09:00:00+08:00")
+        blob = json.dumps(self.view(scopes={("aliyun", ACC)}), ensure_ascii=False)
+        self.assertNotIn("secret-db", blob)  # 未指定的
+        self.assertNotIn("colleague-bucket", blob)  # 指给别人的
+        self.assertNotIn("wang.wu@wuji.tech", blob)  # 连别人的邮箱也不出现
+
+    def test_employee_counts_still_cover_the_whole_account(self):
+        """总数 / 类型 / 地域仍然是整个云账号的：员工要能看出「账号里还有 N 个没人认」，
+        否则没人会来找管理员补归属，这张表永远补不全。"""
+        acc = self.employee()
+        self.assertEqual(acc["total"], 3)
+        self.assertEqual(
+            acc["by_type"],
+            [{"type": "ECS Instance", "count": 2}, {"type": "OSS Bucket", "count": 1}],
+        )
+        self.assertEqual(
+            acc["by_region"],
+            [{"region": "cn-hangzhou", "count": 2}, {"region": "全局", "count": 1}],
+        )
+        self.assertEqual(acc["mine"], 1)
+        self.assertEqual(acc["unassigned"], 1)  # 只有 i-1；b-1 指给了别人，不算未指定
+
+    def test_owner_key_is_scoped_to_platform_and_account(self):
+        """归属键是 平台/账号/资源ID。别的账号里同 ID 的机器不能被算成我的——
+        i-1 这种 ID 在每个账号里都可能存在，认串了就是把别人的机器挂到我名下。"""
+        acc = self.employee()
+        self.assertNotIn("i-1", [r["id"] for r in acc["resources"]])
+
+    def test_employee_without_email_sees_nothing(self):
+        """代理登录（公司 IAM）拿不到邮箱时是空串：宁可一条不显示，也不能当成「匹配所有人」。"""
+        for blank in ("", "   ", None):
+            acc = self.employee(me=blank)
+            self.assertEqual(acc["resources"], [], blank)
+            self.assertEqual(acc["mine"], 0, blank)
+            self.assertEqual(acc["unassigned"], 1, blank)
+
+    def test_employee_email_match_is_case_insensitive(self):
+        """邮箱大小写不该影响归属：名册里写 Li.Si@，登录带回 li.si@，人还是同一个。"""
+        acc = self.employee(me="LI.SI@Wuji.Tech")
+        self.assertEqual([r["id"] for r in acc["resources"]], ["i-2"])
+        acc = self.employee(me="  li.si@wuji.tech  ")
+        self.assertEqual([r["id"] for r in acc["resources"]], ["i-2"])
+
+    def test_owner_email_stored_uppercase_still_matches(self):
+        """表里那头也要归一：`set_owner` 会转小写，但表是能手工编辑的，
+        历史数据也未必归过 —— 一个 `Li.Si@` 就让那台机器对本人隐身，且查不出原因。"""
+        owners = {MINE: {"email": " Li.Si@WUJI.Tech ", "name": "李四"}}
+        acc = self.employee(owners=owners)
+        self.assertEqual([r["id"] for r in acc["resources"]], ["i-2"])
+        self.assertEqual(acc["mine"], 1)
+        self.assertEqual(acc["unassigned"], 2)  # 大写那条仍然算「已指派」
+
+    def test_no_owner_table_means_everything_unassigned(self):
+        """还没开始指派（或归属表为空）时：一条明细都不给，不按名字或创建时间猜。"""
+        for empty in ({}, None):
+            acc = self.employee(owners=empty)
+            self.assertEqual(acc["resources"], [])
+            self.assertEqual(acc["mine"], 0)
+            self.assertEqual(acc["unassigned"], acc["total"])
+
+    def test_admin_sees_every_resource_with_owner_columns(self):
+        view = self.view(scopes=None)
         acc = view["accounts"][0]
-        self.assertEqual(acc["by_type"], [{"type": "ECS Instance", "count": 2}])
-        self.assertNotIn("resources", acc)
-        self.assertNotIn("secret-db", json.dumps(view))
+        self.assertEqual([r["id"] for r in acc["resources"]], ["i-1", "i-2", "b-1"])
+        owners = {r["id"]: r["owner_email"] for r in acc["resources"]}
+        self.assertEqual(owners, {"i-1": "", "i-2": ME, "b-1": "wang.wu@wuji.tech"})
+        # 没指过的三个归属字段都是空串（不是 None）：前端据此显示「未指定」
+        never = next(r for r in acc["resources"] if r["id"] == "i-1")
+        self.assertEqual([never[k] for k in ("owner_name", "owner_note", "owner_at")], ["", "", ""])
 
     def test_admin_sees_details_and_errors(self):
         view = assets.summary_view(self.DATA, scopes=None, labels=self.label)
-        self.assertEqual(len(view["accounts"][0]["resources"]), 2)
+        self.assertEqual(len(view["accounts"][0]["resources"]), 3)
         self.assertIn("AccessDenied", view["accounts"][1]["error"])
 
     def test_employee_error_is_generic(self):
-        view = assets.summary_view(self.DATA, scopes={("volcano", "2000000001")}, labels=self.label)
-        self.assertEqual(view["accounts"][0]["error"], "本次未采集完整")
+        view = self.view(scopes={("volcano", "2000000001")})
+        acc = view["accounts"][0]
+        self.assertEqual(acc["error"], "本次未采集完整")
+        # 采集失败的账号不能借归属表冒出明细来
+        self.assertEqual(acc["resources"], [])
+        self.assertEqual((acc["mine"], acc["unassigned"], acc["total"]), (0, 0, 0))
+
+    def test_scopes_still_gate_which_accounts_are_visible(self):
+        """归属只决定看得到哪些明细，账号可见性还是按名册里的云账号来。"""
+        view = self.view(scopes=set())
+        self.assertEqual(view["accounts"], [])
 
 
 class PanelClientTests(unittest.TestCase):

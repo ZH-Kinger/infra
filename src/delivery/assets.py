@@ -14,13 +14,26 @@
 
 采集失败的账号记 error，不写成「没有资源」（和权限快照同一个原则）。
 
-看的人不同，给的粒度不同：员工只看自己有子账号的云账号里，各类资源的数量和地域分布；
-资源名称、ID、IP 这些明细只给管理员。
+看的人不同，给的粒度不同：员工看得到**指给自己**的那些资源的明细，其余只给数量和地域分布；
+管理员看全部明细。
+
+归属从哪来
+──────────
+资源中心**不告诉你一台机器是谁的** —— 实测 6319 个资源里，归属类标签一个都没有，
+资源组也是默认组。所以归属只能我们自己记：`identity/asset-owners.json`（gitignored，0600）::
+
+    {"owners": {"aliyun/<UID>/i-bp1xxx": {"email": "...", "note": "...", "at": "...", "by": "..."}}}
+
+管理员在资产页上指派，或者以后面板自己开通资源时打标签自动带上。
+**没指过的就是「未指定」，不猜** —— 按名字、按创建时间猜归属，猜错一次就再没人信这张表。
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
+import tempfile
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -155,18 +168,112 @@ def load(path: Optional[str]) -> Optional[dict]:
     return data
 
 
-def _type_label(resource_type: str) -> str:
+def owner_key(platform: str, account: str, resource_id: str) -> str:
+    """归属表的键。和申请单里 `平台/账号/资源ID` 的写法保持一致。"""
+    parts = [str(x or "").strip() for x in (platform, account, resource_id)]
+    if not all(parts):
+        raise AssetError("资源标识不完整，应形如 平台/账号/资源ID")
+    return "/".join(parts)
+
+
+def load_owners(path: Optional[str]) -> dict:
+    """读归属表。文件不在就是空表 —— 这是正常的初始状态，不是错误。"""
+    if not path:
+        return {}
+    file = Path(path)
+    if not file.exists():
+        return {}
+    try:
+        data = json.loads(file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AssetError(f"读不了资源归属表：{type(exc).__name__}") from exc
+    owners = data.get("owners") if isinstance(data, dict) else None
+    if not isinstance(owners, dict):
+        raise AssetError('资源归属表格式应为 {"owners": {"平台/账号/资源ID": {...}}}')
+    return owners
+
+
+def set_owner(
+    path: str, key: str, *, email: str, name: str = "", note: str = "", actor: str
+) -> dict:
+    """把一个资源指给某人；email 为空表示取消指派。
+
+    整个文件读-改-写在一把文件锁里完成：管理员多开几个页面同时指派，不会互相覆盖。
+    """
+    file = Path(path)
+    file.parent.mkdir(parents=True, exist_ok=True)
+    lock = file.with_suffix(".lock")
+    fd = os.open(lock, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        owners = load_owners(path)
+        if email:
+            owners[key] = {
+                "email": email.strip().lower(),
+                "name": str(name or "")[:64],
+                "note": str(note or "")[:200],
+                "at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+                "by": str(actor or "")[:64],
+            }
+        else:
+            owners.pop(key, None)
+        _write_private(file, {"owners": owners})
+        return owners
+    finally:
+        os.close(fd)
+
+
+def _write_private(path: Path, data: dict) -> None:
+    """0600、原子替换。和 people.write_private_json 同一个做法，这里不引它是为了
+    让 assets 这一支不依赖名册模块。"""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        os.write(fd, (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+    Path(tmp).chmod(0o600)
+    Path(tmp).replace(path)
+
+
+def _with_owner(r: dict, owners: dict, key: tuple) -> dict:
+    """给一条资源附上归属。没指过就是空串 —— 前端据此显示「未指定」。"""
+    own = owners.get(f"{key[0]}/{key[1]}/{r.get('id', '')}") or {}
+    return {
+        **r,
+        "type_label": type_label(r.get("type", "")),
+        "owner_email": str(own.get("email") or ""),
+        "owner_name": str(own.get("name") or ""),
+        "owner_note": str(own.get("note") or ""),
+        "owner_at": str(own.get("at") or ""),
+    }
+
+
+def type_label(resource_type: str) -> str:
     """ACS::ECS::Instance → ECS Instance；volcano 的 ecs.instance 原样。"""
     parts = resource_type.split("::")
     return " ".join(parts[1:]) if len(parts) == 3 and parts[0] == "ACS" else resource_type
 
 
 def summary_view(
-    data: Optional[dict], *, scopes: Optional[set], labels: Callable[[str, str], str]
+    data: Optional[dict],
+    *,
+    scopes: Optional[set],
+    labels: Callable[[str, str], str],
+    owners: Optional[dict] = None,
+    viewer_email: str = "",
 ) -> dict:
-    """员工视角（scopes=本人有子账号的云账号）只给数量；管理员（scopes=None）给明细。"""
+    """管理员（scopes=None）拿全部明细；员工（scopes=本人有子账号的云账号）拿两样：
+
+      · **指给自己的那些资源的明细** —— 他得知道自己有哪台机器、在哪个地域、什么时候建的
+      · 其余资源只有数量和地域分布
+
+    没指过归属的资源对员工一律不显示明细。宁可让人看到「未指定」去问管理员，
+    也不要按名字或创建时间去猜 —— 猜错一次，这张表就再没人信了。
+    """
     if data is None:
         return {"captured_at": "", "accounts": []}
+    owners = owners or {}
+    me = str(viewer_email or "").strip().lower()
     out = []
     for acc in data["accounts"]:
         key = (str(acc.get("platform") or ""), str(acc.get("account") or ""))
@@ -179,16 +286,21 @@ def summary_view(
             "error": str(acc.get("error") or ""),
         }
         resources = acc.get("resources") or []
-        types = Counter(_type_label(r.get("type", "")) for r in resources)
+        types = Counter(type_label(r.get("type", "")) for r in resources)
         regions = Counter(r.get("region") or "全局" for r in resources)
         item["total"] = len(resources)
         item["by_type"] = [{"type": t, "count": n} for t, n in types.most_common()]
         item["by_region"] = [{"region": r, "count": n} for r, n in regions.most_common()]
+
+        ordered = sorted(resources, key=lambda r: (r.get("type", ""), r.get("name", "")))
+        viewed = [_with_owner(r, owners, key) for r in ordered]
         if scopes is None:
-            item["resources"] = [
-                {**r, "type_label": _type_label(r.get("type", ""))}
-                for r in sorted(resources, key=lambda r: (r.get("type", ""), r.get("name", "")))
-            ]
+            item["resources"] = viewed
+        else:
+            mine = [v for v in viewed if me and v["owner_email"].strip().lower() == me]
+            item["resources"] = mine
+            item["mine"] = len(mine)
+            item["unassigned"] = sum(1 for v in viewed if not v["owner_email"])
         if scopes is not None and item["error"]:
             item["error"] = "本次未采集完整"
         out.append(item)

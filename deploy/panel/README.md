@@ -202,7 +202,24 @@ delivery refresh --trust-unverified-when-derivable   # 和手动生成提案时�
    策略收窄到列出的策略 ARN（`acs:ram:*:system:policy/<名称>`、`acs:ram:*:<UID>:policy/<名称>`），
    并对 AdministratorAccess 等写 Deny（示例已包含）。执行凭证按最高敏感度保管。
 
-4. **资产与权限列表**：两家控制台分别开通「资源中心」，给权限快照用的只读身份加资源中心只读权限。
+4. **资产与权限列表**：两家控制台分别开通「资源中心」，给**只读采集身份**加资源中心只读权限
+   （阿里 `ResourceCenter` 只读、火山 `resourcecenter:SearchResources`）。
+
+   **采集一定要用只读身份**，别图省事用开通身份 —— 那把 AK 能建号、能授权。线上曾经
+   就是开通身份在采集，是为了加资产采集才发现的。火山那把只读身份还要有 IAM 的
+   **只读**动作（`iam:ListUsers` / `ListGroups` / `ListUsersForGroup` / `ListPolicies` /
+   `ListAttachedUserPolicies` / `ListAttachedUserGroupPolicies` / `ListUserGroupsForUser` /
+   `GetUser` / `GetUserGroup`），否则权限快照采不全。**兜底 Deny 里不能写 `iam:*`** ——
+   Deny 压过 Allow，写成通配等于把采集自己掐死（踩过）。
+
+   **资源归属**：资源中心不告诉你一台机器是谁的（实测 6319 个资源里归属类标签一个都没有），
+   所以归属由管理员在资产页上逐个指派，记在 `identity/asset-owners.json`（gitignored，0600）。
+   员工在资产页只看得到**指给自己**的资源明细，其余只有数量和地域分布。
+   没指派过的显示「未指定」—— **面板不按名字或创建时间去猜**，猜错一次这张表就没人信了。
+
+   `identity/` 下会出现 `asset-owners.lock` / `policy-rules.lock` 这类空文件（0600），
+   那是写归属表和规则文件时的互斥锁，别当脏文件删 —— 删了不影响正确性，但会短暂丢互斥。
+
    权限列表要采集策略目录，只读身份再加阿里云 `ram:ListPolicies`、火山 `iam:ListPolicies`：
 
    ```bash
@@ -214,11 +231,24 @@ delivery refresh --trust-unverified-when-derivable   # 和手动生成提案时�
    操作审计类策略不开放（这几类产品线只放只读策略，密钥管理只读也不放）；自定义策略默认**不开放**，要开放的逐条写进 `allow`，按高风险计天数。**不要**把执行身份、采集身份用的自定义策略写进 `allow`，更不要设 `allow_custom: true`——那等于让员工申请到平台自己的管理权限。规则文件只能追加禁用，放开内置禁用项要逐条写进 `allow`。
    风险决定最长授权天数（默认低 180 / 中 90 / 高 30 天）。
 
+   **这份规则可以在管理后台的「权限规则」页上直接改**（每条策略行上有按钮），不用上服务器。
+   改动追加进 `identity/policy-rules.log`（0600，谁、何时、加了删了什么）。页面上改不动的有三样，
+   都是刻意的：
+
+   | 改不动的 | 为什么 |
+   |---|---|
+   | 内置禁用 | 那是代码里的地板。规则文件只能往上加，不能往下挖 —— 无论怎么改，`AdministratorAccess` 都申请不到 |
+   | 平台自己的策略（`wuji-panel-*` / `wuji-oss-auto-*` / `temp-ak-auto-*`） | 放开它们＝员工能申请到平台自己的管理权限。接口直接拒 |
+   | `allow_custom` | 等于「自定义策略全部放开」，而执行身份、发放身份的策略都是自定义策略。只能上服务器改文件，那是一道人肉门槛 |
+
+   写入前先跑一遍完整校验，验不过一个字节都不落盘 —— 规则文件写坏会让整个权限列表加载失败。
+   「放开一条被内置规则挡住的策略」在页面上要**手打策略名确认**。
+
 5. **定时任务**：在 `delivery-refresh.service` 之外再加两条（同一个 EnvironmentFile）：
 
    ```bash
    delivery requests sweep     # 同步飞书审批、到期回收权限和凭证、开账号后对应到名册（建议每 10 分钟）
-   delivery assets collect     # 采集资产快照（每天一次）
+   delivery assets collect     # 采集资产快照（每天一次，用只读采集身份的环境文件）
    delivery policies collect   # 采集权限策略目录（每天一次）
    ```
 

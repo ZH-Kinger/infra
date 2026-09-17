@@ -469,14 +469,9 @@ class Flows:
             accounts.append(item)
         return {
             "captured_at": str((data or {}).get("captured_at") or ""),
-            "rules": {
-                "deny": list(rules.deny),
-                "deny_families": list(policies_mod.DEFAULT_DENY_FAMILIES),
-                "allow": list(rules.allow),
-                "allow_custom": rules.allow_custom,
-                "max_days": dict(rules.max_days),
-                "max_per_request": rules.max_per_request,
-            },
+            # 和管理员那条 /api/admin/policies/rules 用同一份视图：两处各拼一遍的话，
+            # 前端按其中一份判断「这条改不改得动」，迟早对不上
+            "rules": policies_mod.rules_view(rules),
             "accounts": accounts,
         }
 

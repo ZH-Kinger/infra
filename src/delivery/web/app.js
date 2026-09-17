@@ -320,6 +320,36 @@ function policyList(policies, highRisk) {
 }
 
 // 这个子账号上通过申请开通、还没到期的权限（按到期时间排序），带续期入口
+// 这个子账号是怎么来的：走的哪张开账号申请单、什么时候开的。
+// 台账里本来就有，只是从没连到账号卡片上 —— 员工问「我这个号谁给我开的」时没处看。
+function originSection(acct, requests) {
+  const t = (requests || []).find(
+    (r) => r.kind === "account" && r.status === "done" &&
+           r.template.platform === acct.platform && r.template.account === acct.account &&
+           r.payload && r.payload.username === acct.name);
+  if (!t) return null;
+  return h("div", { class: "section" },
+    h("div", { class: "section-label" }, "这个账号怎么来的"),
+    h("p", { class: "muted" },
+      h("a", { class: "linkbtn", href: `#request=${encodeURIComponent(t.id)}` }, t.id),
+      t.created_at ? ` · ${new Date(t.created_at).toLocaleDateString("zh-CN")} 申请` : "",
+      t.updated_at ? ` · ${new Date(t.updated_at).toLocaleDateString("zh-CN")} 开通` : ""));
+}
+
+// 指给我的资源。归属是管理员在资产页逐个指派的，没指过就不会出现在这里。
+function resourcesSection(acct) {
+  const rs = acct.resources || [];
+  if (!rs.length) return null;
+  return h("div", { class: "section" },
+    h("div", { class: "section-label" }, "名下资源", h("span", { class: "muted" }, String(rs.length)),
+      h("a", { class: "linkbtn push", href: "#assets" }, "去资产页 →")),
+    h("ul", { class: "grant-list" }, rs.map((r) => h("li", {},
+      h("span", { class: "grant-name" }, r.name || r.id),
+      h("span", { class: "pill" }, r.type_label),
+      h("span", { class: "muted" }, r.region || "全局"),
+      r.note ? h("span", { class: "muted" }, r.note) : null))));
+}
+
 function grantsSection(acct, requests) {
   const now = Date.now();
   const grants = (requests || [])
@@ -396,8 +426,12 @@ function accountCard(acct, requests) {
         ),
       );
     }
+    const origin = originSection(acct, requests);
+    if (origin) sections.push(origin);
     const grants = grantsSection(acct, requests);
     if (grants) sections.push(grants);
+    const res = resourcesSection(acct);
+    if (res) sections.push(res);
     sections.push(
       h(
         "div",

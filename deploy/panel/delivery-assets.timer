@@ -1,0 +1,11 @@
+# 每天采一次云资产。资源不会分钟级变化，采频了只是白花 API 配额。
+[Unit]
+Description=Cloud panel: collect assets daily
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

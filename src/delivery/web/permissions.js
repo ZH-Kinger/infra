@@ -544,6 +544,71 @@ export function permissionRoutes(ctx) {
       );
     }
 
+    // 一条策略在**文件**里的状态。内置禁用（代码里的地板）不在这里，因为它改不了。
+    function fileState(p, rules) {
+      const lower = String(p.name || "").toLowerCase();
+      const has = (list) => (list || []).some((x) => String(x).toLowerCase() === lower);
+      if (has(rules.allow)) return "allowed";
+      if (has(rules.file_deny)) return "denied";
+      return "default";
+    }
+
+    // 只给「改得动」的策略按钮。被内置规则挡住的不给 —— 那是代码里的地板，
+    // 给个点了没反应的按钮比不给更糟。
+    function ruleAction(p, rules) {
+      const state = fileState(p, rules);
+      if (!p.open && state === "default") {
+        // 不开放且文件里没写过它 —— 是内置规则挡的。要放开只能逐条写进 allow，
+        // 这是危险动作，给按钮但写清楚代价
+        return h("button", { type: "button", class: "btn ghost small", onclick: () => confirmRule(p, rules, "allow") }, "放开申请…");
+      }
+      if (state === "denied") {
+        return h("button", { type: "button", class: "btn ghost small", onclick: () => saveRule(rules, { deny: (rules.file_deny || []).filter((x) => String(x).toLowerCase() !== String(p.name).toLowerCase()) }) }, "取消禁用");
+      }
+      if (state === "allowed") {
+        return h("button", { type: "button", class: "btn ghost small", onclick: () => saveRule(rules, { allow: (rules.allow || []).filter((x) => String(x).toLowerCase() !== String(p.name).toLowerCase()) }) }, "收回放开");
+      }
+      return h("button", { type: "button", class: "btn ghost small", onclick: () => saveRule(rules, { deny: [...(rules.file_deny || []), p.name] }) }, "禁止申请");
+    }
+
+    // 放开一条被内置规则挡住的策略：要手打策略名确认。
+    // 这类策略是身份管理 / 账单 / 审计那几条产品线，放开等于把平台的护栏自己拆掉。
+    function confirmRule(p, rules, kind) {
+      openDrawer("rule-title", (close) => {
+        const typed = h("input", { class: "input", type: "text", placeholder: "手打一遍策略名以确认", autocomplete: "off" });
+        const msg = h("p", { class: "muted" });
+        const go = h("button", { class: "btn danger", type: "button", onclick: async () => {
+          if (typed.value.trim() !== p.name) { msg.textContent = "名字对不上，没有执行。"; return; }
+          go.disabled = true; msg.textContent = "保存中…";
+          try { await saveRule(rules, { [kind]: [...(rules[kind] || []), p.name] }, close); }
+          catch (e) { msg.textContent = e.message || "保存失败"; go.disabled = false; }
+        } }, "确认放开");
+        return h("div", { class: "drawer-card" },
+          h("h2", { id: "rule-title" }, `放开 ${p.name}？`),
+          h("div", { class: "drawer-body" },
+            h("p", { class: "opt-desc" }, p.reason || "这条策略被内置规则挡住了。"),
+            h("p", { class: "opt-desc" }, "内置规则挡的是身份与权限管理、密钥管理、账单、审计这几类 —— 放开之后员工可以自助申请它，不再需要你逐次把关。"),
+            typed, msg),
+          h("div", { class: "drawer-foot" }, h("div", { class: "actions" }, go, h("button", { class: "btn ghost", type: "button", onclick: close }, "取消"))));
+      });
+    }
+
+    async function saveRule(rules, patch, close) {
+      const body = {
+        deny: rules.file_deny || [],
+        allow: rules.allow || [],
+        risk: rules.risk || {},
+        max_days: rules.max_days || {},
+        max_per_request: rules.max_per_request,
+        ...patch,
+      };
+      const res = await apiPost("/api/admin/policies/rules", body);
+      if (close) close();
+      // 服务端回读的是**生效后**的规则，直接用它重画，别信前端自己拼的那份
+      Object.assign(rules, res.rules || {});
+      renderAdminPolicies();
+    }
+
     function renderList() {
       const acc = current();
       if (acc.error) {
@@ -566,7 +631,10 @@ export function permissionRoutes(ctx) {
                   { class: `perm admin-perm${p.open ? "" : " off"}` },
                   h("div", { class: "perm-check" }, h("span", { class: `perm-glyph ${p.open ? "owned" : "unavailable"}`, "aria-hidden": "true" }, p.open ? "✓" : "–")),
                   h("div", { class: "opt-main" }, h("div", { class: "opt-title" }, h("span", { class: "perm-name" }, p.name), p.service ? h("span", { class: "pill" }, p.service) : null, h("span", { class: `pill ${riskTone}` }, riskText), p.type === "Custom" ? h("span", { class: "pill" }, "自定义") : null), p.description ? h("p", { class: "opt-desc" }, p.description) : null),
-                  h("div", { class: "perm-side" }, h("span", { class: p.open ? "pill good" : "pill" }, p.open ? `开放 · 最长 ${p.max_days} 天` : "不开放"), p.reason ? h("div", { class: "opt-note" }, p.reason) : null),
+                  h("div", { class: "perm-side" },
+                    h("span", { class: p.open ? "pill good" : "pill" }, p.open ? `开放 · 最长 ${p.max_days} 天` : "不开放"),
+                    p.reason ? h("div", { class: "opt-note" }, p.reason) : null,
+                    ruleAction(p, rules)),
                 );
               }),
             )
