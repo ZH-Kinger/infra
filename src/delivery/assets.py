@@ -140,6 +140,178 @@ def collect_volcano(creds: volcano.Credentials, *, transport=None, progress=None
     raise AssetError("火山资源中心页数超过上限，数据不完整，已中断")
 
 
+#: PAI 工作空间分布在哪些地区。**写死一张表而不是去枚举**：阿里云没有「列出我开通了
+#: 哪些地区的 PAI」这个接口，只能挨个地区问；问一个没开通的地区会报错而不是返回空，
+#: 所以这张表宁可长一点，采集时对报错的地区记一笔跳过、不中断。
+PAI_REGIONS = (
+    "cn-hangzhou",
+    "cn-shanghai",
+    "cn-beijing",
+    "cn-shenzhen",
+    "cn-wulanchabu",
+    "cn-heyuan",
+    "cn-zhangjiakou",
+    "ap-southeast-1",
+)
+
+
+def _pai(region: str) -> str:
+    return f"aiworkspace.{region}.aliyuncs.com"
+
+
+#: 属主的三种情况。**必须分开**：主账号建的公共目录（share、backbones 这些）本来就没有
+#: 个人属主，把它算成「属主不在了」的话，那一栏 18 条里有 14 条是噪音，而真正要看的
+#: 只有剩下 4 条 —— 一份四分之三是噪音的清单没人会看第二遍。
+OWNER_USER = "user"  # 认出来了，是某个在职 RAM 用户
+OWNER_ROOT = "root"  # 主账号自己建的，通常是公共目录
+OWNER_GONE = "gone"  # RAM 里已经查无此人 —— 人走了，数据集和目录还留着
+
+
+def collect_pai_datasets(creds, *, regions=PAI_REGIONS, transport=None, progress=None) -> tuple:
+    """PAI 数据集清单。返回 `(数据集列表, 跳过的地区说明)`。
+
+    **这是唯一一类自带归属的资产。** 资源中心对 ECS/OSS 一个归属标签都不给，所以那些
+    只能靠 `asset-owners.json` 一条条人工指；而数据集的 `UserId` 就是建它的那个 RAM 用户 ——
+    归属是白来的，不用任何人工登记。
+
+    UserId 换名字走的是**账号级的 RAM 用户表**，不是工作空间成员表：一个人被移出工作空间
+    之后，他建的数据集还在，但成员表里已经查不到他了 —— 只看成员表会把「被移出工作空间」
+    误报成「人已经没了」，而这两件事的处置完全不同。
+    """
+    from .clouds import aliyun
+
+    account = str(
+        aliyun.call(*aliyun.STS, "GetCallerIdentity", creds=creds, transport=transport).get(
+            "AccountId"
+        )
+        or ""
+    )
+    ram_users = {
+        str(u.get("UserId") or ""): {
+            "login": str(u.get("UserName") or ""),
+            "name": str(u.get("DisplayName") or ""),
+        }
+        for u in aliyun.paginate(
+            *aliyun.RAM,
+            "ListUsers",
+            key="User",
+            container="Users",
+            creds=creds,
+            transport=transport,
+        )
+    }
+    out: list = []
+    skipped: list = []
+    for region in regions:
+        try:
+            spaces = aliyun.call_roa(
+                _pai(region),
+                aliyun.AIWORKSPACE,
+                "/api/v1/workspaces",
+                {"PageSize": 50},
+                creds=creds,
+                transport=transport,
+            ).get("Workspaces")
+        except aliyun.AliyunDenied:
+            raise
+        except aliyun.AliyunError as exc:
+            # 没开通这个地区是常态，不该让整次采集失败；但要记下来，
+            # 否则「这个地区没有数据集」和「这个地区没问过」在结果里长得一样
+            skipped.append(f"{region}：{exc}")
+            continue
+        if not isinstance(spaces, list):
+            skipped.append(f"{region}：返回缺 Workspaces，跳过")
+            continue
+        for ws in spaces:
+            wid = str(ws.get("WorkspaceId") or "")
+            if not wid:
+                continue
+            for d in _pai_datasets(creds, region, wid, transport=transport):
+                uid = str(d.get("UserId") or "")
+                owner = ram_users.get(uid, {})
+                kind = OWNER_USER if owner else (OWNER_ROOT if uid == account else OWNER_GONE)
+                uri = str(d.get("Uri") or "")
+                out.append(
+                    {
+                        "region": region,
+                        "workspace": wid,
+                        "workspace_name": str(ws.get("WorkspaceName") or ""),
+                        "id": str(d.get("DatasetId") or ""),
+                        "name": str(d.get("Name") or ""),
+                        "source": str(d.get("DataSourceType") or ""),
+                        "accessibility": str(d.get("Accessibility") or ""),
+                        "uri": uri,
+                        "path": _pai_path(uri),
+                        "owner_user_id": uid,
+                        "owner_kind": kind,
+                        "owner_login": str(owner.get("login") or ""),
+                        "owner_name": str(owner.get("name") or ""),
+                    }
+                )
+        if progress:
+            progress(f"PAI {region}：{len(spaces)} 个工作空间，累计 {len(out)} 条数据集")
+    return out, skipped
+
+
+def _pai_page(creds, region, path, key, *, transport=None, extra=None) -> list:
+    """ROA 接口的翻页。PageNumber 从 1 开始，拿不满一页就是最后一页。"""
+    from .clouds import aliyun
+
+    items: list = []
+    for page in range(1, _MAX_PAGES + 1):
+        query = {"PageSize": 100, "PageNumber": page}
+        query.update(extra or {})
+        got = aliyun.call_roa(
+            _pai(region), aliyun.AIWORKSPACE, path, query, creds=creds, transport=transport
+        ).get(key)
+        if not isinstance(got, list):
+            raise AssetError(f"PAI {path} 返回缺 {key}，不能当作空结果")
+        items += got
+        if len(got) < 100:
+            return items
+    raise AssetError(f"PAI {path} 页数超过上限，数据不完整，已中断")
+
+
+def _pai_datasets(creds, region, workspace, *, transport=None) -> list:
+    return _pai_page(
+        creds,
+        region,
+        "/api/v1/datasets",
+        "Datasets",
+        transport=transport,
+        extra={"WorkspaceId": workspace},
+    )
+
+
+def _pai_members(creds, region, workspace, *, transport=None) -> dict:
+    """`{UserId: {login, name}}`。工作空间成员 —— **这是权限，不是归属**。
+
+    归属看的是账号级 RAM 用户表（见 `collect_pai_datasets`）：被移出工作空间的人，
+    他建的数据集还在、人也还在，只是不该再进这个空间了。
+
+    只收 `AccountType == "5"`（RAM 用户）：其余是服务角色，成员表里能占到三分之二，
+    混进来会让「属主是谁」这件事多出一堆永远对不上的条目。
+    """
+    out: dict = {}
+    for m in _pai_page(
+        creds, region, f"/api/v1/workspaces/{workspace}/members", "Members", transport=transport
+    ):
+        if str(m.get("AccountType") or "") != "5" or not m.get("AccountName"):
+            continue
+        out[str(m.get("UserId") or "")] = {
+            "login": str(m.get("AccountName")),
+            "name": str(m.get("MemberName") or m.get("DisplayName") or ""),
+        }
+    return out
+
+
+def _pai_path(uri: str) -> str:
+    """从 `bmcpfs://<挂载点>/a/b/` 里取出 `/a/b`。两种 URI 写法现网都有，别只认长的。"""
+    body = str(uri or "").split("://", 1)[-1]
+    slash = body.find("/")
+    return body[slash:].rstrip("/") if slash >= 0 else ""
+
+
 #: 成员账号里那个只读角色的名字。三个账号里都叫这个（见 identity/member-collector-policy.json）
 MEMBER_ROLE = "wuji-panel-collector"
 
@@ -180,7 +352,12 @@ def assume_role_for(
 Job = tuple  # (platform, 凭证前缀提示, collect() -> (account, resources))
 
 
-def build_snapshot(jobs: Iterable[Job]) -> dict:
+def build_snapshot(jobs: Iterable[Job], *, datasets=None, dataset_error: str = "") -> dict:
+    """`datasets` 放在快照顶层而不是塞进某个账号的 `resources` 里。
+
+    两个原因：它跨地区跨工作空间，本来就不属于「某个账号下的某个地区」这个结构；
+    而且它**自带属主**，和 `resources` 那种「归属得人工指」的东西在下游走的是两条路。
+    """
     accounts = []
     for platform, hint, collect in jobs:
         try:
@@ -190,7 +367,14 @@ def build_snapshot(jobs: Iterable[Job]) -> dict:
             first = next((ln.strip() for ln in str(exc).splitlines() if ln.strip()), "")
             first = aliyun._scrub(volcano._scrub(first)) or type(exc).__name__
             accounts.append({"platform": platform, "account": hint, "error": first[:200]})
-    return {"captured_at": _now(), "accounts": accounts}
+    out = {"captured_at": _now(), "accounts": accounts}
+    # 采集失败时**不写 datasets 这个键**，让下游能分出「没有数据集」和「没采到」——
+    # 写成空列表的话，PAI 权限哪天掉了，所有人的数据集会一起从页面上消失而没人知道
+    if datasets is not None:
+        out["datasets"] = list(datasets)
+    if dataset_error:
+        out["dataset_error"] = dataset_error[:300]
+    return out
 
 
 def load(path: Optional[str]) -> Optional[dict]:

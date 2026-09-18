@@ -251,6 +251,7 @@ def add_parsers(commands) -> None:
     collect.add_argument("--out", default="identity/assets.json")
     collect.add_argument("--aliyun-profile", action="append", default=[], metavar="PREFIX")
     collect.add_argument("--skip-volcano", action="store_true")
+    collect.add_argument("--skip-pai", action="store_true", help="不采 PAI 数据集")
     collect.add_argument(
         "--member",
         action="append",
@@ -641,11 +642,29 @@ def _assets(args) -> int:
                     lambda: assets.collect_volcano(volcano.Credentials.from_env()),
                 )
             )
-        data = assets.build_snapshot(jobs)
+        # PAI 数据集：和资源中心是两条路（那边不给归属，这边 UserId 就是属主）。
+        # 采不到只记一笔，不让整次资产采集失败
+        sets, skipped, ds_err = None, [], ""
+        if not args.skip_pai:
+            base = args.aliyun_profile[0] if args.aliyun_profile else "ALIYUN"
+            try:
+                sets, skipped = assets.collect_pai_datasets(aliyun.Credentials.from_env(base))
+            except DeliveryError as exc:
+                ds_err = next((ln.strip() for ln in str(exc).splitlines() if ln.strip()), "")
+
+        data = assets.build_snapshot(jobs, datasets=sets, dataset_error=ds_err)
         out = _write_private(args.out, data)
         failed = [a for a in data["accounts"] if a.get("error")]
         total = sum(len(a.get("resources") or []) for a in data["accounts"])
         print(f"已写入 {out}（权限 600）：{total} 个资源")
+        if sets is not None:
+            gone = [d for d in sets if not d["owner_login"]]
+            tail = f"，其中 {len(gone)} 条属主已经不在了" if gone else ""
+            print(f"  PAI 数据集 {len(sets)} 条{tail}")
+            for note in skipped:
+                print(f"    · 跳过 {note}")
+        elif ds_err:
+            print(f"  ⚠ PAI 数据集没采到：{ds_err}")
         for a in failed:
             print(f"  ⚠ {a['platform']}/{a['account']}：{a['error']}")
         return 1 if failed else 0

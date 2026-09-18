@@ -167,6 +167,84 @@ def call(
     raise AliyunError(f"`{action}` 失败 HTTP {status}：{code} {message[:200]}", code=code)
 
 
+#: ROA 风格的接口（PAI 的 AIWorkSpace 就是）。和上面的 RPC 完全是两套签名：
+#: RPC 把参数排序拼进 query 再签；ROA 签的是「方法 + 几个固定头 + x-acs-* 头 + 路径和 query」。
+#: 混用的结果是 `SignatureDoesNotMatch`，而错误信息里不会告诉你是风格用错了。
+AIWORKSPACE = "2021-02-04"
+
+
+def _http_roa(url: str, headers: dict) -> tuple:
+    request = urllib.request.Request(url, headers=headers, method="GET")  # noqa: S310
+    try:
+        with urllib.request.urlopen(request, timeout=_TIMEOUT) as resp:  # noqa: S310
+            return resp.getcode(), json.loads(resp.read().decode() or "{}")
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode(errors="replace")
+        try:
+            return exc.code, json.loads(raw or "{}")
+        except ValueError:
+            return exc.code, {"Message": raw[:200]}
+    except urllib.error.URLError as exc:
+        raise AliyunError(f"连不上阿里云：{exc.reason}") from exc
+
+
+def call_roa(
+    endpoint: str,
+    version: str,
+    path: str,
+    query: Optional[dict] = None,
+    *,
+    creds: Credentials,
+    transport=None,
+) -> dict:
+    """ROA（ACS 1.0）签名的只读调用。
+
+    `transport` 收 `(url, headers)`，比 RPC 那个多一个参数。用例里把假 transport 写成
+    `(url, headers=None)` 就能同时喂给两种风格 —— 一次采集里两种都会用到。
+
+    待签名串的空行是 Content-MD5 和 Content-Type —— GET 没有正文，两个都空，
+    **但那两个换行不能省**，少一个就签不过。query 进签名串时用原始值、不 URL 编码，
+    而真正发出去的 URL 要编码，两边写法不同是对的。
+    """
+    send = transport or _http_roa
+    query = {str(k): str(v) for k, v in (query or {}).items() if v is not None}
+    stamp = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime())
+    headers = {
+        "accept": "application/json",
+        "date": stamp,
+        "host": endpoint,
+        "x-acs-signature-nonce": uuid.uuid4().hex,
+        "x-acs-signature-method": "HMAC-SHA1",
+        "x-acs-signature-version": "1.0",
+        "x-acs-version": version,
+    }
+    if creds.security_token:
+        headers["x-acs-security-token"] = creds.security_token
+    signed = sorted(k for k in headers if k.startswith("x-acs-"))
+    acs = "".join(f"{k}:{headers[k]}\n" for k in signed)
+    pairs = "&".join(f"{k}={query[k]}" if query[k] != "" else k for k in sorted(query))
+    resource = path + (f"?{pairs}" if pairs else "")
+    to_sign = f"GET\n{headers['accept']}\n\n\n{stamp}\n{acs}{resource}"
+    digest = hmac.new(creds.access_key_secret.encode(), to_sign.encode(), hashlib.sha1).digest()
+    headers["authorization"] = f"acs {creds.access_key_id}:{base64.b64encode(digest).decode()}"
+
+    url = f"https://{endpoint}{path}"
+    if query:
+        url += "?" + urllib.parse.urlencode(query)
+    status, body = send(url, headers)
+    if status == 200:
+        return body
+    code = str(body.get("Code") or "")
+    message = _scrub(str(body.get("Message") or ""))
+    if any(m in f"{code} {message}".lower() for m in _DENIED):
+        raise AliyunDenied(
+            f"`{path}` 被拒（{code}）：{message[:200]}\n"
+            f"当前凭证缺这个接口的权限。这不是「没有数据」——采集已中断。",
+            code=code,
+        )
+    raise AliyunError(f"`{path}` 失败 HTTP {status}：{code} {message[:200]}", code=code)
+
+
 def assume_role(
     role_arn: str,
     session: str,
