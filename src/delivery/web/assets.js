@@ -120,6 +120,60 @@ function holdingsCard(items) {
       h("tbody", {}, ...rows))));
 }
 
+const SOURCE_LABEL = { BMCPFS: "CPFS", CPFS: "CPFS", OSS: "OSS", NAS: "NAS" };
+// 可见范围的措辞按「别人能拿它干什么」说，不按枚举值说 —— 枚举值对使用者没有意义
+const ACCESS_LABEL = {
+  PRIVATE: ["只有你看得到", ""],
+  ROLE_PUBLIC: ["工作空间内可见", ""],
+  // 徽章的职责是「扫一眼就看见有问题」，四个字够了。**为什么**谁都能删
+  // （组里那条 pai:* 策略对 PUBLIC 无条件放行）是一整句因果，塞不进小标签 ——
+  // 那句话在卡片顶部的说明行里。另外这里是 createTextNode，星号会原样显示
+  PUBLIC: ["谁都能删", "crit"],
+};
+
+/** 数据集：**唯一一类归属自带的资产**（UserId 就是属主），所以这一栏不用等管理员指派。 */
+function datasetCard(data, admin) {
+  if (!data || !data.collected) return null;
+  const items = data.items || [];
+  if (!items.length && !admin) return null;
+  const rows = items.map((d) => {
+    const [access, tone] = ACCESS_LABEL[d.accessibility] || [d.accessibility || "—", ""];
+    const gone = d.owner_kind === "gone";
+    return h("tr", {},
+      h("td", {}, h("span", { class: "pname" }, d.name),
+        h("span", { class: "pmail" }, `${SOURCE_LABEL[d.source] || d.source} · ${d.path || "—"}`)),
+      h("td", {}, d.workspace_name || d.workspace, h("span", { class: "pmail" }, d.region)),
+      admin
+        ? h("td", {}, gone
+            ? h("span", { class: "warn-text" }, `${d.owner_name || "?"}（号已删）`)
+            : `${d.owner_name || ""} ${d.owner_login || ""}`.trim() || "—")
+        : null,
+      h("td", {}, h("span", { class: tone ? `pill ${tone}` : "" }, access)));
+  });
+  const anyPublic = items.some((d) => d.accessibility === "PUBLIC");
+  return h("section", { class: "card asset-card" },
+    h("div", { class: "asset-head" },
+      h("div", { class: "chips" }, h("b", {}, admin ? "PAI 数据集" : "你的数据集")),
+      h("span", { class: "asset-total" }, h("b", {}, String(items.length)), " 条")),
+    anyPublic
+      ? h("p", { class: "pad muted" },
+          "标着「谁都能删」的那几条可见范围是 PUBLIC —— 用户组里那条 pai 策略对 PUBLIC "
+          + "无条件放行，包括删除。改成「工作空间内可见」就没人删得掉了，"
+          + "而且不碰一个字节的数据。")
+      : null,
+    admin && data.abandoned
+      ? h("div", { class: "banner warn" },
+          `其中 ${data.abandoned} 条的属主 RAM 号已经删了，东西还留着 —— 见「体检」页。`)
+      : null,
+    items.length
+      ? h("div", { class: "scroll" }, h("table", {},
+          h("thead", {}, h("tr", {},
+            h("th", {}, "数据集"), h("th", {}, "工作空间"),
+            admin ? h("th", {}, "属主") : null, h("th", {}, "可见范围"))),
+          h("tbody", {}, ...rows)))
+      : h("p", { class: "pad muted" }, "还没有数据集。"));
+}
+
 // 两种标记的措辞是**给持有人看的动作**，不是给运维看的状态词。
 // 「该换了」要说清楚怎么换才不断服务，否则人会直接删掉旧的那把。
 const KEY_FLAG = {
@@ -211,6 +265,12 @@ export function assetsPage(data, admin) {
     if (holdings.length) nodes.push(holdingsCard(holdings));
     const keys = keysCard(data.keys || {});
     if (keys) nodes.push(keys);
+    const ds = datasetCard(data.datasets, false);
+    if (ds) nodes.push(ds);
+  }
+  if (admin) {
+    const ds = datasetCard(data.datasets, true);
+    if (ds) nodes.push(ds);
   }
   if (!accounts.length) {
     // 资产快照（assets collect）和权限快照（inventory collect）是两套独立采集，

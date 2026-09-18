@@ -1,0 +1,65 @@
+{
+  "_note": "面板开「每个人那块地方」所需的最小权限：在指定桶里建目录 + 建 PAI 数据集。真表是 identity/executor-policy.aliyun-workspaces.json（gitignored，带服务器 IP）。",
+  "_scope": "**OSS 只限这两个桶**（杭州 wuji-algo-dev-hz、新加坡 wuji-algo-dev-sing）。给 oss:* 或 Resource:* 的话，面板就能动所有桶 —— 面板出漏洞时炸的范围应该尽量小。",
+  "_no_delete": "**一条删除动作都没有。** 面板只建不删：离职回收、到期清理都走人工，误删的数据找不回来。",
+  "_pai": "paidataset:CreateDataset 要能设 UserId（代别人建），调用者必须是工作空间的 Owner 或 Admin —— 那是 PAI 控制台里加的，不是 RAM 策略能给的。",
+  "Version": "1",
+  "Statement": [
+    {
+      "Action": [
+        "oss:PutObject",
+        "oss:GetObject",
+        "oss:ListObjects",
+        "oss:GetBucketInfo",
+        "oss:GetBucketLocation"
+      ],
+      "Resource": [
+        "acs:oss:*:*:wuji-algo-dev-hz",
+        "acs:oss:*:*:wuji-algo-dev-hz/*",
+        "acs:oss:*:*:wuji-algo-dev-sing",
+        "acs:oss:*:*:wuji-algo-dev-sing/*"
+      ],
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "<面板服务器公网 IP>"
+          ]
+        }
+      }
+    },
+    {
+      "Action": [
+        "paidataset:CreateDataset",
+        "paidataset:ListDatasets",
+        "paidataset:GetDataset",
+        "paiworkspace:ListWorkspaces",
+        "paiworkspace:ListMembers"
+      ],
+      "Resource": "*",
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "<面板服务器公网 IP>"
+          ]
+        }
+      }
+    },
+    {
+      "Action": [
+        "ram:ListUsers"
+      ],
+      "Resource": "*",
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "<面板服务器公网 IP>"
+          ]
+        }
+      }
+    }
+  ],
+  "_ram": "ram:ListUsers —— 建数据集要填属主的**数字 UserId**，而名册里只有登录名，只能现查。不填的话属主会是面板自己，而 UpdateDataset 事后改 UserId 是**静默无效**的（收下请求、返回 RequestId、什么都没改），只能删了重建。"
+}

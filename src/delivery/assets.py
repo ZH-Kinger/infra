@@ -400,6 +400,104 @@ def _pai_path(uri: str) -> str:
     return body[slash:].rstrip("/") if slash >= 0 else ""
 
 
+#: 数据集的可见范围。**个人目录一律 ROLE_PUBLIC**：
+#: · PRIVATE 只是在 PAI 界面里藏起来，数据面照样谁都挂得到 —— 换来的是虚假的安全感
+#:   加真实的不方便（别人要接手你的活时找不到东西）；
+#: · PUBLIC 更糟：组里那条 `pai:*` 策略对 PUBLIC 无条件放行，**包括删除**。
+#:   现网 9 条个人数据集是 PUBLIC，任何人都能删掉它们。
+#: ROLE_PUBLIC 在两条语句之间，谁都删不了，而工作空间里的人看得见。
+DATASET_ACCESS = "ROLE_PUBLIC"
+#: `ROLE_PUBLIC` 必须同时给这张角色表（不给的话 `CreateDataset` 直接 400）。
+#: 照现网那 30 条抄的 —— 工作空间里的四种角色 + 属主本人
+DATASET_ROLES = (
+    "PAI.WorkspaceAdmin",
+    "PAI.AlgoOperator",
+    "PAI.LabelManager",
+    "PAI.AlgoDeveloper",
+    "owner",
+)
+
+
+#: 挂进 DSW/DLC 时的默认路径。现网 30 条 CPFS 数据集全是这个
+DATASET_MOUNT = "/mnt/data/"
+
+
+def create_dataset(
+    creds,
+    *,
+    region: str,
+    workspace: str,
+    name: str,
+    uri: str,
+    source: str,
+    accessibility: str = DATASET_ACCESS,
+    import_info: Optional[dict] = None,
+    labels: Optional[list] = None,
+    user_id: str,
+    mount_path: str = DATASET_MOUNT,
+    transport=None,
+) -> str:
+    """建一条 PAI 数据集，返回 DatasetId。**这是写操作。**
+
+    `CreateDataset` 只**登记一个指针**，不会去创建底层那个目录（文档要求填「已有的
+    存储路径」）。OSS 那边无所谓——前缀是虚的，写第一个对象时自然就有；CPFS 那边
+    要目录真的存在，得另外想办法。
+
+    `source` 用 `BMCPFS` / `OSS`，`uri` **照现网已有那 30 条的写法**，不照文档示例：
+    文档给的 CPFS 格式是 `nas://<fsid>.<region>/...`，而现网全是
+    `bmcpfs://cpfs-…-vpc-x.<region>.cpfs.aliyuncs.com/<路径>/`。跟着存量走，
+    不然新建的和老的在控制台里会长成两种东西。
+
+    **不提供删除。** `DeleteDataset` 很可能连底层目录一起删（官方文档对底层存储的影响
+    只字未提，只写了「一旦删除，则不可恢复」），而离职交接最常见的情况恰恰是数据要留给
+    接手的人。要删只能人到控制台删，且先确认数据已转移。
+    """
+    from .clouds import aliyun
+
+    body = {
+        "Name": name,
+        "Uri": uri,
+        "DataSourceType": source,
+        "Property": "DIRECTORY",
+        "Accessibility": accessibility,
+        "WorkspaceId": workspace,
+        # 挂载路径。不给的话现网那 30 条的形状就对不上了
+        "Options": json.dumps({"mountPath": mount_path}, separators=(",", ":")),
+    }
+    if accessibility == DATASET_ACCESS:
+        body["AccessibleRoleIdList"] = list(DATASET_ROLES)
+    if import_info:
+        # **PAI 真正拿去挂载的东西。** 不带的话很可能建出一条「看得见但挂不上」的数据集
+        body["ImportInfo"] = json.dumps(import_info, ensure_ascii=False, separators=(",", ":"))
+    if labels:
+        body["Labels"] = labels
+    # 数据集的属主。**空串必须抛，不能静默不带** —— 不带的话 PAI 会把属主记成调用者
+    # （面板自己），而 `UpdateDataset` 事后改 UserId 是**静默无效**的、`DeleteDataset`
+    # 面板又刻意不实现，于是只能去控制台手删重建。线上已经因为这个返工过一次
+    # （49 条属主全是 panel-executor），根因就是「加了参数但调用方没传」。
+    # 要设它，调用者得是工作空间的 Owner 或 Admin
+    if not user_id:
+        raise AssetError(
+            f"建数据集 {name} 没有属主（user_id 为空）。"
+            "**不建**：建出来属主会是面板自己，而且事后改不回来，只能去控制台删了重建。"
+            "先确认这个人的 RAM 登录名在 ListUsers 里查得到"
+        )
+    body["UserId"] = user_id
+    reply = aliyun.call_roa(
+        f"aiworkspace.{region}.aliyuncs.com",
+        aliyun.AIWORKSPACE,
+        "/api/v1/datasets",
+        creds=creds,
+        transport=transport,
+        method="POST",
+        body=body,
+    )
+    got = str(reply.get("DatasetId") or "")
+    if not got:
+        raise AssetError(f"建数据集 {name} 没有返回 DatasetId，不确认是否建成：{str(reply)[:200]}")
+    return got
+
+
 #: 成员账号里那个只读角色的名字。三个账号里都叫这个（见 identity/member-collector-policy.json）
 MEMBER_ROLE = "wuji-panel-collector"
 
@@ -684,6 +782,58 @@ def holdings_view(tickets: Iterable[dict], *, labels: Callable[[str, str], str])
         out.append(item)
     out.sort(key=lambda x: (x["kind"], x["expires_at"] or "9999", x["request_id"]))
     return out
+
+
+def datasets_view(datasets, *, logins=None, labels=None) -> dict:
+    """数据集当资产看。`logins` 给员工那边（只看自己的），`None` 是管理员视角。
+
+    **这是唯一一类归属自带的资产。** ECS、OSS 桶那些，资源中心一个归属标签都不给
+    （实测 6319 个资源零命中），所以只能靠 `asset-owners.json` 一条条人工指；而数据集的
+    `UserId` 就是建它的那个 RAM 用户，采集时已经换成登录名了。所以这一栏对员工来说
+    **一上来就是满的**，不用等管理员指派 —— 那也是它值得单独成一栏、而不是混进
+    `resources` 里的原因。
+
+    `datasets` 是 `None` 表示**没采到**（比如没跑过 `assets collect`，或者 PAI 那几个
+    权限缺了）。那和「你没有数据集」是两回事：前者要去修采集，后者是正常状态。
+    """
+    if datasets is None:
+        return {"collected": False, "items": [], "abandoned": 0}
+    mine = {str(x or "").lower() for x in (logins or ())} - {""}
+    label = labels or (lambda platform, account: account)
+    items, abandoned = [], 0
+    for d in datasets:
+        if not isinstance(d, dict):
+            continue
+        owner = str(d.get("owner_login") or "")
+        kind = str(d.get("owner_kind") or "")
+        if kind == OWNER_GONE:
+            abandoned += 1
+        if logins is not None and owner.lower() not in mine:
+            continue
+        items.append(
+            {
+                "name": str(d.get("name") or ""),
+                "region": str(d.get("region") or ""),
+                "workspace": str(d.get("workspace") or ""),
+                "workspace_name": str(d.get("workspace_name") or ""),
+                "source": str(d.get("source") or ""),
+                "path": str(d.get("path") or ""),
+                "uri": str(d.get("uri") or ""),
+                "accessibility": str(d.get("accessibility") or ""),
+                "owner_login": owner,
+                "owner_name": str(d.get("owner_name") or ""),
+                "owner_kind": kind,
+                "owner_deleted_at": str(d.get("owner_deleted_at") or ""),
+                "account_label": label("aliyun", str(d.get("workspace") or "")),
+            }
+        )
+    items.sort(key=lambda x: (x["region"], x["workspace"], x["name"]))
+    return {
+        "collected": True,
+        "items": items,
+        # 只有管理员那边有意义：员工看自己的，看不到别人遗弃的
+        "abandoned": abandoned if logins is None else 0,
+    }
 
 
 def summary_view(

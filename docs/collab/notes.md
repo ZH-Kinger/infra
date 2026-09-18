@@ -41,3 +41,16 @@
   `web/assets.js` 的 `chips()` 是死代码 + 超 500 行的勾选看不见却会被指派
 - `_EXEC_FIELDS` 接线前要把 `options` 和 `params` 一起纳入
 - 部署 checklist 要写死:模板先于代码上线;「到期日」控件一旦被改成日期区间,资源单立刻发不出去
+
+## [2026-09-18] [TESTER] 「重新打开已关闭的申请单」补测
+- 新增 `tests/unit/test_delivery_request_reopen.py`（18 条）。全量 `make test`：1698 passed / 0 failed / 2 skipped。
+- 安全面已锁：自审批被关的单子重开后 `execute` 仍抛 `SelfApprovalError`、审批事后撤销仍抛 `ApprovalError`、
+  模板被改仍 409，三条都断言云侧零调用。重开不放宽任何门禁。
+- `closed_from` 缺失或被改坏（`""`/`done`/`revoked`/非字符串）一律回 FAILED，不做状态机旁路。
+- 凭证已签发（`cred_user` 或 `sealed.ciphertext`）拒重开：两个判据各自单独验过。
+- 做了 6 组变异检查（砍掉 CLOSED 出边 / 忽略 closed_from / 去掉凭证守卫 / 盲信 closed_from /
+  跳过 `_verify_approval` / 放宽按钮判据），每组都有用例变红。
+- **阻塞 `make lint`**：`src/delivery/requests_api.py:9` 那行新增的接口清单注释 104 > 100 字符（E501），
+  归 dev 改，tester 不碰源码。
+- 顺手修既存失败：`tests/unit/test_delivery_workspace_tree.py::CustomDatasetTests.ok()` 缺
+  `custom_dataset.validate()` 新增的 `oss_region`，补默认值并加一条「OSS 地域必须带 oss- 前缀」的用例。

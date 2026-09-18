@@ -173,8 +173,10 @@ def call(
 AIWORKSPACE = "2021-02-04"
 
 
-def _http_roa(url: str, headers: dict) -> tuple:
-    request = urllib.request.Request(url, headers=headers, method="GET")  # noqa: S310
+def _http_roa(url: str, headers: dict, method: str = "GET", body: bytes = b"") -> tuple:
+    request = urllib.request.Request(  # noqa: S310
+        url, data=body or None, headers=headers, method=method
+    )
     try:
         with urllib.request.urlopen(request, timeout=_TIMEOUT) as resp:  # noqa: S310
             return resp.getcode(), json.loads(resp.read().decode() or "{}")
@@ -196,6 +198,8 @@ def call_roa(
     *,
     creds: Credentials,
     transport=None,
+    method: str = "GET",
+    body: Optional[dict] = None,
 ) -> dict:
     """ROA（ACS 1.0）签名的只读调用。
 
@@ -209,6 +213,11 @@ def call_roa(
     send = transport or _http_roa
     query = {str(k): str(v) for k, v in (query or {}).items() if v is not None}
     stamp = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime())
+    # 有正文时，Content-MD5 和 Content-Type 都要进签名串（GET 那两行是空的）。
+    # 少一个就是 SignatureDoesNotMatch，而错误信息不会说是哪一行对不上
+    raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode() if body else b""
+    md5 = base64.b64encode(hashlib.md5(raw).digest()).decode() if raw else ""  # noqa: S324
+    ctype = "application/json; charset=utf-8" if raw else ""
     headers = {
         "accept": "application/json",
         "date": stamp,
@@ -224,18 +233,24 @@ def call_roa(
     acs = "".join(f"{k}:{headers[k]}\n" for k in signed)
     pairs = "&".join(f"{k}={query[k]}" if query[k] != "" else k for k in sorted(query))
     resource = path + (f"?{pairs}" if pairs else "")
-    to_sign = f"GET\n{headers['accept']}\n\n\n{stamp}\n{acs}{resource}"
+    to_sign = f"{method}\n{headers['accept']}\n{md5}\n{ctype}\n{stamp}\n{acs}{resource}"
     digest = hmac.new(creds.access_key_secret.encode(), to_sign.encode(), hashlib.sha1).digest()
     headers["authorization"] = f"acs {creds.access_key_id}:{base64.b64encode(digest).decode()}"
 
+    if md5:
+        headers["content-md5"] = md5
+        headers["content-type"] = ctype
     url = f"https://{endpoint}{path}"
     if query:
         url += "?" + urllib.parse.urlencode(query)
-    status, body = send(url, headers)
-    if status == 200:
-        return body
-    code = str(body.get("Code") or "")
-    message = _scrub(str(body.get("Message") or ""))
+    # **method 一律显式传下去。** 之前这里在没有正文时调 `send(url, headers)`，
+    # 而那个默认是 GET —— 于是签名按 DELETE 算、请求按 GET 发，回 SignatureDoesNotMatch，
+    # 而错误信息只会说签名不对，不会说是方法不一致
+    status, reply = send(url, headers, method, raw)
+    if status in (200, 201):
+        return reply
+    code = str(reply.get("Code") or "")
+    message = _scrub(str(reply.get("Message") or ""))
     if any(m in f"{code} {message}".lower() for m in _DENIED):
         raise AliyunDenied(
             f"`{path}` 被拒（{code}）：{message[:200]}\n"

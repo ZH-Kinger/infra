@@ -121,3 +121,66 @@ test("有密钥却没采到资产时，不能反过来说「你还没有云账�
   assert.doesNotMatch(text, /你还没有云账号/);
   assert.match(text, /还没采到你的云资源/);
 });
+
+
+// ── 数据集卡 ────────────────────────────────────────────────────────────
+// 数据集是**唯一一类归属自带的资产**（UserId 就是属主），所以员工那页一上来就有内容。
+// 而「没采到」和「你没有数据集」必须分得开 —— 和密钥台账同一条规矩。
+function ds(over = {}) {
+  return {
+    name: "wangzihan", region: "cn-hangzhou", workspace: "590221",
+    workspace_name: "ai_hz_gpu", source: "BMCPFS", path: "/wangzihan",
+    uri: "bmcpfs://x/wangzihan/", accessibility: "ROLE_PUBLIC",
+    owner_login: "wangzihan", owner_name: "王梓涵", owner_kind: "user",
+    owner_deleted_at: "", account_label: "阿里云主账号", ...over,
+  };
+}
+
+function page(datasets, admin = false) {
+  const nodes = assetsPage(
+    { captured_at: "2026-09-18T00:00:00+08:00", accounts: [], holdings: [], keys: {}, datasets },
+    admin,
+  );
+  return nodes.map((n) => n.textContent).join("\n");
+}
+
+test("数据集出现在员工资产页上", () => {
+  const text = page({ collected: true, items: [ds()], abandoned: 0 });
+  assert.match(text, /你的数据集/);
+  assert.match(text, /wangzihan/);
+  assert.match(text, /CPFS/);
+});
+
+test("没采到时整张卡不出现，也不说「你没有数据集」", () => {
+  // collected:false = 没跑过采集 / PAI 权限掉了。这跟「确实没有」是两回事
+  const text = page({ collected: false, items: [], abandoned: 0 });
+  assert.doesNotMatch(text, /你的数据集/);
+  assert.doesNotMatch(text, /还没有数据集/);
+});
+
+test("PUBLIC 要明说「谁都能删」，不能只印枚举值", () => {
+  // 组里那条 pai:* 策略对 PUBLIC 无条件放行，包括删除。印个 "PUBLIC" 没人看得懂风险
+  const text = page({ collected: true, items: [ds({ accessibility: "PUBLIC" })], abandoned: 0 });
+  assert.match(text, /谁都能删/);
+  // 徽章走的是 createTextNode，**星号会原样显示** —— 本仓库没有 Markdown 渲染。
+  // 不断言这条的话，`**谁都能删**` 和 `谁都能删` 两种写法都会绿
+  assert.doesNotMatch(text, /\*\*/, "徽章里不该出现 Markdown 星号");
+  // 为什么谁都能删，得在卡片说明里讲清楚 —— 塞不进小标签
+  assert.match(text, /无条件放行/);
+});
+
+test("管理员那边多一列属主，还要提示有几条是被遗弃的", () => {
+  const text = page(
+    { collected: true, items: [ds({ owner_kind: "gone", owner_name: "朱俊磊" })], abandoned: 1 },
+    true,
+  );
+  assert.match(text, /PAI 数据集/);
+  assert.match(text, /朱俊磊/);
+  assert.match(text, /号已删/);
+  assert.match(text, /1 条的属主/);
+});
+
+test("员工看不到别人遗弃的计数", () => {
+  const text = page({ collected: true, items: [ds()], abandoned: 0 }, false);
+  assert.doesNotMatch(text, /属主 RAM 号已经删/);
+});

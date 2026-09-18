@@ -1,0 +1,11 @@
+{
+  "_note": "允许登记成自定义数据集的桶 / 文件系统。真表是 identity/dataset-buckets.json（gitignored）。",
+  "_why": "**这是自定义数据集功能唯一的控制点。** PAI 在 DSW/DLC 里读写存储走的是服务角色（AliyunPAIDSWDefaultRole，Resource: * 、无 Condition），跟申请人自己的 RAM 策略没关系 —— 所以「登记一条指向某路径的数据集」等价于「拿到那个路径的读写权限」。不限制 URI 的话，谁都能注册一条指向财务桶的数据集，挂进 DSW 就读到了。",
+  "_fail_closed": "**没配这个文件 = 一律拒绝登记**，不是「没配就都放行」。配置缺失时放行是这类控制点最常见的死法。",
+  "_adding": "要加新的桶，写明为什么能加 —— 加一个桶等于把那个桶对所有能用这个功能的人开放。",
+  "allowed": [
+    "wuji-algo-dev-hz",
+    "wuji-algo-dev-sing",
+    "bmcpfs-00000ub3ici1dnniit2i0"
+  ]
+}

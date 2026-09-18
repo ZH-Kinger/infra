@@ -1402,12 +1402,29 @@ def make_handler(
                     # （people.py 里那条「邮箱对应的账号已绑到另一个飞书身份」就是为它写的）。
                     # 回落到会话邮箱换不来任何可用性：名册里没邮箱的人本来也没法被指派资源
                     mail = person.email if person else ""
+                snap_assets = backend.assets()
                 view = assets_mod.summary_view(
-                    backend.assets(),
+                    snap_assets,
                     scopes=scopes,
                     labels=labels.account,
                     owners=backend.asset_owners(),
                     viewer_email=mail,
+                )
+                # 数据集单独一栏，不混进 resources：**它是唯一一类归属自带的资产**
+                # （UserId 就是属主），所以员工那边一上来就是满的，不用等管理员指派。
+                # `.get` 拿不到就是 None —— 没采到，和「没有数据集」要分得开
+                view["datasets"] = assets_mod.datasets_view(
+                    (snap_assets or {}).get("datasets"),
+                    logins=(
+                        None
+                        if admin
+                        else [
+                            r.name
+                            for r in (person.accounts if person else ())
+                            if r.platform == "aliyun"
+                        ]
+                    ),
+                    labels=labels.account,
                 )
                 if not admin:
                     # 面板自己发出去的东西归属最确定 —— 申请人就写在单子里，不用查归属表。

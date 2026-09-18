@@ -175,6 +175,85 @@ _CSV_COLUMNS = {
 }
 
 
+def departments(app_id: str, app_secret: str, *, get=None, token: str = "") -> dict:
+    """走完整棵部门树。返回 `{open_department_id: (部门名, 上级 id)}`。
+
+    **必须逐层 `children` 递归**，两个坑都实测踩过：
+      · `/contact/v3/departments` **只返回顶层**（现网 12 个），底下还有 15 个看不到；
+      · `find_by_department` 的 `fetch_child=true` **不往下钻** —— 加不加都只回直属成员。
+    只看顶层的话，50 个人里只有 6 个能对上部门，而真实数字是 49。
+
+    根部门 `0` 通常不在应用的通讯录范围里（`no dept authority`），所以从「能列出来的
+    顶层」开始走，不从根走。
+    """
+    get = get or _get
+    token = token or tenant_token(app_id, app_secret)
+    tree: dict = {}
+    queue = [(d, "") for d in _pages("/contact/v3/departments", {}, token, get)]
+    while queue:
+        dep, parent = queue.pop(0)
+        did = str(dep.get("open_department_id") or "")
+        if not did or did in tree:
+            continue
+        tree[did] = (str(dep.get("name") or ""), parent)
+        for kid in _pages(f"/contact/v3/departments/{did}/children", {}, token, get):
+            queue.append((kid, did))
+    return tree
+
+
+def staff_index(app_id: str, app_secret: str, *, get=None, token: str = "") -> dict:
+    """走完整棵部门树，按**公司邮箱**建索引。
+
+    `{邮箱小写: {"union_id", "name", "department", "department_id"}}`
+
+    为什么用邮箱而不是 union_id：新人**没登录过面板就没有 union_id**，而目录这件事
+    不该等他登录。名册里本来就有公司邮箱，飞书的部门成员对象里也带
+    `enterprise_email` —— 两边直接对得上，一个人都不用等。
+
+    **别用 `batch_get_id` 按邮箱反查**：那个接口查的是 `email` 字段（个人邮箱），
+    而公司邮箱在 `enterprise_email` 里。实测全员 `email` 都是空的，所以反查恒返空，
+    而且返回 `code: 0 success` —— 查不到和查到空长得一模一样。正着扫反而简单可靠。
+
+    顺带把 `union_id` 也带出来：名册里缺 union_id 的人可以据此补上。
+    """
+    get = get or _get
+    token = token or tenant_token(app_id, app_secret)
+    tree = departments(app_id, app_secret, get=get, token=token)
+
+    def depth(did: str) -> int:
+        n, cur = 0, did
+        while cur and cur in tree:
+            n, cur = n + 1, tree[cur][1]
+        return n
+
+    best: dict = {}
+    for did, (name, _parent) in tree.items():
+        here = depth(did)
+        for m in _pages(
+            "/contact/v3/users/find_by_department",
+            {"department_id": did, "user_id_type": "union_id"},
+            token,
+            get,
+        ):
+            mail = str(m.get("enterprise_email") or m.get("email") or "").strip().lower()
+            if not mail:
+                continue
+            # 一个人挂在多个部门时取**最深的那个**：`算法组/预训练组` 比 `算法组`
+            # 有信息量，而路径只能有一段
+            if here <= best.get(mail, (0,))[0]:
+                continue
+            best[mail] = (
+                here,
+                {
+                    "union_id": str(m.get("union_id") or ""),
+                    "name": str(m.get("name") or ""),
+                    "department": name,
+                    "department_id": did,
+                },
+            )
+    return {mail: info for mail, (_d, info) in best.items()}
+
+
 def from_csv(path: str) -> list:
     try:
         with Path(path).open(encoding="utf-8-sig", newline="") as fh:
