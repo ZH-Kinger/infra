@@ -369,3 +369,101 @@ class AbandonedTests(unittest.TestCase):
 
         clean = hygiene.build(None, [], datasets=[])
         self.assertFalse(any("数据集" in s for s in clean.skipped))
+
+
+class MergeTests(unittest.TestCase):
+    """回收站要**只增不减**地攒。这是这个功能存在的全部理由。
+
+    云上那份有保留期，过期就查不到了。每次采集整份覆盖的话，保留期一过那几个名字会
+    原样消失 —— 想解决的问题原封不动复发，只是从「晚了 24 天」变成「晚了一个采集周期」。
+    """
+
+    def e(self, uid, name, when="2026-09-05T00:00:00Z"):
+        return {"user_id": uid, "login": f"u{uid}", "name": name, "deleted_at": when}
+
+    def test_someone_who_aged_out_of_the_cloud_bin_is_still_remembered(self):
+        """朱俊磊 9 月在回收站里被记下；10 月云上已经清了 —— 台账里必须还在。"""
+        kept = assets.merge_recycle_bin(None, [self.e("999", "朱俊磊")])
+        later = assets.merge_recycle_bin(kept, [])  # 云上已经没有他了
+        self.assertEqual([u["name"] for u in later], ["朱俊磊"])
+
+    def test_skipping_the_pai_pass_never_wipes_what_was_collected(self):
+        """`--skip-pai` 是一次例行的「只刷资源中心」。它把攒下来的记录抹掉的话，
+        这个功能会死得毫无征兆。"""
+        kept = assets.merge_recycle_bin(None, [self.e("999", "朱俊磊")])
+        self.assertEqual(assets.merge_recycle_bin(kept, None), kept)
+
+    def test_the_earlier_record_wins(self):
+        """早一次采到的信息离真实删除时间更近；后来那次可能已经是残缺的。"""
+        kept = assets.merge_recycle_bin(None, [self.e("999", "朱俊磊", "2026-09-05T00:00:00Z")])
+        merged = assets.merge_recycle_bin(kept, [self.e("999", "", "2026-09-30T00:00:00Z")])
+        self.assertEqual(merged[0]["name"], "朱俊磊")
+        self.assertTrue(merged[0]["deleted_at"].startswith("2026-09-05"))
+
+    def test_nothing_ever_collected_stays_none(self):
+        """从来没采过 ≠ 采过但是空的。"""
+        self.assertIsNone(assets.merge_recycle_bin(None, None))
+        self.assertEqual(assets.merge_recycle_bin(None, []), [])
+
+    def test_entries_without_an_id_are_dropped(self):
+        """空 id 会变成一个「匹配任何缺 id 的数据集」的键 ——
+        那会把一个真实离职者的姓名安到一条不知属主的数据集上。"""
+        merged = assets.merge_recycle_bin(None, [self.e("", "谁"), self.e("1", "甲")])
+        self.assertEqual([u["user_id"] for u in merged], ["1"])
+
+
+class PagingGuardTests(unittest.TestCase):
+    """回收站翻页的两道 fail-closed 守卫。丢掉的话，少掉的那个人名下的数据集会被体检
+    **正面断言**「保留期已过，现在没人认得出这是谁的」—— 那是一句错话，不是缺数据。"""
+
+    def test_a_truncated_page_without_a_marker_raises(self):
+        def transport(url, headers=None):
+            return 200, {"IsTruncated": True, "Marker": "", "Users": {"User": [{"UserId": "1"}]}}
+
+        with self.assertRaises(aliyun.AliyunError):
+            assets.collect_recycle_bin(aliyun.Credentials("a", "b"), transport=transport)
+
+    def test_a_renamed_inner_key_raises_instead_of_reporting_empty(self):
+        """接口结构变了要响。静默空表会让体检说出上面那句错话。"""
+
+        def transport(url, headers=None):
+            return 200, {"IsTruncated": False, "Users": {"UserList": [{"UserId": "1"}]}}
+
+        with self.assertRaises(aliyun.AliyunError):
+            assets.collect_recycle_bin(aliyun.Credentials("a", "b"), transport=transport)
+
+    def test_a_missing_container_raises_too(self):
+        def transport(url, headers=None):
+            return 200, {"IsTruncated": False}
+
+        with self.assertRaises(aliyun.AliyunError):
+            assets.collect_recycle_bin(aliyun.Credentials("a", "b"), transport=transport)
+
+    def test_a_genuinely_empty_bin_is_not_an_error(self):
+        """回收站是空的是正常状态 —— 对它报错等于教人忽略这类报错。"""
+        for body in (
+            {"IsTruncated": False, "Users": {}},
+            {"IsTruncated": False, "Users": {"User": []}},
+        ):
+
+            def transport(url, headers=None, _b=body):
+                return 200, _b
+
+            got = assets.collect_recycle_bin(aliyun.Credentials("a", "b"), transport=transport)
+            self.assertEqual(got, [], body)
+
+
+class SnapshotGuardTests(unittest.TestCase):
+    def test_a_corrupt_datasets_key_raises_instead_of_crashing_downstream(self):
+        import json as _json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "assets.json"
+            for bad in ({"a": 1}, "nope", 3):
+                path.write_text(_json.dumps({"accounts": [], "datasets": bad}), encoding="utf-8")
+                with self.assertRaises(assets.AssetError, msg=repr(bad)):
+                    assets.load(str(path))
+            path.write_text(_json.dumps({"accounts": [], "datasets": []}), encoding="utf-8")
+            self.assertEqual(assets.load(str(path))["datasets"], [])

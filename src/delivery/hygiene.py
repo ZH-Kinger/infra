@@ -45,7 +45,7 @@ class Finding:
         return f"{self.platform}/{self.account}/{self.subject}"
 
 
-#: 五类各自的标题和那句给人看的话。**只在这里写一份** —— 命令行和面板是同一批结论，
+#: 六类各自的标题和那句给人看的话。**只在这里写一份** —— 命令行和面板是同一批结论，
 #: 各写各的迟早会出现「网页上说该停用、命令行说该轮换」这种自相矛盾的提示。
 #: 顺序就是展示顺序：人的问题排在密钥问题前面。
 #: 标题和说明会过一次 `str.format`（填阈值），所以**正文里不能出现裸的花括号**。
@@ -209,17 +209,18 @@ def _abandoned(datasets: Optional[Iterable]) -> list:
     **保留期也过了**，那就只剩一个数字 UserId，谁都认不出来了；这种要单独说清楚，
     否则看的人会以为只是漏填了名字。
     """
+    from . import assets as assets_mod
+
     out = []
     for d in datasets or ():
-        if str(d.get("owner_kind") or "") != "gone":
+        if str(d.get("owner_kind") or "") != assets_mod.OWNER_GONE:
             continue
         name = str(d.get("owner_name") or "").strip()
         login = str(d.get("owner_login") or "").strip()
         deleted = str(d.get("owner_deleted_at") or "")[:10]
         if name or login:
-            why = f"属主 {name} {login}".strip() + (
-                f" 的账号已于 {deleted} 删除" if deleted else " 的账号已删除"
-            )
+            who = " ".join(x for x in (name, login) if x)
+            why = f"属主 {who}" + (f" 的账号已于 {deleted} 删除" if deleted else " 的账号已删除")
         else:
             why = (
                 f"属主（UserId {d.get('owner_user_id') or '未知'}）的账号已删除，"

@@ -1531,10 +1531,15 @@ def make_handler(
 
             # 数据集在**资产**快照里（另一个文件）。读不了就传 None，
             # hygiene 会记一笔跳过 —— 传空列表等于断言「一条被遗弃的都没有」
+            asset_error = ""
             try:
                 snap_assets = backend.assets()
-            except DeliveryError:
+            except DeliveryError as exc:
+                # **说清楚是哪一种**：「文件坏了」和「还没采过」在页面上会长得一模一样，
+                # 而管理员对这两件事的反应完全不同（去修文件 vs 去跑一次采集）
                 snap_assets = None
+                asset_error = str(exc).splitlines()[0]
+                print(f"[hygiene] 资产快照读不了：{type(exc).__name__}: {exc}", file=sys.stderr)
             report = hygiene.build(
                 snapshot,
                 roster,
@@ -1551,6 +1556,8 @@ def make_handler(
             out["status_error"] = status_error
             out["status_available"] = bool(app_id and app_secret)
             out["captured_at"] = snapshot.captured_at if snapshot else ""
+            if asset_error:
+                out["skipped"] = [f"资产快照读不了：{asset_error}"] + list(out.get("skipped") or [])
             return out
 
         def _requests(self, method: str, path: str, body):

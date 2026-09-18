@@ -290,11 +290,17 @@ def paginate(
     creds: Credentials,
     transport: Optional[Transport] = None,
     max_pages: int = 200,
+    strict_key: bool = False,
 ) -> list:
     """翻页取列表。
 
     `max_pages` 是防御性的：`IsTruncated` 为真但 `Marker` 不变时会无限循环，
     真机上见过（见 identity/collect.py 里同样的守卫）。宁可少取也不要挂死。
+
+    `strict_key` 给「拿不到就会说错话」的调用方用：容器**非空却没有那个键**时抛错，
+    而不是当成空列表。默认关着 —— 多数调用方拿到空列表只是少显示几行，而这一类
+    调用方（比如回收站）拿到空列表会让下游**正面断言**「这个人认不出来了」。
+    容器本身是空字典时照旧当成「确实没有」，那是正常状态。
     """
     out, marker, pages = [], "", 0
     while pages < max_pages:
@@ -308,6 +314,11 @@ def paginate(
         if not isinstance(node, dict):
             raise AliyunError(
                 f"`{action}` 的响应缺 `{container}`，不能当作空结果：{str(body)[:200]}"
+            )
+        if strict_key and node and key not in node:
+            raise AliyunError(
+                f"`{action}` 的响应里 `{container}` 非空却没有 `{key}`，"
+                f"接口结构可能变了，不能当作空结果：{str(body)[:200]}"
             )
         out += node.get(key) or []
         if not body.get("IsTruncated"):

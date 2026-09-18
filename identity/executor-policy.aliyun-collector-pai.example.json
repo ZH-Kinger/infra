@@ -1,0 +1,47 @@
+{
+  "_note": "面板采集身份采 PAI 数据集 + RAM 回收站所需的最小权限。真正那份是 identity/executor-policy.aliyun-collector-pai.json（gitignored，因为带服务器 IP）。全部是 List 级只读，一条写权限都没有。",
+  "_actions": {
+    "paiworkspace:ListWorkspaces": "列工作空间。注意前缀是 paiworkspace 不是 pai —— AliyunPAIReadOnlyAccess 里的 pai:List* 盖不住它",
+    "paiworkspace:ListMembers": "列工作空间成员，用来知道谁在哪个空间（这是权限，不是归属）",
+    "paidataset:ListDatasets": "列数据集。前缀又不一样，是 paidataset",
+    "ram:ListUsers": "UserId → RAM 登录名。**归属靠它**，不靠成员表：被移出工作空间的人号还在，只看成员表会把「权限调整」误报成「人已经没了」",
+    "ram:ListUsersInRecycleBin": "回收站。号已经删了的人，趁保留期内把 UserId → 姓名记下来"
+  },
+  "_not_needed": "sts:GetCallerIdentity 任何身份都能调，不用单独授权（现有策略里已有一条，保持不变即可）。三个 PAI action 都不支持资源级授权，Resource 只能是 *。",
+  "_verified": "action 名逐个查过官方授权信息表（help.aliyun.com 对应 API 页的「授权信息」一节）。**推断会错**：按 AliyunPAIReadOnlyAccess 里的 pai:List* 推出来的 pai:ListWorkspaces / pai:ListDatasets 两个都是错的。",
+  "_untested": "尚未用一个只带这份策略的身份真机验证过 —— 面板服务器 SSH 进不去。上线前必须验一次：策略挂上去后跑 delivery assets collect，确认 61 条数据集和回收站都采得到。",
+  "Version": "1",
+  "Statement": [
+    {
+      "Action": [
+        "paiworkspace:ListWorkspaces",
+        "paiworkspace:ListMembers",
+        "paidataset:ListDatasets"
+      ],
+      "Resource": "*",
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "<面板服务器公网 IP>"
+          ]
+        }
+      }
+    },
+    {
+      "Action": [
+        "ram:ListUsers",
+        "ram:ListUsersInRecycleBin"
+      ],
+      "Resource": "*",
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "<面板服务器公网 IP>"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -168,42 +168,79 @@ OWNER_GONE = "gone"  # RAM 里已经查无此人 —— 人走了，数据集和
 
 
 def collect_recycle_bin(creds, *, transport=None) -> list:
-    """RAM 用户回收站：删掉但还没过保留期的子账号。`IMS.ListUsersInRecycleBin`。
+    """RAM 用户回收站：删掉但还没过保留期的子账号。
 
-    **趁保留期内把 UserId → 姓名固化下来。** 过了期这个人就只剩一个数字 UserId，
+    `IMS.ListUsersInRecycleBin`（`ims.aliyuncs.com` 2019-08-15），所需权限
+    `ram:ListUsersInRecycleBin`，不支持资源级授权。
+
+    **趁保留期内把 UserId → 姓名记下来。** 过期之后这个人在云上就只剩一个数字 UserId，
     而他留下的数据集、目录、机器还在 —— 实测已经有一条是这样了（`/cwr`，删于
-    2026-08-05，回收站里已经查不到，现在没人说得清那是谁的）。
+    2026-08-05，回收站里已经查不到，现在没人说得清那是谁的）。所以采到之后要**并进
+    上一份快照**（见 `merge_recycle_bin`）：只靠这一次的结果等于没记，保留期一过，
+    那几个名字会原样消失，只是把「晚了 24 天」推迟成「晚了一个采集周期」。
 
     这是**离职回收缺的那半块**：体检清单原本只能回答「这个号的主人还在不在通讯录里」，
     回收站回答的是反向的那个问题 —— 号已经没了，他留下的东西还在没在。
+
+    翻页走 `aliyun.paginate`：它对「结构不对」和「说还有下一页却不给 Marker」都抛错。
+    自己写一遍很容易把这两道守卫丢掉，而丢掉的后果在这里格外难看 —— 少掉的那个人名下的
+    数据集会被体检**正面断言**「保留期已过，现在没人认得出这是谁的」，那是一句错话，
+    不是一句缺数据的话。
     """
     from .clouds import aliyun
 
-    out, marker = [], ""
-    for _ in range(_MAX_PAGES):
-        query = {"MaxItems": "100"}
-        if marker:
-            query["Marker"] = marker
-        body = aliyun.call(
-            *aliyun.IMS, "ListUsersInRecycleBin", query, creds=creds, transport=transport
+    out = []
+    for u in aliyun.paginate(
+        *aliyun.IMS,
+        "ListUsersInRecycleBin",
+        key="User",
+        container="Users",
+        creds=creds,
+        transport=transport,
+        strict_key=True,
+    ):
+        uid = str(u.get("UserId") or "")
+        if not uid:
+            # 没有 UserId 就认不回任何东西。收进来的话，空串会成为一个「匹配任何缺 id 的
+            # 数据集」的键 —— 那会把一个真实离职者的姓名安到一条不知属主的数据集上
+            continue
+        principal = str(u.get("UserPrincipalName") or "")
+        out.append(
+            {
+                "user_id": uid,
+                # 登录名是 `<名>@<UID>.onaliyun.com`，只留 @ 前面那段，和别处的登录名对得上
+                "login": principal.split("@", 1)[0],
+                "name": str(u.get("DisplayName") or ""),
+                "deleted_at": str(u.get("RecycleDate") or ""),
+                # 哪天彻底清除。**这是倒计时**：过了这天云上就再也查不到这个人了
+                "purge_at": str(u.get("DeleteDate") or ""),
+            }
         )
-        for u in (body.get("Users") or {}).get("User") or []:
-            principal = str(u.get("UserPrincipalName") or "")
-            out.append(
-                {
-                    "user_id": str(u.get("UserId") or ""),
-                    # 登录名是 `<名>@<UID>.onaliyun.com`，只留 @ 前面那段，和别处的登录名对得上
-                    "login": principal.split("@", 1)[0],
-                    "name": str(u.get("DisplayName") or ""),
-                    "deleted_at": str(u.get("RecycleDate") or ""),
-                }
-            )
-        if not body.get("IsTruncated"):
-            return out
-        marker = str(body.get("Marker") or "")
-        if not marker:
-            return out
-    raise AssetError("回收站翻页超过上限，数据不完整，已中断")
+    return out
+
+
+def merge_recycle_bin(old, new) -> Optional[list]:
+    """把这次采到的回收站并进上一份快照里的那份。**只增不减。**
+
+    云上的回收站有保留期，过期就查不到了。每次采集整份覆盖的话，保留期一过那几个名字
+    会原样消失 —— 这个功能想解决的问题原封不动地复发。所以这里做并集，不做替换。
+
+    `new` 是 None 表示这次没采（比如 `--skip-pai`）：**原样留着旧的**。
+    绝不能因为「这次没问」就把攒下来的记录抹掉 —— 一次例行的「只刷资源中心」
+    就把台账清空，是这个功能最容易死的方式。
+
+    同一个 id 以**先记下的那条**为准：早一次采到的信息离真实删除时间更近。
+    """
+    if new is None:
+        return list(old) if old is not None else None
+    merged: dict = {}
+    for entry in list(old or ()) + list(new):
+        if not isinstance(entry, dict):
+            continue
+        uid = str(entry.get("user_id") or "")
+        if uid and uid not in merged:
+            merged[uid] = dict(entry)
+    return sorted(merged.values(), key=lambda e: (e.get("deleted_at") or "", e["user_id"]))
 
 
 def collect_pai_datasets(
@@ -243,7 +280,7 @@ def collect_pai_datasets(
     }
     # 回收站只用来**认人**，不改 owner_kind：号确实已经删了，
     # 只是趁保留期还在，把「那是谁」记下来
-    bin_users = {str(u.get("user_id") or ""): u for u in (recycled or ())}
+    bin_users = {str(u.get("user_id") or ""): u for u in (recycled or ()) if u.get("user_id")}
     out: list = []
     skipped: list = []
     for region in regions:
@@ -275,7 +312,7 @@ def collect_pai_datasets(
                 owner = ram_users.get(uid, {})
                 kind = OWNER_USER if owner else (OWNER_ROOT if uid == account else OWNER_GONE)
                 recycled_at = ""
-                if kind == OWNER_GONE and uid in bin_users:
+                if kind == OWNER_GONE and uid and uid in bin_users:
                     owner = bin_users[uid]
                     recycled_at = str(owner.get("deleted_at") or "")
                 uri = str(d.get("Uri") or "")
@@ -443,6 +480,11 @@ def load(path: Optional[str]) -> Optional[dict]:
         raise AssetError(f"读不了资产快照：{type(exc).__name__}") from exc
     if not isinstance(data, dict) or not isinstance(data.get("accounts"), list):
         raise AssetError("资产快照格式不对")
+    for key in ("datasets", "recycle_bin"):
+        # 缺这个键是正常的（没采过）；**在但不是列表**就是文件坏了，别放它进下游 ——
+        # 下游只会拿到一个 AttributeError，然后整页 500，而没人知道是文件坏了
+        if key in data and not isinstance(data[key], list):
+            raise AssetError(f"资产快照里的 {key} 不是列表，文件可能坏了")
     return data
 
 

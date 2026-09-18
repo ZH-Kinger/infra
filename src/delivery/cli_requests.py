@@ -661,24 +661,45 @@ def _assets(args) -> int:
             )
         # PAI 数据集：和资源中心是两条路（那边不给归属，这边 UserId 就是属主）。
         # 采不到只记一笔，不让整次资产采集失败
-        sets, skipped, ds_err, recycled = None, [], "", None
+        sets, skipped, ds_err, fresh_bin, bin_err = None, [], "", None, ""
+        # 上一份快照里攒下来的回收站记录：云上那份有保留期，这份没有。
+        # **读不了就当没有**，不能让它挡住这次采集
+        kept_bin = None
+        try:
+            previous = assets.load(args.out)
+            kept_bin = (previous or {}).get("recycle_bin")
+        except DeliveryError as exc:
+            print(f"  ⚠ 上一份快照读不了，回收站记录这次从零开始：{exc}")
+
         if not args.skip_pai:
             base = args.aliyun_profile[0] if args.aliyun_profile else "ALIYUN"
             creds = aliyun.Credentials.from_env(base)
+            # **回收站单独一个 try**：它只是用来认人的补充数据，而 PAI 数据集才是主数据。
+            # 合在一起的话，采集身份少一个 ram:ListUsersInRecycleBin，
+            # 整份数据集登记就会从快照里消失 —— 而 PAI 那边其实一点问题都没有
             try:
-                # 回收站先采：数据集的属主要靠它认人，而它有保留期 —— 过期就再也查不到了
-                recycled = assets.collect_recycle_bin(creds)
+                fresh_bin = assets.collect_recycle_bin(creds)
+            except DeliveryError as exc:
+                bin_err = next((ln.strip() for ln in str(exc).splitlines() if ln.strip()), "")
+            recycled = assets.merge_recycle_bin(kept_bin, fresh_bin)
+            try:
                 sets, skipped = assets.collect_pai_datasets(creds, recycled=recycled)
             except DeliveryError as exc:
                 ds_err = next((ln.strip() for ln in str(exc).splitlines() if ln.strip()), "")
+        else:
+            recycled = assets.merge_recycle_bin(kept_bin, None)
 
         data = assets.build_snapshot(jobs, datasets=sets, dataset_error=ds_err, recycled=recycled)
         out = _write_private(args.out, data)
         failed = [a for a in data["accounts"] if a.get("error")]
         total = sum(len(a.get("resources") or []) for a in data["accounts"])
         print(f"已写入 {out}（权限 600）：{total} 个资源")
+        if bin_err:
+            print(f"  ⚠ 回收站没采到：{bin_err}（旧记录照旧保留，数据集照常采）")
         if recycled is not None:
-            print(f"  RAM 回收站 {len(recycled)} 个已删账号（趁保留期内固化姓名）")
+            added = len(recycled) - len(kept_bin or ())
+            note = f"，本次新增 {added}" if added > 0 else ""
+            print(f"  RAM 回收站累计 {len(recycled)} 个已删账号{note}")
         if sets is not None:
             gone = [d for d in sets if d["owner_kind"] == assets.OWNER_GONE]
             tail = f"，其中 {len(gone)} 条属主已经不在了" if gone else ""
