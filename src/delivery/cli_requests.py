@@ -234,6 +234,13 @@ def add_parsers(commands) -> None:
     collect.add_argument("--out", default="identity/assets.json")
     collect.add_argument("--aliyun-profile", action="append", default=[], metavar="PREFIX")
     collect.add_argument("--skip-volcano", action="store_true")
+    collect.add_argument(
+        "--member",
+        action="append",
+        default=[],
+        metavar="UID",
+        help="资源目录成员账号的 UID，可给多个。主账号的采集身份换临时凭证进去（只读角色）",
+    )
 
     ap = commands.add_parser("approval", help="飞书审批配置辅助")
     asub = ap.add_subparsers(dest="approval_command", required=True)
@@ -547,7 +554,15 @@ def _assets(args) -> int:
         def aliyun_job(prefix: str):
             return lambda: assets.collect_aliyun(aliyun.Credentials.from_env(prefix))
 
+        def member_job(uid: str):
+            # 主账号的采集身份（第一个 profile）换临时凭证进成员账号
+            base = args.aliyun_profile[0] if args.aliyun_profile else "ALIYUN"
+            return lambda: assets.collect_member(aliyun.Credentials.from_env(base), uid)
+
         jobs = [("aliyun", p, aliyun_job(p)) for p in (args.aliyun_profile or ["ALIYUN"])]
+        # 成员账号：资源目录纳管的那几个。采不到会被 build_snapshot 记成这个账号的 error，
+        # 不会静默少一个账号 —— 那样资产页会显示成「这个账号什么都没有」
+        jobs += [("aliyun", uid, member_job(uid)) for uid in (args.member or [])]
         if not args.skip_volcano:
             jobs.append(
                 (

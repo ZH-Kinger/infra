@@ -65,6 +65,57 @@ def _aliyun_attachments(creds, transport) -> list:
             raise aliyun.AliyunError("ListPolicyAttachments 翻页超过 200 页，已中断")
 
 
+def _aliyun_keys(creds, user: str, transport) -> list:
+    """一个 RAM 子账号的 AK 清单。**绝不返回 secret**（那个接口本来也不给）。
+
+    `GetAccessKeyLastUsed` 是关键：没有它，「该轮换了」和「这把根本没人用」分不开，
+    而这两种的处置完全相反 —— 前者要提醒本人换，后者该直接停用。
+    本次审计就是靠它发现 feishu-bot-master 那把 AK 建出来 163 天一次没用过。
+    """
+    try:
+        items = aliyun.paginate(
+            *aliyun.RAM,
+            "ListAccessKeys",
+            key="AccessKey",
+            container="AccessKeys",
+            params={"UserName": user},
+            creds=creds,
+            transport=transport,
+        )
+    except aliyun.AliyunDenied:
+        # 没给这个权限就当没有这项信息。**不要吞成空列表**外加静默——
+        # 上层按 `keys is None` 区分「没有 AK」和「没采到」
+        return None
+    out = []
+    for k in items:
+        kid = str(k.get("AccessKeyId") or "")
+        if not kid:
+            continue
+        last = ""
+        try:
+            got = aliyun.call(
+                *aliyun.RAM,
+                "GetAccessKeyLastUsed",
+                {"UserName": user, "UserAccessKeyId": kid},
+                creds=creds,
+                transport=transport,
+            )
+            last = str((got.get("AccessKeyLastUsed") or {}).get("LastUsedDate") or "")
+        except aliyun.AliyunError:
+            last = ""
+        out.append(
+            {
+                # 只留前 8 位：足够在两次采集之间认出是同一把，又不至于把完整 AKId
+                # 写进一个会被传阅的快照文件
+                "id": kid[:8],
+                "status": str(k.get("Status") or ""),
+                "created": str(k.get("CreateDate") or ""),
+                "last_used": last,
+            }
+        )
+    return out
+
+
 def collect_aliyun(creds, *, transport=None, progress: Optional[Progress] = None) -> dict:
     uid = str(
         aliyun.call(*aliyun.STS, "GetCallerIdentity", creds=creds, transport=transport).get(
@@ -133,6 +184,7 @@ def collect_aliyun(creds, *, transport=None, progress: Optional[Progress] = None
             "email": str(u.get("Email") or ""),
             "policies": sorted(set(user_policies.get(str(u.get("UserName") or ""), []))),
             "groups": sorted(user_groups.get(str(u.get("UserName") or ""), [])),
+            "keys": _aliyun_keys(creds, str(u.get("UserName") or ""), transport),
         }
         for u in users
     ]

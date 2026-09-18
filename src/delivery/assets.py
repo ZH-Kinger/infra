@@ -140,6 +140,43 @@ def collect_volcano(creds: volcano.Credentials, *, transport=None, progress=None
     raise AssetError("火山资源中心页数超过上限，数据不完整，已中断")
 
 
+#: 成员账号里那个只读角色的名字。三个账号里都叫这个（见 identity/member-collector-policy.json）
+MEMBER_ROLE = "wuji-panel-collector"
+
+
+def collect_member(
+    creds: aliyun.Credentials,
+    account: str,
+    *,
+    role: str = MEMBER_ROLE,
+    transport=None,
+    progress=None,
+) -> tuple:
+    """采一个资源目录成员账号。主账号的采集身份换一份临时凭证进去。
+
+    **不用资源目录自带的 `ResourceDirectoryAccountAccessRole`** —— 那个挂的是
+    AdministratorAccess（实测确认），让长期挂在面板服务器上的采集凭证能 assume 它，
+    等于把成员账号的超管钥匙放在那台机器上。每个成员账号单独建了同名只读角色，
+    只信任主账号的 panel-collector。
+
+    采不到要**抛错**，让 `build_snapshot` 把它记成这个账号的 error —— 悄悄少一个账号
+    比报错糟得多：资产页会显示成「这个账号什么都没有」，而不是「没采到」。
+    """
+    if progress:
+        progress(f"成员账号 {account}：换临时凭证")
+    inner = assume_role_for(creds, account, role=role, transport=transport)
+    return collect_aliyun(inner, transport=transport, progress=progress)
+
+
+def assume_role_for(
+    creds: aliyun.Credentials, account: str, *, role: str = MEMBER_ROLE, transport=None
+) -> aliyun.Credentials:
+    """进某个成员账号的只读角色。会话名要 ≥2 个字符，短了阿里云的报错看不出原因。"""
+    return aliyun.assume_role(
+        f"acs:ram::{account}:role/{role}", "panel-assets", creds=creds, transport=transport
+    )
+
+
 Job = tuple  # (platform, 凭证前缀提示, collect() -> (account, resources))
 
 

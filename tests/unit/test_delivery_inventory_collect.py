@@ -39,11 +39,16 @@ def att(ptype, pname, policy, rg=UID):
 
 
 class AliyunFake:
-    def __init__(self, *, users, groups, members, attachments, page_size=100, overrides=None):
+    def __init__(
+        self, *, users, groups, members, attachments, page_size=100, overrides=None, keys=None
+    ):
         self.users = users
         self.groups = groups
         self.members = members
         self.attachments = attachments
+        #: {用户名: [AK, …]}。没给的人当作一把都没有 —— 注意那和「没采到」是两件事，
+        #: 后者由 overrides 里让 ListAccessKeys 回 403 来模拟
+        self.keys = keys or {}
         self.page_size = page_size
         self.overrides = overrides or {}
         self.calls = []
@@ -63,6 +68,14 @@ class AliyunFake:
         if action == "ListUsersForGroup":
             names = self.members.get(q["GroupName"], [])
             return 200, {"Users": {"User": [{"UserName": n} for n in names]}, "IsTruncated": False}
+        if action == "ListAccessKeys":
+            got = self.keys.get(q.get("UserName"), [])
+            return 200, {"AccessKeys": {"AccessKey": got}, "IsTruncated": False}
+        if action == "GetAccessKeyLastUsed":
+            for k in self.keys.get(q.get("UserName"), []):
+                if k.get("AccessKeyId") == q.get("UserAccessKeyId"):
+                    return 200, {"AccessKeyLastUsed": {"LastUsedDate": k.get("LastUsedDate", "")}}
+            return 200, {"AccessKeyLastUsed": {}}
         if action == "ListPolicyAttachments":
             page = int(q["PageNumber"])
             size = self.page_size

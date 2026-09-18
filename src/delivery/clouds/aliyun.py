@@ -66,6 +66,9 @@ class AliyunDenied(AliyunError):
 class Credentials:
     access_key_id: str
     access_key_secret: str
+    #: STS 换来的临时凭证要带它。长期 AK 留空。
+    #: 缺了它的话临时凭证签名过得去、但阿里云一律回 InvalidSecurityToken
+    security_token: str = ""
 
     @classmethod
     def from_env(cls, prefix: str = "ALIYUN") -> Credentials:
@@ -132,6 +135,8 @@ def call(
 ) -> dict:
     send = transport or _http
     payload = dict(params or {})
+    if creds.security_token:
+        payload["SecurityToken"] = creds.security_token
     payload.update(
         {
             "Format": "JSON",
@@ -160,6 +165,40 @@ def call(
             code=code,
         )
     raise AliyunError(f"`{action}` 失败 HTTP {status}：{code} {message[:200]}", code=code)
+
+
+def assume_role(
+    role_arn: str,
+    session: str,
+    *,
+    creds: Credentials,
+    seconds: int = 900,
+    transport: Optional[Transport] = None,
+) -> Credentials:
+    """换一份临时凭证。资产采集要进资源目录的成员账号时用。
+
+    **只用来进那些单独建的只读角色**，不要拿它去 assume 资源目录自带的
+    `ResourceDirectoryAccountAccessRole` —— 那个角色挂的是 AdministratorAccess，
+    而采集凭证是长期挂在面板服务器上的。谁能 assume 到什么，就等于那台机器
+    被拿下之后对方能拿到什么。范围限制写在 collector 身上的 RAM 策略里。
+
+    `session` 只能是字母数字和 `.@-_`，而且**至少 2 个字符** —— 短了阿里云回
+    `InvalidParameter.RoleSessionName`，报错里看不出是长度问题。
+    """
+    body = call(
+        STS[0],
+        STS[1],
+        "AssumeRole",
+        {"RoleArn": role_arn, "RoleSessionName": session, "DurationSeconds": str(seconds)},
+        creds=creds,
+        transport=transport,
+    )
+    got = body.get("Credentials") or {}
+    ak, sk = str(got.get("AccessKeyId") or ""), str(got.get("AccessKeySecret") or "")
+    token = str(got.get("SecurityToken") or "")
+    if not ak or not sk or not token:
+        raise AliyunError(f"AssumeRole 没返回完整凭证：{role_arn}")
+    return Credentials(ak, sk, token)
 
 
 def paginate(

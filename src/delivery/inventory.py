@@ -48,6 +48,45 @@ class InventoryError(DeliveryError):
 
 
 @dataclass(frozen=True)
+class AccessKey:
+    """一把 AK 的台账信息。**不含 secret**，接口本来也不给。
+
+    `id` 只存前 8 位：够在两次采集之间认出是同一把，又不至于把完整 AKId
+    写进一个会被传阅的快照文件。
+    """
+
+    id: str
+    status: str = ""
+    created: str = ""
+    last_used: str = ""
+
+    @property
+    def active(self) -> bool:
+        return self.status.lower() == "active"
+
+    @property
+    def created_ts(self) -> float:
+        return _ts(self.created)
+
+    @property
+    def last_used_ts(self) -> float:
+        """最后一次使用。阿里云对从没用过的返回 `N/A`，那会解析成 0。"""
+        return _ts(self.last_used)
+
+
+def _ts(iso: str) -> float:
+    from datetime import datetime
+
+    text = str(iso or "").strip().replace("Z", "+00:00")
+    if not text or text.upper() == "N/A":
+        return 0.0
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return 0.0
+
+
+@dataclass(frozen=True)
 class UserPermissions:
     platform: str
     account: str
@@ -56,10 +95,42 @@ class UserPermissions:
     email: str = ""
     policies: tuple = ()
     groups: tuple = ()
+    #: 这个子账号的 AK。`None` 表示**没采到**（采集身份没有 ListAccessKeys 权限），
+    #: 空元组才是「确实一把都没有」—— 两者的处置完全不同，不能混成一个
+    keys: Optional[tuple] = None
 
     @property
     def high_risk(self) -> tuple:
         return tuple(p for p in self.policies if is_high_risk(p))
+
+    def stale_keys(self, *, days: int = 180, now: Optional[float] = None) -> tuple:
+        """该轮换的 AK：启用中、且建出来超过 `days` 天。
+
+        **只看「建了多久」不看「用没用」** —— 一把天天在用的老 AK 才是最该换的那种，
+        按「最近没用过」筛会正好把它漏掉。没用过的是另一类问题（该停用），
+        由 `unused_keys` 管。
+        """
+        import time
+
+        cut = (now if now is not None else time.time()) - days * 86400
+        return tuple(
+            k for k in (self.keys or ()) if k.active and k.created_ts and k.created_ts < cut
+        )
+
+    def unused_keys(self, *, days: int = 90, now: Optional[float] = None) -> tuple:
+        """启用中但很久没用过的 AK。从没用过的也算。
+
+        这类不该「提醒轮换」——换一把同样没人用的没有意义。该问的是「还要不要」，
+        不要就停用。**停用不是删除**：停用之后如果有人报障，还能立刻改回来。
+        """
+        import time
+
+        cut = (now if now is not None else time.time()) - days * 86400
+        return tuple(
+            k
+            for k in (self.keys or ())
+            if k.active and (not k.last_used_ts or k.last_used_ts < cut)
+        )
 
 
 @dataclass(frozen=True)
@@ -133,6 +204,31 @@ def is_high_risk(policy: str) -> bool:
     return any(m in low for m in HIGH_RISK_MARKERS)
 
 
+def _keys(raw, who: str) -> Optional[tuple]:
+    """AK 清单。**缺这个键表示没采到**（老快照就是这样），空数组才是「一把都没有」。
+
+    两者的处置完全相反：没采到要去查采集身份的权限，一把都没有是好事。
+    混成同一个值的话，升级那天所有人都会显示成「零 AK」，而那正是最该被发现的状态。
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise InventoryError(f"{who}.keys 必须是数组")
+    out = []
+    for k in raw:
+        if not isinstance(k, dict) or not k.get("id"):
+            raise InventoryError(f"{who}.keys 里有缺 `id` 的条目")
+        out.append(
+            AccessKey(
+                id=str(k["id"]),
+                status=str(k.get("status") or ""),
+                created=str(k.get("created") or ""),
+                last_used=str(k.get("last_used") or ""),
+            )
+        )
+    return tuple(out)
+
+
 def _strs(values, what: str) -> tuple:
     if values is None:
         return ()
@@ -181,6 +277,7 @@ def parse(data: Mapping) -> Snapshot:
                     email=str(u.get("email") or ""),
                     policies=_strs(u.get("policies"), f"{u['name']}.policies"),
                     groups=_strs(u.get("groups"), f"{u['name']}.groups"),
+                    keys=_keys(u.get("keys"), str(u["name"])),
                 )
             )
         for g in acc.get("groups") or []:
