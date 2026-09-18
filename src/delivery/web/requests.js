@@ -845,6 +845,7 @@ export function requestRoutes(ctx) {
     if (r.actions.retry) actions.append(simpleAction("重试开通", `/api/admin/requests/${encodeURIComponent(r.id)}/retry`, "会先重新核对飞书审批，通过后再开通。确定重试？", admin));
     if (r.actions.recover) actions.append(simpleAction("标记为失败", `/api/admin/requests/${encodeURIComponent(r.id)}/recover`, "这张单子长时间没有进展。标记为失败后可以核对云上状态再重试。确定？", admin, true));
     if (r.actions.close) actions.append(simpleAction("关闭申请", `/api/admin/requests/${encodeURIComponent(r.id)}/close`, "关闭后这张单子不会再开通。确定关闭？", admin, true));
+    if (r.actions.reopen) actions.append(simpleAction("重新打开", `/api/admin/requests/${encodeURIComponent(r.id)}/reopen`, "放回关闭前的状态接着处理。原来那张飞书审批继续有效，不用重新审批。确定重新打开？", admin));
     if (r.actions.revoke) actions.append(simpleAction("作废凭证", `/api/${admin ? "admin/" : ""}requests/${encodeURIComponent(r.id)}/revoke`, "查看地址立刻失效，云上的子账号、密钥和策略一并删除。使用方要重新申请。确定作废？", admin, true));
     const hint = nextStep(r, admin);
     nodes.push(h("div", { class: "card status-card" }, steps(r), hint || actions.childElementCount ? h("div", { class: "status-foot" }, hint ? h("p", { class: "status-hint" }, hint) : null, actions.childElementCount ? actions : null) : null));
@@ -897,6 +898,13 @@ export function requestRoutes(ctx) {
         return admin ? "开通失败。核对原因后可以重试，或关闭这张申请。" : "";
       case "withdrawn":
         return "申请已撤回。";
+      case "closed":
+        // 「原审批继续有效」是这里最要紧的一句：不说的话，管理员的默认反应是让人重新申请、
+        // 重新找人批一遍，而那张批条其实一直还在，每次开通都会重新核对
+        // 不能写成「原审批仍然有效」：被「只有申请人自己批」关掉的单子也走这里，
+        // 对它那句话恰好是反的。重试时会重新核对，核不过就还是开不了 —— 照这个说
+        if (r.actions.reopen) return "这张申请已关闭。原来那张飞书审批还在，「重新打开」后重试开通时会重新核对它，不用重新申请。";
+        return admin ? "这张申请已关闭。云上可能还留着子账号，要收回请用「作废凭证」；清干净后才能重新打开。" : "这张申请已关闭。需要的话可以重新提交一张。";
       case "revoked":
         return r.kind === "credential" ? "凭证已到期失效，云上的子账号和密钥已清理。" : "权限已到期收回。";
       default:

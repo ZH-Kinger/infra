@@ -2261,6 +2261,9 @@ class Flows:
         return ticket, password
 
     def close(self, ticket_id: str, *, actor: str, note: str) -> dict:
+        # 记下从哪个状态关的，重开时原样回去。事件流里也能翻出来，但那要按事件名倒着找，
+        # 而「关闭前是什么状态」是重开唯一需要的事实，值得直接存一个字段
+        before = self.store.get(ticket_id).get("status")
         return self.store.update(
             ticket_id,
             actor=actor,
@@ -2268,4 +2271,65 @@ class Flows:
             to=t.CLOSED,
             event="closed",
             note=note or "管理员关闭",
+            fields={"closed_from": before},
+        )
+
+    def reopen(self, ticket_id: str, *, actor: str, note: str = "") -> dict:
+        """把关掉的单子放回关闭前的状态，好继续处理（失败的能重试、待开通的能登记）。
+
+        **不重新走审批**：审批实例还是原来那张，`_verify` 在每次开通时都会重新回拉核对
+        （实例级 APPROVED、绑定的单号、审批人不是申请人本人）。所以重开不放宽任何门禁 ——
+        当初因为审批不合规被关的单子，重开后照样会在同一处被拦下来。
+
+        云上还挂着子账号的凭证单不给重开：重试签发只会在同一个 `cred_user` 上再发一把，
+        上一把没人清理。这种要先走「作废凭证」把云上删干净（那条路会清掉 `cred_user`），
+        之后才能重开。
+        """
+        ticket = self.store.get(ticket_id)
+        if ticket.get("status") != t.CLOSED:
+            status = ticket.get("status")
+            raise FlowError(
+                f"申请单当前是「{t.LABELS.get(status, status)}」，只有已关闭的才能重新打开", 409
+            )
+        # `cred_user` 在**预留子账号名**那一刻就写上了（事件 `cred_user_reserved`），
+        # 签发失败后的清理只清 `cred_ak_id`、不清它。所以非空只说明「云上可能还有东西」，
+        # 不等于「凭证已经发到人手里」—— 文案要照这个说，否则运维会以为密钥已经泄出去了
+        user = str(ticket.get("cred_user") or "")
+        if user:
+            raise FlowError(
+                f"云上可能还留着子账号 {user}。先点「作废凭证」清干净，之后才能重新打开", 409
+            )
+        if (ticket.get("sealed") or {}).get("ciphertext"):
+            raise FlowError("这张单子的凭证已经签发过了，不能重新打开。要收回请用「作废凭证」", 409)
+        # 关掉的单子不在去重范围内（`submit` 只看 OPEN），所以「关掉 → 让他重新申请」之后，
+        # 这张旧单往往已经配着一张开通好的新单。开账号单尤其危险：旧单 user_created 为 False 时
+        # 重试会**再建一个子账号**，同一个人在同一云账号下就有两个号了
+        if ticket.get("kind") == catalog_mod.KIND_ACCOUNT:
+            tpl = ticket.get("template") or {}
+            key = (tpl.get("platform"), tpl.get("account"))
+            for other in self.store.all():
+                o_tpl = other.get("template") or {}
+                if (
+                    other.get("id") != ticket_id
+                    and other.get("kind") == catalog_mod.KIND_ACCOUNT
+                    and (o_tpl.get("platform"), o_tpl.get("account")) == key
+                    and other["applicant"].get("union_id") == ticket["applicant"].get("union_id")
+                    and (other.get("status") in t.OPEN or other.get("status") == t.DONE)
+                ):
+                    raise FlowError(
+                        f"申请人在这个云账号下已经有申请单 {other['id']}，不能再把这张放回去", 409
+                    )
+        back = str(ticket.get("closed_from") or "")
+        if back not in (t.FAILED, t.FULFILLING):
+            # 没记 closed_from 的是这个字段加上之前关的老单子。FAILED 是两者里更保守的一个：
+            # 它只是让管理员能点「重试开通」，而 FULFILLING 会让单子重新出现在
+            # 「等管理员去建资源」的待办里，把一张当初明确关掉的单子塞回别人的队列
+            back = t.FAILED
+        return self.store.update(
+            ticket_id,
+            actor=actor,
+            expect=[t.CLOSED],
+            to=back,
+            event="reopened",
+            note=note or "管理员重新打开",
         )

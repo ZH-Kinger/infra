@@ -6,6 +6,8 @@
   GET  /api/requests                        GET  /api/admin/requests/<id>
   POST /api/requests                        POST /api/admin/requests/<id>/retry
   GET  /api/requests/<id>                   POST /api/admin/requests/<id>/close
+                                            POST /api/admin/requests/<id>/reopen
+                                            （关掉的放回关闭前的状态接着处理）
                                             POST /api/admin/requests/<id>/recover（卡住的单子）
   POST /api/requests/<id>/withdraw          POST /api/admin/requests/<id>/fulfil
                                             （资源开通：管理员登记实例信息）
@@ -68,6 +70,7 @@ _EVENT_LABELS = {
     "linked": "对应到申请人",
     "link_needed": "待管理员对应到申请人",
     "closed": "已关闭",
+    "reopened": "重新打开",
     "groups_checked": "核对原有用户组",
     "policies_checked": "核对原有策略",
     "revoked": "到期回收",
@@ -174,6 +177,12 @@ def ticket_view(ticket: dict, *, viewer: Caller, links: Optional[dict] = None) -
             "retry": viewer.admin and status == t.FAILED,
             "fulfil": viewer.admin and status == t.FULFILLING and ticket.get("kind") == "resource",
             "close": viewer.admin and status in (t.FAILED, t.FULFILLING),
+            # 重开 = 回到关闭前的状态接着处理，**不重新走审批**（原审批实例每次开通都会重新核对）。
+            # 凭证已经签出去的不给重开，那种要走「作废凭证」—— 判据和 flows.reopen 里的一致
+            "reopen": viewer.admin
+            and status == t.CLOSED
+            and not ticket.get("cred_user")
+            and not (ticket.get("sealed") or {}).get("ciphertext"),
             "recover": viewer.admin and status in (t.EXECUTING, t.SUBMITTING),
             # 链接外泄时管理员要能立刻掐掉。删密文 + 删云上的子账号和密钥，
             # 不等到期。没有这个按钮的话，唯一的办法是手改申请单或去云控制台。
@@ -394,6 +403,13 @@ class RequestsApi:
             return 200, {
                 "request": self._view(
                     flows, flows.close(ticket_id, actor=caller.union_id, note=note), caller
+                )
+            }
+        if admin and action == "reopen":
+            note = str(body.get("note") or "")[:200]
+            return 200, {
+                "request": self._view(
+                    flows, flows.reopen(ticket_id, actor=caller.union_id, note=note), caller
                 )
             }
         if not admin and action == "revoke":

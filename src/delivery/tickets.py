@@ -71,7 +71,11 @@ TRANSITIONS = {
     SUBMIT_FAILED: set(),
     REJECTED: set(),
     WITHDRAWN: set(),
-    CLOSED: {REVOKED},
+    #: CLOSED 能回 FAILED / FULFILLING：审批通过了、开通那步失败被关掉的单子要能重开。
+    #: 这**不是**重新走审批 —— 那张飞书批条还在，`Flows._verify` 每次开通都会重新回拉核对。
+    #: 关闭只是「先不处理」，不该等于「这张批条作废」：挡人的原因一旦排掉（配置改了、
+    #: 云上恢复了），否则唯一的出路是让人重新申请、重新找人审批一遍
+    CLOSED: {REVOKED, FAILED, FULFILLING},
 }
 OPEN = (SUBMITTING, PENDING, APPROVED, EXECUTING, FAILED, FULFILLING)
 
