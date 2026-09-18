@@ -154,6 +154,14 @@ class TicketStore:
         raise TicketError("没有这张申请单", 404)
 
     def mine(self, union_id: str) -> list:
+        """某个人的申请单。**空 union_id 直接返回空**。
+
+        比较是裸 `==`，传空串会把所有 `applicant.union_id` 缺失或为空的单子一起捞出来 ——
+        那是别人的。调用方各自挡过一次（接口层会 403），但这道门该在源头，
+        新增一个调用方时不该指望他记得。
+        """
+        if not union_id:
+            return []
         return [t for t in self.all() if t.get("applicant", {}).get("union_id") == union_id]
 
     def create(self, ticket: dict, *, actor: str) -> dict:

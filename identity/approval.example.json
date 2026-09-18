@@ -1,10 +1,27 @@
 {
+  "_note": "飞书审批配置的样子。真正那份是 identity/approval.json（gitignored）。**不要手抄这张表** —— 跑 `delivery approval widgets --code <定义编号> --write identity/approval.json` 自动生成。改过审批表单之后必须重跑：飞书会重新生成 widget id，不同步的话面板拿旧 id 到表单里取申请单号，取到空串，于是所有审批都被判「单号不一致」。",
+  "_widgets": "键是建审批定义时指定的 custom_id（稳定别名，后台改表单也不变），值是 {id, type}。type 必须和审批定义里该控件的真实类型一致 —— 飞书按类型校验提交的值，对不上拒的是**整张单子**，不是某个字段。写成裸字符串是历史写法，当作单行文本处理（summary / reason 例外，默认多行）。",
+  "_required": "ticket_id / kind / summary / reason 四个必须有，缺一个面板加载配置就会拒。其余是按申请类型补充的字段；审批定义里没加的会被静默跳过，加一个生效一个。",
   "approval_code": "飞书审批后台里的审批定义编号",
   "widgets": {
-    "ticket_id": "申请单号控件 ID（单行文本）",
-    "kind": "申请类型控件 ID（单行文本）",
-    "summary": "申请内容控件 ID（多行文本）",
-    "reason": "申请理由控件 ID（多行文本）"
+    "ticket_id": { "id": "widget…", "type": "input" },
+    "kind": { "id": "widget…", "type": "radioV2" },
+    "account": { "id": "widget…", "type": "radioV2" },
+    "summary": { "id": "widget…", "type": "textarea" },
+    "reason": { "id": "widget…", "type": "textarea" },
+    "subject": { "id": "widget…", "type": "input" },
+    "scope": { "id": "widget…", "type": "input" },
+    "caps": { "id": "widget…", "type": "radioV2" },
+    "valid": { "id": "widget…", "type": "input" },
+    "cloud_user": { "id": "widget…", "type": "input" },
+    "project": { "id": "widget…", "type": "input" },
+    "env": { "id": "widget…", "type": "radioV2" },
+    "spec": { "id": "widget…", "type": "textarea" },
+    "cost": { "id": "widget…", "type": "radioV2" },
+    "until": { "id": "widget…", "type": "date" }
   },
-  "allow_self_approval": false
+  "_option_keys": "单选控件提交的是**选项 key**，不是显示文案。面板送什么，审批定义里的选项 key 就得写成什么：kind = credential / account / permission / resource；account = <平台>/<云账号>（例 aliyun/<你的主账号 UID>；同一朵云下有多个主账号时，只写平台会分不开）；env = dev / test / staging / prod；cost = algo / data / infra / product / other；caps = list / list_download / list_write / list_download_write。",
+  "allow_self_approval": false,
+  "_comment_open_id": "发凭证评论用的身份，**必填**。缺了的话访问凭证申请会在提交那一刻被拒，而面板本身一切正常、体检也可能全绿 —— 线上正是这么漏过去的。飞书审批的评论接口 user_id 是必填的、没有「以应用名义发」的选项，所以凭证评论必然挂在某个自然人名下；这个 open_id 必须是**面板这个飞书应用下的**。",
+  "comment_open_id": "ou_…"
 }

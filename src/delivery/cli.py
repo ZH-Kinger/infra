@@ -1539,6 +1539,7 @@ def _refresh_locked(args, report) -> Optional[int]:
             ).to_dict()
 
         refresh.run(
+            known_users=_panel_issued_users(args, report.problems),
             collect_snapshot=lambda: build_snapshot(_snapshot_jobs(profiles, ()), progress=say),
             collect_proposal=collect_proposal,
             directory=lambda: _directory_entries(args.directory, progress=False),
@@ -1556,6 +1557,43 @@ def _refresh_locked(args, report) -> Optional[int]:
         return None
     finally:
         os.close(lock_fd)
+
+
+def _panel_issued_users(args, problems: list) -> set:
+    """面板自己开过哪些子账号（`平台/账号/用户名`）。
+
+    用来把「新增子账号」拆成两类：面板开的不用问，手工在控制台开的才要人去补来历。
+    云上没有任何字段记着「这个号是谁为谁开的」，所以这份记录只能来自我们的台账。
+    读不到申请单就返回空集 —— 那样全部算「来路不明」，宁可多问几句，不要漏掉；
+    但「台账在却读不了」是真故障，要进告警，否则这一栏天天全量误报、很快没人看。
+    """
+    path = getattr(args, "tickets", "") or "identity/tickets.json"
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        # 还没有台账（全新部署）：安静返回空集，那时本来也没有「面板开的号」
+        return set()
+    except (OSError, ValueError) as exc:
+        # 台账在但读不了是**真故障**。不报的话，每个新增子账号都会被报成「来路不明」，
+        # 那一栏天天全量误报，两周后就没人看了 —— 功能等于白做
+        from .refresh import brief
+
+        problems.append(f"申请单读不了，无法区分哪些号是面板开的：{brief(exc)}")
+        return set()
+    items = data.get("tickets") if isinstance(data, dict) else data
+    out = set()
+    for ticket in items if isinstance(items, list) else []:
+        if not isinstance(ticket, dict):
+            continue
+        tpl = ticket.get("template") or {}
+        # 被拒 / 撤回 / 提交失败的单子不算「面板开过」—— 那些号根本没建出来，
+        # 事后有人手工用同名建了号，反而该被提示补登记
+        if ticket.get("status") in ("rejected", "withdrawn", "submit_failed"):
+            continue
+        name = ticket.get("cred_user") or (ticket.get("payload") or {}).get("username") or ""
+        if name and tpl.get("platform") and tpl.get("account"):
+            out.add(f"{tpl['platform']}/{tpl['account']}/{name}")
+    return out
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

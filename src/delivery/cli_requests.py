@@ -239,6 +239,12 @@ def add_parsers(commands) -> None:
     asub = ap.add_subparsers(dest="approval_command", required=True)
     widgets = asub.add_parser("widgets", help="查审批定义的表单控件 ID")
     widgets.add_argument("--code", required=True, help="审批定义编号 approval_code")
+    widgets.add_argument(
+        "--write",
+        metavar="文件",
+        default="",
+        help="把控件对照表写进这个 approval.json。改过表单必须重跑，否则面板拿旧 id 取不到单号",
+    )
 
 
 def dispatch(args: argparse.Namespace):
@@ -574,7 +580,7 @@ def _assets(args) -> int:
 
 
 def _widgets(args) -> int:
-    from .approval import ApprovalConfig, FeishuApproval
+    from .approval import EXTRA_KEYS, WIDGET_KEYS, ApprovalConfig, FeishuApproval
     from .identity.directory import tenant_token
 
     app_id = os.environ.get("DELIVERY_FEISHU_APP_ID", "")
@@ -583,10 +589,60 @@ def _widgets(args) -> int:
     placeholder = ApprovalConfig(
         args.code, dict.fromkeys(("ticket_id", "kind", "summary", "reason"), "-")
     )
-    for w in FeishuApproval(placeholder, lambda: token).widgets(args.code):
-        print(f"{w['id']:<40} {w['type']:<12} {w['name']}")
-    print(
-        "\n把申请单号、申请类型、申请内容、申请理由四个控件的 id 填进 identity/approval.json",
-        file=sys.stderr,
-    )
+    found = FeishuApproval(placeholder, lambda: token).widgets(args.code)
+    for w in found:
+        # custom_id 才是稳定别名：飞书自己生成 id，后台改一次表单 id 就会漂移。
+        # 只打 id 的话，运维照着这条命令做，配置里那些按 custom_id 认的字段一个也配不上
+        print(
+            f"{w['custom_id'] or '(没有 custom_id)':<14} {w['type']:<12} {w['id']:<28} {w['name']}"
+        )
+    mapping = {
+        w["custom_id"]: {"id": w["id"], "type": w["type"]}
+        for w in found
+        if w.get("custom_id") and w.get("id")
+    }
+    missing = [k for k in WIDGET_KEYS if k not in mapping]
+    # 可选字段缺了是**静默**的（approval.create 会跳过），所以必须在这里说出来 ——
+    # 否则「审批定义还没加这一栏」和「custom_id 拼错了」长得一模一样，
+    # 而两者的表现都是「审批单上那一栏空着」
+    absent = [k for k in EXTRA_KEYS if k not in mapping]
+    if not args.write:
+        print(
+            f"\n{len(mapping)} 个控件有 custom_id。加 --write <approval.json> 直接写进配置",
+            file=sys.stderr,
+        )
+        if missing:
+            print(f"缺这几个必填控件：{'、'.join(missing)}", file=sys.stderr)
+        if absent:
+            print(
+                f"定义里没有这些可选字段，它们会被静默丢弃：{'、'.join(absent)}",
+                file=sys.stderr,
+            )
+        return 0
+    if missing:
+        # 写一份缺必填控件的配置出去，面板下次加载就会拒——不如现在就停
+        print(f"缺必填控件 {'、'.join(missing)}，不写", file=sys.stderr)
+        return 2
+    path = Path(args.write)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError) as exc:
+        print(f"读不了 {path}：{exc}", file=sys.stderr)
+        return 2
+    if not isinstance(data, dict):
+        print(f"{path} 不是一个 JSON 对象", file=sys.stderr)
+        return 2
+    data["approval_code"] = args.code
+    data["widgets"] = mapping
+    # 0600：这份配置本身不含密钥，但它和 identity/ 下别的文件一样按私有处理
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.chmod(0o600)
+    tmp.replace(path)
+    print(f"\n已写入 {path}：{len(mapping)} 个控件", file=sys.stderr)
+    if absent:
+        print(
+            f"注意：定义里没有这些可选字段，审批单上那几栏会是空的：{'、'.join(absent)}",
+            file=sys.stderr,
+        )
     return 0

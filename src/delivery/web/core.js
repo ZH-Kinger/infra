@@ -33,13 +33,24 @@ export function clear(el) {
   while (el.firstChild) el.removeChild(el.firstChild);
 }
 
+//: 上一次 mount 时所在的地址。用来判断这次是「换页」还是「原地重渲染」
+let mountedAt = null;
+
 export function mount(...nodes) {
   // 换页时关掉还开着的抽屉（比如表单打开时按了浏览器后退）
   for (const d of document.querySelectorAll("dialog[open]")) d.close();
   const app = document.getElementById("app");
-  clear(app);
-  app.append(...nodes.flat().filter(Boolean));
-  window.scrollTo({ top: 0 });
+  // 一次替换，不要「先清空再追加」——那中间有一帧是空白页，浏览器会把它画出来，
+  // 看起来就是整页闪一下
+  app.replaceChildren(...nodes.flat().filter(Boolean));
+  // 只有真的换了页才回到顶部。原地重渲染也滚到顶的话，在详情页点一个按钮
+  // （重试开通、撤回……）会把人从他正在看的位置弹走 —— 而且骨架屏和内容各 mount
+  // 一次，等于连弹两下
+  const here = typeof location === "undefined" ? "" : location.hash;
+  if (here !== mountedAt) {
+    mountedAt = here;
+    window.scrollTo({ top: 0 });
+  }
 }
 
 // 只接受同源相对路径，防止接口被篡改后塞进 javascript: 之类的链接。

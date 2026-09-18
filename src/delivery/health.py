@@ -134,6 +134,19 @@ def collect(
                 "审批配置在，但面板缺飞书应用凭证：员工提交申请会被拒绝",
                 "配置 DELIVERY_FEISHU_APP_ID / DELIVERY_FEISHU_APP_SECRET（公司 IAM 登录时也需要）",
             )
+        try:
+            wants_comment = any(True for _ in backend.catalog().of_kind("credential"))
+        except Exception:  # noqa: BLE001 — 模板读不了时从严：宁可多报一条
+            wants_comment = True
+        if wants_comment and not config.comment_open_id:
+            return Check(
+                "登录与审批",
+                "飞书审批",
+                CRIT,
+                "有访问凭证模板，但没配下发凭证的评论身份：凭证申请一提交就被拒",
+                "在 identity/approval.json 里配 comment_open_id（本应用下某个管理员的 open_id）；"
+                "飞书评论接口的 user_id 必填，没有「以应用名义发」的选项",
+            )
         if config.allow_self_approval:
             return Check(
                 "登录与审批",

@@ -1,4 +1,4 @@
-.PHONY: help test compile lint fmt e2e tf-fmt tf-validate hooks discover render-ram all
+.PHONY: help test test-web compile lint fmt e2e tf-fmt tf-validate hooks discover render-ram all
 
 PYTHON ?= python3
 TERRAFORM ?= terraform
@@ -7,10 +7,14 @@ export PYTHONPATH := src
 help:
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
-all: lint test tf-fmt tf-validate ## 提交前跑一遍：lint + 单元测试 + Terraform 校验
+all: lint test test-web tf-fmt tf-validate ## 提交前跑一遍：lint + 单元测试 + 前端测试 + Terraform 校验
 
 test: ## 单元测试（离线，无需云凭证）
 	$(PYTHON) -m unittest discover -s tests -v
+
+test-web: ## 面板前端测试（node 自带 test runner，无依赖）
+	@if command -v node >/dev/null 2>&1; then node --test tests/web/*.test.mjs; \
+	else echo "没装 node，跳过前端测试"; fi
 
 compile: ## 语法编译检查
 	PYTHONPYCACHEPREFIX=/tmp/dataset-sink-pycache $(PYTHON) -m compileall -q src tests

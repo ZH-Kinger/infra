@@ -79,13 +79,32 @@ function errorView(err, retry) {
   );
 }
 
+//: 多久还没回来才给骨架屏。面板的接口大多几十毫秒就回，为这点时间闪一次骨架屏
+//: 反而更难看——一次加载会看到「原页面 → 骨架屏 → 新页面」三帧。
+//: 超过这个数才说明真的要等，那时骨架屏才有意义。
+const SKELETON_DELAY_MS = 200;
+
+//: 第几次加载。换页会作废上一次——**被作废的那次绝不能再动 DOM**。
+//: 骨架屏改成延迟出现之后，一次被放弃的加载还留着一个定时器：慢接口还没回来、
+//: 用户已经点去别的页，200ms 后那个定时器照样会把**已经画好的新页面**清成骨架屏。
+//: 同理它的 render() 回来得更晚，会把上一页的内容画到当前页上。
+let loadGen = 0;
+
 async function load(fetcher, render) {
-  mount(skeleton());
   const attempt = async () => {
-    mount(skeleton());
+    const mine = ++loadGen;
+    const stale = () => mine !== loadGen;
+    const timer = setTimeout(() => {
+      if (!stale()) mount(skeleton());
+    }, SKELETON_DELAY_MS);
     try {
-      render(await fetcher());
+      const data = await fetcher();
+      clearTimeout(timer);
+      if (stale()) return;
+      render(data);
     } catch (err) {
+      clearTimeout(timer);
+      if (stale()) return;
       const view = errorView(err instanceof ApiError ? err : new ApiError(0, String(err)), attempt);
       if (view) mount(view);
     }
@@ -665,7 +684,13 @@ const FILTERS = [
 ];
 
 async function renderAdmin() {
-  mount(skeleton());
+  // 和 load() 一样：延迟挂骨架屏，并且用同一个计数器作废被放弃的那次
+  const mine = ++loadGen;
+  const stale = () => mine !== loadGen;
+  const timer = setTimeout(() => {
+    if (!stale()) mount(skeleton());
+  }, SKELETON_DELAY_MS);
+  const done = () => clearTimeout(timer);
   let overview;
   let people;
   let records;
@@ -678,10 +703,14 @@ async function renderAdmin() {
       api("/api/admin/review").catch((err) => ({ enabled: false, records: [], error: err.message })),
     ]);
   } catch (err) {
+    done();
+    if (stale()) return;
     const view = errorView(err instanceof ApiError ? err : new ApiError(0, String(err)), retry);
     if (view) mount(view);
     return;
   }
+  done();
+  if (stale()) return;
   state.peopleCache = people;
   mount(adminPage(overview, people, records));
 }

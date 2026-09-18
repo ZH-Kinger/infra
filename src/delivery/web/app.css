@@ -43,6 +43,10 @@
   --other:#98989d; --other-soft:rgba(152,152,157,.16);
   --shadow:0 1px 2px rgba(0,0,0,.5);
 }
+/* 永远给滚动条留位置。不留的话，页面内容一超过一屏滚动条就出现、缩回去就消失，
+   每次出现/消失整页都横向跳一截 —— 换页、筛选、甚至打开抽屉（浏览器会锁 body 滚动）
+   都会触发。这一行比逐个页面去对齐高度有效得多 */
+html{scrollbar-gutter:stable}
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 body{margin:0; background:var(--ground); color:var(--ink); font-family:var(--ui);
@@ -69,7 +73,8 @@ button{font:inherit; color:inherit}
 .who{margin-left:auto; display:flex; align-items:center; gap:.6rem; font-size:.875rem}
 .who-name{font-weight:500}
 
-.wrap{max-width:64rem; margin-inline:auto; padding:2rem 1.5rem 5rem;
+/* min-height：骨架屏比真实内容矮得多，不给下限的话每次加载都是「先缩一截再长回来」 */
+.wrap{max-width:64rem; margin-inline:auto; padding:2rem 1.5rem 5rem; min-height:70vh;
       display:flex; flex-direction:column; gap:1.75rem}
 .masthead{display:flex; flex-direction:column; gap:.35rem}
 .masthead-row{display:flex; align-items:center; gap:.75rem; flex-wrap:wrap}
@@ -213,6 +218,8 @@ body.admin-space .topbar{box-shadow:inset 0 3px 0 var(--ink)}
 .input.search-input{padding-left:2.25rem; border-radius:12px; height:2.75rem;
   background:var(--surface) no-repeat .8rem 50%/1rem
   url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2386868b' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E")}
+/* 资产表的勾选列：窄一点，别把内容挤走 */
+th.pick,td.pick{width:2rem; padding-right:0}
 .chip-row{display:flex; align-items:center; gap:.4rem; flex-wrap:wrap}
 .chip-label{font-size:.75rem; color:var(--ink-3); min-width:2.5rem}
 .chip{display:inline-flex; align-items:center; gap:.35rem; height:1.875rem; padding:0 .75rem; border-radius:980px;

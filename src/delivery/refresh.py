@@ -43,6 +43,11 @@ class RefreshReport:
     problems: list = field(default_factory=list)
     new_high_risk: list = field(default_factory=list)
     added_users: list = field(default_factory=list)
+    #: 新增子账号里**不是面板开的**那些。云上没有任何字段记着「这个号是谁为谁开的」，
+    #: 所以手工在控制台开的号，事后查不到来历——今天审计里那些来路不明的账号就是这么来的。
+    #: 做不到完全自动登记，能做到的最好程度是「当天发现 + 提醒补登记」，
+    #: 越早问越有人记得，隔一个月就没人说得清了
+    added_unregistered: list = field(default_factory=list)
     removed_users: list = field(default_factory=list)
     new_unlinked: list = field(default_factory=list)
     lost_union_ids: list = field(default_factory=list)
@@ -79,6 +84,7 @@ class RefreshReport:
         section("采集问题", self.problems)
         section("新增高危权限", self.new_high_risk)
         section("新增子账号", self.added_users)
+        section("其中不是面板开的（请补登记：是谁、给谁、为什么）", self.added_unregistered)
         section("删除子账号", self.removed_users)
         section("新出现的未关联账号", self.new_unlinked)
         section("没能沿用 union_id 的人（下次登录需重新关联）", self.lost_union_ids)
@@ -109,7 +115,10 @@ def _failed_platforms(snapshot: inventory.Snapshot) -> set:
 
 
 def diff_snapshots(
-    before: Optional[inventory.Snapshot], after: inventory.Snapshot, report: RefreshReport
+    before: Optional[inventory.Snapshot],
+    after: inventory.Snapshot,
+    report: RefreshReport,
+    known: Optional[set] = None,
 ) -> None:
     """只比两边都采集成功的平台。
 
@@ -127,6 +136,8 @@ def diff_snapshots(
     now_users = {_user_key(u) for u in after.users}
     old_users = {_user_key(u) for u in before.users}
     report.added_users = sorted(k for k in now_users - old_users if usable(k))
+    # 面板开的号在台账里有记录，不用问；剩下的才要人去补来历
+    report.added_unregistered = sorted(k for k in report.added_users if k not in (known or set()))
     report.removed_users = sorted(k for k in old_users - now_users if usable(k))
     report.new_high_risk = sorted(
         f"{key}：{policy}"
@@ -178,6 +189,7 @@ def run(
     write_people: Callable[[dict], object],
     carry_over: bool,
     previous_errors: Iterable[str] = (),
+    known_users: Optional[set] = None,
     report: Optional[RefreshReport] = None,
 ) -> RefreshReport:
     """`previous_errors`：上一份名册 / 基线存在但读不了的说明。有这类错误时不重建名册。"""
@@ -204,7 +216,7 @@ def run(
     except Exception as exc:  # noqa: BLE001
         before = None
         report.problems.append(f"比对基线读不了：{brief(exc)}")
-    diff_snapshots(before, snap, report)
+    diff_snapshots(before, snap, report, known=known_users)
     try:
         write_baseline(next_baseline(previous_baseline if before else None, data))
     except Exception as exc:  # noqa: BLE001

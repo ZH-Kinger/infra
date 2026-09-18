@@ -88,6 +88,9 @@ from .views import FILTERS, Labels, admin_overview, admin_people, person_detail
 #: 目录穿越的经典入口，这里连拼接都不做，只在目录列表里按名字精确匹配。
 _DOWNLOAD_NAME = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,80}\Z")
 _DOWNLOAD_CHUNK = 256 * 1024
+#: 一次批量指派的上限。整个读-改-写在一把文件锁里，批太大会把锁占太久；
+#: 而实际场景是「把某个地域/某一类机器整批划给某人」，几十个足够
+_OWNER_BATCH_MAX = 200
 
 
 #: sha256 缓存，键含**大小和 mtime** —— 文件换了就自然算新的。
@@ -945,9 +948,33 @@ def make_handler(
 ):
     """proxy 不为空即代理登录模式：只认 oauth2-proxy 注入的请求头，飞书登录路由关闭。"""
     backend = backend or Backend(platforms={p.id: p.display for p in registry})
+
+    def _claim_resources(platform: str, account: str, ids: list, email: str) -> None:
+        """资源登记完把实例指给申请人。**开通那一刻是唯一确定主人的时机**，错过只能靠猜。
+
+        名册里查不到这个邮箱就不指：宁可留「未指定」让管理员去补，也不要指给一个
+        对不上人的邮箱 —— 归属是拿去问责和算成本的。
+        """
+        path = backend.asset_owners_path
+        if not path or not email:
+            return
+        hits = [p for p in backend.people().people if p.email.lower() == email.lower()]
+        if len(hits) != 1 or hits[0].email_collision:
+            return
+        for rid in ids:
+            assets_mod.set_owner(
+                path,
+                assets_mod.owner_key(platform, account, rid),
+                email=email.lower(),
+                name=hits[0].name,
+                note="按申请单自动指派",
+                actor="system",
+            )
+
     requests_api = RequestsApi(
         backend.flows,
         account_label=lambda platform, account: backend.labels().account(platform, account),
+        claim_resources=_claim_resources,
     )
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -1348,16 +1375,26 @@ def make_handler(
                     # （people.py 里那条「邮箱对应的账号已绑到另一个飞书身份」就是为它写的）。
                     # 回落到会话邮箱换不来任何可用性：名册里没邮箱的人本来也没法被指派资源
                     mail = person.email if person else ""
-                return self._json(
-                    200,
-                    assets_mod.summary_view(
-                        backend.assets(),
-                        scopes=scopes,
-                        labels=labels.account,
-                        owners=backend.asset_owners(),
-                        viewer_email=mail,
-                    ),
+                view = assets_mod.summary_view(
+                    backend.assets(),
+                    scopes=scopes,
+                    labels=labels.account,
+                    owners=backend.asset_owners(),
+                    viewer_email=mail,
                 )
+                if not admin:
+                    # 面板自己发出去的东西归属最确定 —— 申请人就写在单子里，不用查归属表。
+                    # 云上采来的资产一条归属都没有时，这是员工资产页上唯一不为空的部分。
+                    # 没配申请单文件时 flows() 是 None，那就只是没有这一段，不该 500
+                    flows = backend.flows()
+                    view["holdings"] = (
+                        assets_mod.holdings_view(
+                            flows.store.mine(session.user.union_id), labels=labels.account
+                        )
+                        if flows is not None
+                        else []
+                    )
+                return self._json(200, view)
             if path == _ADMIN_POLICY_RULES:
                 if self._require(admin=True) is None:
                     return None
@@ -1577,9 +1614,25 @@ def make_handler(
             if payload is None:
                 return sent
             try:
-                key = assets_mod.owner_key(
-                    payload.get("platform"), payload.get("account"), payload.get("id")
+                # 一次可以指一批：ids 是资源 ID 数组，id 是单个（老写法，留着）。
+                # 批量存在的理由很实在：43 台计算实例逐条开抽屉要点 43 次，
+                # 没人会这么干，于是归属表永远是空的
+                raw_ids = payload.get("ids")
+                ids = (
+                    [str(x) for x in raw_ids if str(x or "").strip()]
+                    if isinstance(raw_ids, list)
+                    else [str(payload.get("id") or "")]
                 )
+                ids = [i for i in ids if i]
+                if not ids:
+                    return self._json(400, {"error": "没有要指派的资源"})
+                if len(ids) > _OWNER_BATCH_MAX:
+                    return self._json(400, {"error": f"一次最多指派 {_OWNER_BATCH_MAX} 个"})
+                keys = [
+                    assets_mod.owner_key(payload.get("platform"), payload.get("account"), i)
+                    for i in ids
+                ]
+                key = keys[0]
                 email = str(payload.get("email") or "").strip().lower()
                 # 指给的人必须在名册里：随手打错一个邮箱，那台机器就永远认不回来了
                 name = ""
@@ -1592,17 +1645,20 @@ def make_handler(
                         # 而资源归属是要拿去问责和算成本的，宁可让管理员先去把名册理清楚
                         return self._json(409, {"error": f"{email} 在名册里对应多个人，先理清名册"})
                     name = hits[0].name
-                assets_mod.set_owner(
-                    path,
-                    key,
-                    email=email,
-                    name=name,
-                    note=str(payload.get("note") or ""),
-                    actor=session.user.union_id,
-                )
+                for one in keys:
+                    assets_mod.set_owner(
+                        path,
+                        one,
+                        email=email,
+                        name=name,
+                        note=str(payload.get("note") or ""),
+                        actor=session.user.union_id,
+                    )
             except DeliveryError as exc:
                 return self._json(getattr(exc, "status", 400), {"error": str(exc)})
-            return self._json(200, {"ok": True, "key": key, "email": email, "name": name})
+            return self._json(
+                200, {"ok": True, "key": key, "count": len(keys), "email": email, "name": name}
+            )
 
         def _policy_rules(self):
             """管理员改「哪些权限不能被申请」。

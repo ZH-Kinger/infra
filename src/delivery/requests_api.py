@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 import sys
 from dataclasses import dataclass, replace
@@ -177,7 +178,9 @@ def ticket_view(ticket: dict, *, viewer: Caller, links: Optional[dict] = None) -
             # 链接外泄时管理员要能立刻掐掉。删密文 + 删云上的子账号和密钥，
             # 不等到期。没有这个按钮的话，唯一的办法是手改申请单或去云控制台。
             # 要求「还有东西可作废」：清干净之后按钮还亮着的话，再点一次就是空转
-            "revoke": viewer.admin
+            # 申请人也能作废自己的：发现外泄的第一个人通常是他，
+            # 让他等管理员等于把泄漏窗口拉长；而作废只会减少权限，没有提权风险
+            "revoke": (viewer.admin or own)
             and ticket.get("kind") == "credential"
             and status in (t.DONE, t.FAILED, t.CLOSED)
             and bool(ticket.get("cred_user") or (ticket.get("sealed") or {}).get("ciphertext")),
@@ -211,9 +214,27 @@ class RequestsApi:
         flows: Callable[[], Optional[Flows]],
         *,
         account_label: Optional[Callable[[str, str], str]] = None,
+        claim_resources: Optional[Callable[[str, str, list, str], None]] = None,
     ):
         self._flows = flows
         self._account_label = account_label
+        #: 登记开通结果后把实例指给申请人。由 server 注入（它才知道归属表在哪）
+        self._claim = claim_resources
+
+    def _claim_resources(self, ticket: dict) -> None:
+        """把刚登记的实例指给申请人。没配归属表路径、或申请人没邮箱，就安静跳过。"""
+        claim = self._claim
+        if claim is None:
+            return
+        ids = ticket.get("resource_ids") or []
+        email = str((ticket.get("applicant") or {}).get("email") or "")
+        tpl = ticket.get("template") or {}
+        if not ids or not email:
+            return
+        # 归属写不进去不该让登记这件事失败：单子已经 DONE 了，归属可以事后在资产页补指，
+        # 而把一张已经开通的单子回滚成失败要糟糕得多
+        with contextlib.suppress(Exception):
+            claim(str(tpl.get("platform") or ""), str(tpl.get("account") or ""), list(ids), email)
 
     def handle(
         self, method: str, path: str, query: dict, body: Optional[dict], caller: Caller
@@ -351,11 +372,17 @@ class RequestsApi:
             return 200, {"request": self._view(flows, flows.store.get(ticket_id), caller)}
         if admin and action == "fulfil":
             note = str(body.get("note") or "")[:500]
-            return 200, {
-                "request": self._view(
-                    flows, flows.fulfil(ticket_id, actor=caller.union_id, note=note), caller
-                )
-            }
+            done = flows.fulfil(
+                ticket_id,
+                actor=caller.union_id,
+                note=note,
+                resource_ids=body.get("resource_ids") or (),
+            )
+            # 登记完当场把归属指给申请人。**这是唯一一个「开通那一刻就知道主人是谁」的时机**，
+            # 错过了就只能事后靠人去猜。写失败不影响登记本身：单子已经是 DONE 了，
+            # 归属可以在资产页补指，而把一张已经开通的单子回滚成失败要糟糕得多
+            self._claim_resources(done)
+            return 200, {"request": self._view(flows, done, caller)}
         if admin and action == "revoke":
             return 200, {
                 "request": self._view(
@@ -367,6 +394,13 @@ class RequestsApi:
             return 200, {
                 "request": self._view(
                     flows, flows.close(ticket_id, actor=caller.union_id, note=note), caller
+                )
+            }
+        if not admin and action == "revoke":
+            # 申请人只能作废自己的（归属检查在 flows.revoke_mine 里，按 union_id）
+            return 200, {
+                "request": self._view(
+                    flows, flows.revoke_mine(ticket_id, union_id=caller.union_id), caller
                 )
             }
         if not admin and action == "withdraw":

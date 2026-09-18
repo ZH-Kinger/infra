@@ -45,11 +45,17 @@ _ACCOUNT = re.compile(r"^[0-9]{6,20}$")
 _GROUP = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 #: 用户名规则的默认值：小写字母开头，只含小写字母数字点和横线
 DEFAULT_USERNAME = r"^[a-z][a-z0-9.-]{1,31}$"
-#: 凭证时长上限：一年。**长短期不是两种申请**，是同一个申请按时长自动选实现方式——
+#: 凭证时长上限：90 天。**长短期不是两种申请**，是同一个申请按时长自动选实现方式——
 #: 12 小时以内用 STS 临时凭证（到点自灭），超过就建带时间窗策略的子账号发长期 AK。
 #: 12 这个数不是我们定的：阿里云 AssumeRole 的 DurationSeconds 硬顶就是 43200 秒。
+#:
+#: 90 天这个数是我们定的，硬顶也放在这里而不是只放在模板里：只改模板的话，
+#: 以后谁加一个新模板又能填回一年，而一年期的长期 AK 本身就是最该收的那类东西。
+#: **这是加载期硬校验**，不是提交时：任一模板的 max_hours 超过它，`load()` 直接抛错、
+#: 整个模板目录不可用（申请页整页死，不是那一个模板失效）。所以调小它的时候，
+#: **模板必须先于代码上线**；回滚时反过来，代码先回。已经发出去的凭证不受影响。
 STS_MAX_HOURS = 12
-MAX_CREDENTIAL_HOURS = 24 * 365
+MAX_CREDENTIAL_HOURS = 24 * 90
 #: 资源申请里申请人自己写的规格 / 用途
 SPEC_MAX = 500
 _SPEC_ID = re.compile(r"^[a-z0-9][a-z0-9.-]{0,39}$")
@@ -128,8 +134,9 @@ class Template:
         **现在恒为 False**：套餐（`specs`）的 schema 和参数禁用清单已经就位，但还没有
         任何代码去读 `specs[i].params` 调云 API —— 接线还没做。在那之前对前端说 True
         就是骗人：页面会写「审批通过后自动开通」，实际上单子照样停在「待开通」等管理员。
-        接线时把这里改成 `bool(self.specs)`，同时 flows._EXEC_FIELDS 必须已经含 specs
-        （审批人批的是那份参数，开通前要核对它没被改过）。
+        接线时把这里改成 `bool(self.specs)`，同时 flows._EXEC_FIELDS 必须已经含 options
+        （审批人批的是那份参数，开通前要核对它没被改过）—— 见那里的注释，纳入前要先
+        给快照的嵌套键补默认值，否则部署当天所有在途单子都会报「模板被修改」。
         """
         return False
 
@@ -163,6 +170,9 @@ class Template:
         skip = self.hidden_axes(picked)
         for axis in self.options:
             if axis.id in skip:
+                continue
+            if axis.text is not None:
+                # **文本轴永不进云参数**（见 Axis 的注释）。它的内容整个来自申请人
                 continue
             if axis.number is not None:
                 raw = numbers.get(axis.id)
@@ -229,6 +239,7 @@ class Template:
                             "omit_zero": a.number.omit_zero,
                         }
                     ),
+                    "text": None if a.text is None else {"max": a.text[0], "hint": a.text[1]},
                     "hidden_when": {k: list(v) for k, v in a.hidden_when},
                 }
                 for a in self.options
@@ -383,13 +394,21 @@ class NumberField:
 
 @dataclass(frozen=True)
 class Axis:
-    """申请资源时的一个选择维度。要么是一组选项，要么是一个数字输入，不会两者都有。"""
+    """申请资源时的一个维度。三选一：一组选项、一个数字、或一段文本。
+
+    **文本轴（`text`）不进云参数。** 别的轴的值都是模板里定死的（申请人只能选「哪个」），
+    而文本轴的内容整个来自申请人 —— 让它influence创建参数等于把云 API 开放给全员，
+    正是 `_params` 那句「一个字节都不来自申请人」要挡的事。
+    它只进审批摘要和申请单台账：项目名这种东西枚举不出来，但审批人需要看到。
+    """
 
     id: str
     label: str
     #: ((选项 id, 显示名, 云参数), ...)
     choices: tuple = ()
     number: Optional[NumberField] = None
+    #: 文本轴：(最大长度, 占位提示)。设了它就不能再有 choices / number
+    text: Optional[tuple] = None
     #: ((别的轴 id, (那个轴的选项 id, ...)), ...)：命中时这一轴隐藏、不校验、不出参数
     hidden_when: tuple = ()
 
@@ -466,8 +485,29 @@ def _number(raw: object, where: str) -> NumberField:
     )
 
 
+_TEXT_MAX = 200
+
+
+def _text_axis(raw: object, where: str) -> tuple:
+    """文本轴的定义：`{"max": 60, "hint": "写项目或系统名"}`。
+
+    只约束长度和提示语，**不给正则**。文本轴的值不进云参数（见 Axis 的注释），
+    所以这里不需要为注入做字符集限制；真正的处理在提交时（压掉换行、砍到 max）。
+    给个正则只会让模板作者以为它是一道安全闸。
+    """
+    if not isinstance(raw, dict) or sorted(raw) not in (["hint", "max"], ["max"]):
+        raise CatalogError(f'{where}：text 必须是 {{"max": 数字[, "hint": 提示]}}')
+    top = raw["max"]
+    if not isinstance(top, int) or isinstance(top, bool) or not 1 <= top <= _TEXT_MAX:
+        raise CatalogError(f"{where}：text.max 必须是 1–{_TEXT_MAX} 的整数")
+    hint = str(raw.get("hint") or "").strip()
+    if len(hint) > _SPEC_LABEL_MAX:
+        raise CatalogError(f"{where}：text.hint 太长")
+    return (top, hint)
+
+
 def _options(spec: dict, where: str) -> tuple:
-    """选择维度：`[{"id","label","choices"|"number"[,"hidden_when"]}, ...]`。
+    """选择维度：`[{"id","label","choices"|"number"|"text"[,"hidden_when"]}, ...]`。
 
     为什么是**多轴**而不是一维套餐：一台机器要定的不止规格 —— 还有系统盘、数据盘、
     公网带宽。一维套餐要把所有组合列成笛卡尔积，十几项就爆炸，改一档盘大小要动所有条目。
@@ -486,7 +526,7 @@ def _options(spec: dict, where: str) -> tuple:
     for axis in items:
         if not isinstance(axis, dict):
             raise CatalogError(f"{where}：options 每项必须是对象")
-        unknown = sorted(set(axis) - {"id", "label", "choices", "number", "hidden_when"})
+        unknown = sorted(set(axis) - {"id", "label", "choices", "number", "text", "hidden_when"})
         if unknown:
             raise CatalogError(f"{where}：选项轴里不认识的字段 {'、'.join(unknown)}")
         aid, alabel = str(axis.get("id") or ""), str(axis.get("label") or "").strip()
@@ -494,13 +534,19 @@ def _options(spec: dict, where: str) -> tuple:
             raise CatalogError(f"{where}：选项轴 id 只能含小写字母、数字、点和横线：{aid[:40]!r}")
         if not alabel or len(alabel) > _SPEC_LABEL_MAX:
             raise CatalogError(f"{where}：选项轴 {aid} 的 label 不能为空")
-        has_choices, has_number = "choices" in axis, "number" in axis
-        if has_choices == has_number:
-            raise CatalogError(f"{where}：选项轴 {aid} 要么给 choices，要么给 number，不能都给")
+        shapes = [k for k in ("choices", "number", "text") if k in axis]
+        if len(shapes) != 1:
+            raise CatalogError(
+                f"{where}：选项轴 {aid} 要么给 choices，要么给 number，要么给 text，只能给一个"
+            )
+        has_number, has_text = "number" in axis, "text" in axis
 
         got: tuple = ()
         number = None
-        if has_number:
+        text = None
+        if has_text:
+            text = _text_axis(axis["text"], f"{where} 选项轴 {aid}")
+        elif has_number:
             number = _number(axis["number"], f"{where} 选项轴 {aid}")
         else:
             choices = axis["choices"]
@@ -548,7 +594,14 @@ def _options(spec: dict, where: str) -> tuple:
                 )
             hidden.append((other, tuple(values)))
         out.append(
-            Axis(id=aid, label=alabel, choices=got, number=number, hidden_when=tuple(hidden))
+            Axis(
+                id=aid,
+                label=alabel,
+                choices=got,
+                number=number,
+                text=text,
+                hidden_when=tuple(hidden),
+            )
         )
     ids = [a.id for a in out]
     dup = sorted({i for i in ids if ids.count(i) > 1})

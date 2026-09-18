@@ -4,7 +4,7 @@
 //   · 没指过的显示「未指定」，不按名字或创建时间猜 —— 猜错一次这张表就没人信了
 //   · 员工看不到别人的资源明细，只看得到数量
 
-import { api, apiPost, fill as fillEl, h, mount, openDrawer, platformTag } from "./core.js";
+import { api, apiPost, fill as fillEl, fmtTime, h, mount, openDrawer, platformTag } from "./core.js";
 
 function fact(label, value, mono) {
   return h("div", { class: "perm" },
@@ -91,23 +91,70 @@ export function renderAssets(ctx, { admin }) {
   );
 }
 
+const HOLDING_KIND = {
+  credential: "访问凭证",
+  account: "云账号",
+  permission: "云账号权限",
+  resource: "资源",
+};
+
+/** 从申请单算出来的持有物。点一行跳到那张申请单，凭证的查看地址在审批评论里。 */
+function holdingsCard(items) {
+  const rows = items.map((it) => {
+    const tr = h("tr", { class: "clickable", tabindex: "0", role: "button" },
+      h("td", {}, HOLDING_KIND[it.kind] || it.kind),
+      h("td", {}, h("span", { class: "pname" }, it.title || "—"), it.detail ? h("span", { class: "pmail" }, it.detail) : null),
+      h("td", {}, platformTag(it.platform), h("span", { class: "muted" }, " ", it.account_label || it.account)),
+      h("td", {}, it.expires_at ? fmtTime(it.expires_at) : h("span", { class: "muted" }, "长期")));
+    const open = () => { location.hash = `request=${encodeURIComponent(it.request_id)}`; };
+    tr.addEventListener("click", open);
+    tr.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+    return tr;
+  });
+  return h("section", { class: "card asset-card" },
+    h("div", { class: "asset-head" },
+      h("div", { class: "chips" }, h("b", {}, "通过面板拿到的")),
+      h("span", { class: "asset-total" }, h("b", {}, String(items.length)), " 项")),
+    h("div", { class: "scroll" }, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, "类型"), h("th", {}, "内容"), h("th", {}, "云账号"), h("th", {}, "到期"))),
+      h("tbody", {}, ...rows))));
+}
+
 function assetsPage(data, admin) {
   const accounts = data.accounts || [];
   const nodes = [
     h("header", { class: "masthead" }, h("h1", {}, admin ? "云资产" : "云账号资产"), capturedLine(data.captured_at)),
   ];
-  if (!admin) nodes.push(h("p", { class: "lede" }, "指给你的资源可以点开看明细；其余只给数量和地域分布。归属由管理员指定，没指过的显示「未指定」。"));
+  if (!admin) {
+    nodes.push(h("p", { class: "lede" }, "这里是你名下的东西：通过面板拿到的凭证、子账号、权限，以及管理员指给你的云资源。"));
+    const holdings = data.holdings || [];
+    // 放在最前面：这是唯一一份归属确定的数据（申请人就写在申请单里）。
+    // 云上采来的资源要管理员一条条指归属，没指之前员工那边一定是空的
+    if (holdings.length) nodes.push(holdingsCard(holdings));
+  }
   if (!accounts.length) {
     nodes.push(h("div", { class: "card empty" }, h("h2", {}, admin ? "还没有资产数据" : "你还没有云账号"), h("p", {}, admin ? "开通两家的资源中心，并用只读身份运行 delivery assets collect。" : "需要云账号时从「申请」开始。")));
     return nodes;
   }
   for (const acc of accounts) {
+    // 员工看的是「我有什么」，管理员看的是「这个账号有什么」。
+    // 两者的头条数字不该是同一个 —— 把全账号总量摆在员工页的头条，等于告诉他
+    // 「这 6137 台机器和你有关」，而他名下可能一台都没有
+    const mine = acc.resources || [];
+    const headline = admin
+      ? h("span", { class: "asset-total" }, h("b", {}, acc.error && !acc.total ? "—" : String(acc.total)), " 个资源")
+      : h("span", { class: "asset-total" }, h("b", {}, String(mine.length)), " 个资源归你");
     const card = h(
       "section",
       { class: "card asset-card" },
-      h("div", { class: "asset-head" }, h("div", { class: "chips" }, platformTag(acc.platform), h("b", {}, acc.account_label)), h("span", { class: "asset-total" }, h("b", {}, acc.error && !acc.total ? "—" : String(acc.total)), " 个资源")),
+      h("div", { class: "asset-head" }, h("div", { class: "chips" }, platformTag(acc.platform), h("b", {}, acc.account_label)), headline),
       acc.error ? h("div", { class: "banner crit" }, admin ? `本次没采集完整：${acc.error}` : "这个云账号本次没采集完整，数量可能不准。") : null,
-      acc.error && !acc.total ? null : h("div", { class: "asset-grid" }, h("div", {}, h("div", { class: "section-label" }, "按类型"), bars(acc.by_type.slice(0, 12), "type", acc.total)), h("div", {}, h("div", { class: "section-label" }, "按地域"), bars(acc.by_region.slice(0, 8), "region", acc.total))),
+      admin && acc.filtered ? h("p", { class: "pad muted" }, `另有 ${acc.filtered} 条不计入资产：调用记录，以及用户/组/角色/策略这些身份对象（它们在「权限」那一页）。`) : null,
+      // 类型/地域分布是全账号的口径，只对管理员有意义。员工要的是自己那几台在哪、是什么，
+      // 那些信息在下面的表里
+      admin && !(acc.error && !acc.total)
+        ? h("div", { class: "asset-grid" }, h("div", {}, h("div", { class: "section-label" }, "按类型"), bars(acc.by_type.slice(0, 12), "type", acc.total)), h("div", {}, h("div", { class: "section-label" }, "按地域"), bars(acc.by_region.slice(0, 8), "region", acc.total)))
+        : null,
       resourceTable(acc, admin, () => renderAssets.reload && renderAssets.reload()),
     );
     nodes.push(card);
@@ -135,8 +182,11 @@ function resourceTable(acc, admin, reload) {
   if (!admin) {
     // 员工版：只有指给他的那些。一条都没有时说清楚为什么，而不是空白
     if (!resources.length) {
-      const why = acc.unassigned ? `这个云账号里 ${acc.unassigned} 个资源还没指定归属` : "这里还没有指给你的资源";
-      return h("div", { class: "pad muted" }, `${why}。需要认领请联系管理员。`);
+      // 说清楚「为什么是空的」和「怎么才能不空」。只写「没有资源」会让人以为是页面坏了
+      const why = acc.unassigned
+        ? `这个云账号里 ${acc.unassigned} 个资源还没指定归属，所以这里是空的`
+        : "这个云账号里还没有指给你的资源";
+      return h("div", { class: "pad muted" }, `${why}。名下应该有资源的话，找管理员指派。`);
     }
     return h("details", { class: "fold", open: "" },
       h("summary", {}, `指给你的资源（${resources.length} 个）`),
@@ -145,24 +195,113 @@ function resourceTable(acc, admin, reload) {
         h("tbody", {}, ...resources.map((r) => row(r, acc, admin, reload))))));
   }
   if (!resources.length) return null;
+  return adminTable(acc, resources, reload);
+}
+
+const CATEGORY_TABS = [["all", "全部"], ["compute", "计算"], ["storage", "存储"], ["other", "网络 / 其他"]];
+const OWNED_TABS = [["all", "全部"], ["no", "未指定"], ["yes", "已指定"]];
+//: 一次最多勾这么多。和服务端的 _OWNER_BATCH_MAX 对齐
+const BATCH_MAX = 200;
+
+/** 管理员的资源表：筛选 + 多选 + 批量指派。
+ *
+ * 为什么要批量：一个账号几百条资产，逐条开抽屉填邮箱没人做得下来，于是归属表永远是空的，
+ * 而归属是空的话员工那一侧整页都没有意义。筛选同理 —— 找不到要指的那几条就无从下手。
+ */
+function adminTable(acc, resources, reload) {
+  const picked = new Set();
+  const state = { q: "", category: "all", owned: "all" };
   const tbody = h("tbody");
   const count = h("span", { class: "muted" });
   const search = h("input", { class: "search", type: "search", placeholder: "搜索名称、ID、类型、地域、归属人", "aria-label": "搜索资源" });
-  const renderRows = () => {
-    const q = search.value.trim().toLowerCase();
-    const rows = resources.filter((r) => !q || [r.name, r.id, r.type_label, r.region, r.group, r.owner_email, r.owner_name, ...Object.entries(r.tags || {}).map(([k, v]) => `${k}=${v}`)].join(" ").toLowerCase().includes(q));
-    fillEl(tbody,
-      ...rows.slice(0, 500).map((r) => row(r, acc, admin, reload)),
-    );
-    count.textContent = rows.length > 500 ? `显示前 500 个，共 ${rows.length} 个` : `${rows.length} 个`;
+  const mail = h("input", { class: "input", type: "email", placeholder: "指给谁（公司邮箱，留空＝取消指派）" });
+  const note = h("input", { class: "input", type: "text", placeholder: "备注（可选）" });
+  const msg = h("p", { class: "muted" });
+  const bar = h("div", { class: "toolbar pad", hidden: true });
+
+  const chips = (items, key) => h("div", { class: "chips" }, ...items.map(([v, label]) => {
+    const b = h("button", { type: "button", class: state[key] === v ? "chip active" : "chip",
+      onclick: () => { state[key] = v; picked.clear(); render(); } }, label);
+    return b;
+  }));
+  const catRow = chips(CATEGORY_TABS, "category");
+  const ownRow = chips(OWNED_TABS, "owned");
+
+  const matches = () => {
+    const q = state.q.trim().toLowerCase();
+    return resources.filter((r) => {
+      if (state.category !== "all" && (r.category || "other") !== state.category) return false;
+      if (state.owned === "no" && r.owner_email) return false;
+      if (state.owned === "yes" && !r.owner_email) return false;
+      if (!q) return true;
+      return [r.name, r.id, r.type_label, r.region, r.group, r.owner_email, r.owner_name,
+        ...Object.entries(r.tags || {}).map(([k, v]) => `${k}=${v}`)].join(" ").toLowerCase().includes(q);
+    });
   };
-  search.addEventListener("input", renderRows);
-  renderRows();
+
+  const assign = async () => {
+    const ids = [...picked];
+    if (!ids.length) return;
+    msg.textContent = "保存中…";
+    try {
+      await apiPost("/api/admin/assets/owner", {
+        platform: acc.platform, account: acc.account, ids,
+        email: mail.value.trim(), note: note.value.trim(),
+      });
+      picked.clear();
+      reload();
+    } catch (e) { msg.textContent = e.message || "保存失败"; }
+  };
+  const go = h("button", { class: "btn small", type: "button", onclick: assign }, "指派选中的");
+  const clear = h("button", { class: "btn ghost small", type: "button", onclick: () => { picked.clear(); render(); } }, "取消选择");
+  fillEl(bar, h("b", {}, ""), mail, note, h("div", { class: "actions" }, go, clear), msg);
+
+  function pickRow(r) {
+    const box = h("input", { type: "checkbox", "aria-label": `选择 ${r.name || r.id}` });
+    box.checked = picked.has(r.id);
+    box.addEventListener("click", (e) => e.stopPropagation());
+    box.addEventListener("change", () => {
+      if (box.checked && picked.size >= BATCH_MAX) { box.checked = false; msg.textContent = `一次最多选 ${BATCH_MAX} 个`; return; }
+      if (box.checked) picked.add(r.id); else picked.delete(r.id);
+      syncBar();
+    });
+    const tr = row(r, acc, true, reload);
+    tr.insertBefore(h("td", { class: "pick" }, box), tr.firstChild);
+    return tr;
+  }
+
+  function syncBar() {
+    bar.hidden = picked.size === 0;
+    bar.firstChild.textContent = `已选 ${picked.size} 项`;
+    if (picked.size) msg.textContent = "";
+  }
+
+  function render() {
+    const rows = matches();
+    const unassigned = rows.filter((r) => !r.owner_email).length;
+    fillEl(tbody, ...rows.slice(0, 500).map(pickRow));
+    count.textContent =
+      (rows.length > 500 ? `显示前 500 个，共 ${rows.length} 个` : `${rows.length} 个`) +
+      `（未指定 ${unassigned}）`;
+    // 重画之后勾选状态要跟着走：筛选换了、已经不在列表里的那些就不该还算在选中里
+    const visible = new Set(rows.map((r) => r.id));
+    for (const id of [...picked]) if (!visible.has(id)) picked.delete(id);
+    syncBar();
+    fillEl(catRow, ...CATEGORY_TABS.map(([v, label]) => h("button", { type: "button", class: state.category === v ? "chip active" : "chip",
+      onclick: () => { state.category = v; render(); } }, label)));
+    fillEl(ownRow, ...OWNED_TABS.map(([v, label]) => h("button", { type: "button", class: state.owned === v ? "chip active" : "chip",
+      onclick: () => { state.owned = v; render(); } }, label)));
+  }
+  search.addEventListener("input", () => { state.q = search.value; render(); });
+  render();
+
   return h(
     "details",
     { class: "fold" },
     h("summary", {}, "资源明细"),
     h("div", { class: "toolbar pad" }, count, search),
-    h("div", { class: "scroll" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "类型"), h("th", {}, "名称 / ID"), h("th", {}, "地域"), h("th", {}, "归属"))), tbody)),
+    h("div", { class: "toolbar pad" }, h("span", { class: "section-label" }, "分类"), catRow, h("span", { class: "section-label" }, "归属"), ownRow),
+    bar,
+    h("div", { class: "scroll" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", { class: "pick" }, ""), h("th", {}, "类型"), h("th", {}, "名称 / ID"), h("th", {}, "地域"), h("th", {}, "归属"))), tbody)),
   );
 }

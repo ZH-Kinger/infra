@@ -273,21 +273,24 @@ export function requestRoutes(ctx) {
       );
     }
 
-    function renderAll() {
-      renderTabs();
-      renderTools();
-      renderList();
-    }
-    renderAll();
+    // 这张提示卡只在「云账号权限」那一栏出现。它的显示/隐藏必须和列表在**同一次**渲染里
+    // 完成 —— 早先是挂在 kindTabs 的 click 上 setTimeout 切的，于是切换分类时页面会先
+    // 按新列表重排一次、下一个宏任务再因为这张卡的出现/消失重排第二次，中间那一帧就是
+    // 用户看到的「闪一下」。所以它要先于 renderAll() 创建出来，并且由 renderAll() 同步切。
     const more = h(
       "a",
       { class: "card hint-card", href: "#permissions" },
       h("div", {}, h("b", {}, "找不到需要的权限？"), h("span", { class: "muted" }, " 在「权限列表」里可以从云上全部权限策略中搜索、勾选申请。")),
       h("span", { class: "hint-go" }, "打开权限列表 →"),
     );
-    const syncMore = () => (more.hidden = filters.kind !== "permission");
-    kindTabs.addEventListener("click", () => setTimeout(syncMore, 0));
-    syncMore();
+
+    function renderAll() {
+      renderTabs();
+      renderTools();
+      renderList();
+      more.hidden = filters.kind !== "permission";
+    }
+    renderAll();
     return [head, kindTabs, h("div", { class: "apply-panel" }, toolbar, summary), list, more];
   }
 
@@ -439,10 +442,24 @@ export function requestRoutes(ctx) {
         const hiddenNow = (axis) => Object.entries(axis.hidden_when || {}).some(([k, vs]) => vs.includes((picks[k] || {}).value));
         const sync = () => { for (const a of o.options) rows[a.id].hidden = hiddenNow(a); update(); };
         const nums = {};
+        const texts = {};
         for (const axis of o.options) {
           let el;
           let hint = "";
-          if (axis.number) {
+          if (axis.text) {
+            // 枚举不出来的东西（项目名）才给文本框。它的值不进云参数，只进审批单和台账
+            el = h("input", { id: `f-opt-${axis.id}`, class: "input", type: "text", maxlength: String(axis.text.max), autocomplete: "off", placeholder: axis.text.hint || "" });
+            hint = axis.text.hint || `最多 ${axis.text.max} 个字`;
+            el.addEventListener("input", () => { el.classList.remove("invalid"); sync(); });
+            texts[axis.id] = el;
+            checks.push(() => {
+              if (hiddenNow(axis)) return "";
+              const v = el.value.replace(/\s+/g, " ").trim();
+              if (!v) return [el, `请填写「${axis.label}」。`];
+              if (v.length > axis.text.max) return [el, `「${axis.label}」最多 ${axis.text.max} 个字。`];
+              return "";
+            });
+          } else if (axis.number) {
             // 连续值给数字框，不给下拉：磁盘大小列成几档只是把「填多少」换成「挑一个最接近的」
             const n = axis.number;
             el = h("input", { id: `f-opt-${axis.id}`, class: "input", type: "number", inputmode: "numeric", min: String(n.omit_zero ? 0 : n.min), max: String(n.max), step: String(n.step), value: String(n.default) });
@@ -467,8 +484,10 @@ export function requestRoutes(ctx) {
           fields.push(rows[axis.id]);
         }
         queueMicrotask(sync);
-        read.choices = () => Object.fromEntries(o.options.filter((a) => !a.number && !hiddenNow(a)).map((a) => [a.id, picks[a.id].value]));
+        // 三种轴各回各的键。文本轴要是漏在 choices 里，服务端会拿空串去找选项、报「没选」
+        read.choices = () => Object.fromEntries(o.options.filter((a) => !a.number && !a.text && !hiddenNow(a)).map((a) => [a.id, picks[a.id].value]));
         read.numbers = () => Object.fromEntries(o.options.filter((a) => a.number && !hiddenNow(a)).map((a) => [a.id, Number.parseInt(nums[a.id].value, 10)]));
+        read.texts = () => Object.fromEntries(o.options.filter((a) => a.text && !hiddenNow(a)).map((a) => [a.id, texts[a.id].value.replace(/\s+/g, " ").trim()]));
       } else {
         const specEl = h("input", { id: "f-spec", class: "input", maxlength: "500", autocomplete: "off", placeholder: o.spec_hint || "写明规格、地域、用途" });
         specEl.addEventListener("input", () => { specEl.classList.remove("invalid"); update(); });
@@ -571,6 +590,10 @@ export function requestRoutes(ctx) {
                 if (v === undefined) return "";
                 return a.number.omit_zero && v === 0 ? `${a.label} 不要` : `${a.label} ${v}${a.number.unit}`;
               }
+              if (a.text) {
+                const tv = (p.texts || {})[a.id];
+                return tv ? `${a.label} ${tv}` : "";
+              }
               const c = (p.choices || {})[a.id];
               return c ? `${a.label} ${(a.choices.find((x) => x.id === c) || {}).label || "？"}` : "";
             }).filter(Boolean).join("、")
@@ -636,6 +659,9 @@ export function requestRoutes(ctx) {
       h("div", { class: "drawer-foot" }, error, h("div", { class: "drawer-actions" }, h("button", { type: "button", class: "btn ghost", onclick: close }, "取消"), submit), h("p", { class: "muted drawer-tip" }, "审批人在飞书里处理，结果会同步到「我的申请」。")),
     );
     setTimeout(() => form.querySelector(".drawer-body select, .drawer-body input, .drawer-body textarea")?.focus(), 0);
+    // 测试用，页面不读它：「哪一种轴的值进了 payload 的哪个键」是最容易写错的地方
+    // （三个 read.* 的过滤条件），而那一步在提交之前不产生任何可见痕迹
+    form.readPayload = payload;
     return form;
   }
 
@@ -819,7 +845,7 @@ export function requestRoutes(ctx) {
     if (r.actions.retry) actions.append(simpleAction("重试开通", `/api/admin/requests/${encodeURIComponent(r.id)}/retry`, "会先重新核对飞书审批，通过后再开通。确定重试？", admin));
     if (r.actions.recover) actions.append(simpleAction("标记为失败", `/api/admin/requests/${encodeURIComponent(r.id)}/recover`, "这张单子长时间没有进展。标记为失败后可以核对云上状态再重试。确定？", admin, true));
     if (r.actions.close) actions.append(simpleAction("关闭申请", `/api/admin/requests/${encodeURIComponent(r.id)}/close`, "关闭后这张单子不会再开通。确定关闭？", admin, true));
-    if (r.actions.revoke) actions.append(simpleAction("作废凭证", `/api/admin/requests/${encodeURIComponent(r.id)}/revoke`, "查看地址立刻失效，云上的子账号、密钥和策略一并删除。使用方要重新申请。确定作废？", admin, true));
+    if (r.actions.revoke) actions.append(simpleAction("作废凭证", `/api/${admin ? "admin/" : ""}requests/${encodeURIComponent(r.id)}/revoke`, "查看地址立刻失效，云上的子账号、密钥和策略一并删除。使用方要重新申请。确定作废？", admin, true));
     const hint = nextStep(r, admin);
     nodes.push(h("div", { class: "card status-card" }, steps(r), hint || actions.childElementCount ? h("div", { class: "status-foot" }, hint ? h("p", { class: "status-hint" }, hint) : null, actions.childElementCount ? actions : null) : null));
     nodes.push(secret);
@@ -909,17 +935,35 @@ export function requestRoutes(ctx) {
 
   function fulfilAction(r) {
     const btn = h("button", { type: "button", class: "btn small" }, "登记开通结果");
-    btn.addEventListener("click", async () => {
-      const note = window.prompt("开通了什么？写实例 ID、规格、地域——这行会进台账。");
-      if (note === null || !note.trim()) return;
-      btn.disabled = true;
-      try {
-        await apiPost(`/api/admin/requests/${encodeURIComponent(r.id)}/fulfil`, { note: note.trim() });
-        ctx.route();
-      } catch (err) {
-        btn.disabled = false;
-        window.alert(err.message);
-      }
+    btn.addEventListener("click", () => {
+      openDrawer("fulfil-title", (close) => {
+        // 实例 ID 单独一栏，不要埋在描述里：**开通这一刻是唯一确定「这台机器是谁的」
+        // 的时机**，填了这一栏，资产页的归属当场就指给申请人；埋在句子里就只能事后靠猜
+        const ids = h("textarea", { id: "f-ids", class: "input", rows: "3", placeholder: "i-bp1xxxxxxxx\ni-bp1yyyyyyyy" });
+        const note = h("input", { id: "f-note", class: "input", type: "text", placeholder: "例：ECS 通用 2 核 8G，杭州可用区 B" });
+        const msg = h("p", { class: "muted" });
+        const save = h("button", { class: "btn", type: "button" }, "登记");
+        save.addEventListener("click", async () => {
+          if (!note.value.trim()) { msg.textContent = "写一句开通了什么，这行会进台账。"; return; }
+          save.disabled = true;
+          msg.textContent = "登记中…";
+          try {
+            await apiPost(`/api/admin/requests/${encodeURIComponent(r.id)}/fulfil`, {
+              note: note.value.trim(),
+              resource_ids: ids.value.split(/[\s,，、;；]+/).filter(Boolean),
+            });
+            close();
+            ctx.route();
+          } catch (err) { msg.textContent = err.message; save.disabled = false; }
+        });
+        return h("div", { class: "drawer-card" },
+          h("h2", { id: "fulfil-title" }, "登记开通结果"),
+          h("div", { class: "drawer-body" },
+            field("f-ids", "实例 ID", ids, "一行一个，或用逗号分隔。填了就会把这些资源在资产页指给申请人。"),
+            field("f-note", "开通了什么", note, "规格、地域、数量——这行会进台账，申请人看得到。")),
+          h("div", { class: "drawer-foot" }, h("div", { class: "actions" }, save,
+            h("button", { class: "btn ghost", type: "button", onclick: close }, "取消")), msg));
+      });
     });
     return btn;
   }
@@ -959,5 +1003,9 @@ export function requestRoutes(ctx) {
     return btn;
   }
 
-  return { renderApply, renderMine, renderAdminList, renderDetail };
+  // applyForm / applyPage 页面本身用不到（走 openForm → openDrawer / renderApply → mount），
+  // 导出它们是为了能被测试直接调用：申请页是「后端加了一种轴、前端不认识」和
+  // 「切换分类时页面闪一下」这两类 bug 的藏身处，而它们都藏在 load() 和 openDrawer 后面，
+  // 从 renderApply 那头点进来要连带 stub 掉整个请求层和对话框
+  return { renderApply, renderMine, renderAdminList, renderDetail, applyForm, applyPage };
 }

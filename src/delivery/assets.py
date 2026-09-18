@@ -241,6 +241,8 @@ def _with_owner(r: dict, owners: dict, key: tuple) -> dict:
     return {
         **r,
         "type_label": type_label(r.get("type", "")),
+        # 前端按它做筛选和分组（计算 / 存储 / 其他）
+        "category": category_of(r.get("type", "")),
         "owner_email": str(own.get("email") or ""),
         "owner_name": str(own.get("name") or ""),
         "owner_note": str(own.get("note") or ""),
@@ -248,10 +250,120 @@ def _with_owner(r: dict, owners: dict, key: tuple) -> dict:
     }
 
 
+#: 资源中心会返回一些**不是资产**的东西，混在里面会让总数失去意义 ——
+#: 线上实测 6137 条里 5024 条是火山的 `invocation`（调用记录），另有 200 多条是身份对象。
+#: 一个「6137 个资源」的数字既吓人又没用，而真正的计算实例两朵云加起来只有 43 台。
+#:
+#: **只排除两类，不多排**：
+#:   · 调用/执行记录 —— 它们是事件，不是资产，而且数量会一直涨
+#:   · 身份对象（用户、组、角色、策略）—— 它们在「权限」那一页已经有了，
+#:     而且把「人」算进「资产」会让归属这件事彻底讲不清
+#: 网关、主题、子网这类配置对象**保留**：它们确实是账号里存在的东西，也要有人负责。
+#:
+#: 过滤发生在**展示层**，快照文件原样保留 —— 那是取证材料，而且过滤规则以后还会改。
+#: 每个账号会带上被过滤掉的条数，不让它们悄悄消失。
+_NOT_ASSET_EXACT = frozenset(
+    {
+        # 火山：调用记录
+        "invocation",
+        # 火山：身份对象
+        "user",
+        "group",
+        "role",
+        "policy",
+        "permissionnamespace",
+    }
+)
+#: 阿里的类型是 `ACS::<服务>::<对象>`，身份对象都在 RAM 这个服务下
+_NOT_ASSET_PREFIX = ("ACS::RAM::",)
+
+
+#: 资产分类。判据是「**使用它的人能不能对它做决定**」：
+#:   计算 / 存储 —— 员工要的就是这些：我有几台机器、几个桶、几个文件系统
+#:   网络 / 其他 —— 交换机、安全组、网卡、路由表、镜像……是跟着上面那些走的附属品，
+#:     单独列给员工只会让他以为自己名下有十几样东西，其实就三台机器
+#: 云盘刻意归到「网络/其他」那一侧不给员工看，理由同上：它是实例的一部分，
+#: 不是一件可以独立处置的东西。
+_COMPUTE = ("instance", "devinstance", "dsw", "vci", "container", "ecs")
+_STORAGE = ("bucket", "vepfs", "cpfs", "nas", "filesystem", "oss", "tos")
+#: 员工看得到的分类
+VISIBLE_TO_STAFF = ("compute", "storage")
+
+
+def category_of(resource_type: str) -> str:
+    """计算 / 存储 / 其他。用于决定员工那边看不看得到。"""
+    t = str(resource_type or "").lower()
+    tail = t.split("::")[-1] if "::" in t else t
+    if tail in ("disk", "image", "snapshot"):
+        return "other"
+    if any(k in tail for k in _COMPUTE):
+        return "compute"
+    if any(k in tail for k in _STORAGE):
+        return "storage"
+    return "other"
+
+
+def is_asset(resource_type: str) -> bool:
+    """这条记录算不算「资产」。见 `_NOT_ASSET_EXACT` 的说明。"""
+    t = str(resource_type or "")
+    return t not in _NOT_ASSET_EXACT and not t.startswith(_NOT_ASSET_PREFIX)
+
+
 def type_label(resource_type: str) -> str:
     """ACS::ECS::Instance → ECS Instance；volcano 的 ecs.instance 原样。"""
     parts = resource_type.split("::")
     return " ".join(parts[1:]) if len(parts) == 3 and parts[0] == "ACS" else resource_type
+
+
+def holdings_view(tickets: Iterable[dict], *, labels: Callable[[str, str], str]) -> list:
+    """从申请单算出「这个人手里有什么」。
+
+    **这是归属最确定的那份数据，而且一直就在手边。** 云上采来的资产没有归属信息（资源
+    不带主人这个属性），要靠 `asset-owners.json` 一条条指；而面板自己发出去的东西，
+    申请人是谁写在单子里，不需要任何映射。资产页却只读云上快照、完全没碰申请单 ——
+    于是每个人的资产都是 0，哪怕他手里正握着三把凭证。
+
+    只算**还有效**的：已作废、已到期、被拒、撤回的都不算持有。到期时间为空表示长期。
+    """
+    out = []
+    for ticket in tickets:
+        status = str(ticket.get("status") or "")
+        if status not in ("done", "fulfilling"):
+            continue
+        tpl = ticket.get("template") or {}
+        kind = str(ticket.get("kind") or "")
+        platform, account = str(tpl.get("platform") or ""), str(tpl.get("account") or "")
+        item = {
+            "kind": kind,
+            "request_id": str(ticket.get("id") or ""),
+            "title": str(tpl.get("title") or ""),
+            "platform": platform,
+            "account": account,
+            "account_label": labels(platform, account),
+            "expires_at": str(ticket.get("expires_at") or ""),
+            "detail": "",
+            "gone": False,
+        }
+        if kind == "credential":
+            # 凭证被作废之后密文就没了。没有密文 = 这把凭证已经用不了，别再算成持有
+            sealed = ticket.get("sealed") or {}
+            item["gone"] = not sealed.get("ciphertext")
+            payload = ticket.get("payload") or {}
+            subject = str(payload.get("subject") or "")
+            item["detail"] = f"给 {subject}" if subject else "给你自己"
+        elif kind == "account":
+            name = ticket.get("cred_user") or (ticket.get("payload") or {}).get("username") or ""
+            item["detail"] = f"子账号 {name}" if name else "子账号"
+        elif kind == "permission":
+            item["detail"] = "、".join(tpl.get("groups") or []) or "权限"
+        elif kind == "resource":
+            # 资源是人工开通的，实例 ID 埋在登记的那段文字里（见 flows.fulfil）
+            item["detail"] = str(ticket.get("result") or "")[:120] or "待管理员登记"
+        if item["gone"]:
+            continue
+        out.append(item)
+    out.sort(key=lambda x: (x["kind"], x["expires_at"] or "9999", x["request_id"]))
+    return out
 
 
 def summary_view(
@@ -285,7 +397,9 @@ def summary_view(
             "account_label": labels(*key),
             "error": str(acc.get("error") or ""),
         }
-        resources = acc.get("resources") or []
+        raw = acc.get("resources") or []
+        resources = [r for r in raw if is_asset(r.get("type", ""))]
+        item["filtered"] = len(raw) - len(resources)
         types = Counter(type_label(r.get("type", "")) for r in resources)
         regions = Counter(r.get("region") or "全局" for r in resources)
         item["total"] = len(resources)
@@ -297,7 +411,14 @@ def summary_view(
         if scopes is None:
             item["resources"] = viewed
         else:
-            mine = [v for v in viewed if me and v["owner_email"].strip().lower() == me]
+            mine = [
+                v
+                for v in viewed
+                if me
+                and v["owner_email"].strip().lower() == me
+                # 只给计算和存储。网络对象和云盘是附属品，列出来只会稀释「我有什么」
+                and category_of(v.get("type", "")) in VISIBLE_TO_STAFF
+            ]
             item["resources"] = mine
             item["mine"] = len(mine)
             item["unassigned"] = sum(1 for v in viewed if not v["owner_email"])

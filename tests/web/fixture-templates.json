@@ -1,0 +1,183 @@
+{
+  "schema": "wuji-request-templates@1",
+  "_note": "前端测试专用的假模板。真实模板（identity/request-templates.json）带云账号 ID，是 gitignored 的，所以测试不能依赖它 —— 否则新克隆的仓库里 4 条全红，而 catalog.load 对不存在的文件不报错、返回空 Catalog，红得还没有提示。这里的账号 ID 是编的。三种选项轴（choices / number / text）各至少出现一次，hidden_when 也要有一条：这个文件的用途就是让「后端加了一种轴、前端不认识」当场变红。",
+  "templates": [
+    {
+      "id": "fixture-resource",
+      "kind": "resource",
+      "platform": "aliyun",
+      "account": "100000000000001",
+      "title": "测试用资源",
+      "category": "计算",
+      "description": "前端测试专用，不对应任何真实资源。",
+      "resource_type": "ecs",
+      "region": "cn-hangzhou",
+      "max_days": 365,
+      "params": {
+        "InstanceChargeType": "PostPaid"
+      },
+      "options": [
+        {
+          "id": "project",
+          "label": "项目/系统名称",
+          "text": {
+            "max": 60,
+            "hint": "这台机器给哪个项目用"
+          }
+        },
+        {
+          "id": "env",
+          "label": "使用环境",
+          "choices": [
+            {
+              "id": "dev",
+              "label": "开发",
+              "params": {}
+            },
+            {
+              "id": "test",
+              "label": "测试",
+              "params": {}
+            },
+            {
+              "id": "staging",
+              "label": "预发",
+              "params": {}
+            },
+            {
+              "id": "prod",
+              "label": "生产",
+              "params": {}
+            }
+          ]
+        },
+        {
+          "id": "spec",
+          "label": "规格",
+          "choices": [
+            {
+              "id": "small",
+              "label": "通用 2 核 8G",
+              "params": {
+                "InstanceType": "ecs.g8i.large"
+              }
+            },
+            {
+              "id": "large",
+              "label": "通用 8 核 32G",
+              "params": {
+                "InstanceType": "ecs.g8i.2xlarge"
+              }
+            }
+          ]
+        },
+        {
+          "id": "sysdisk",
+          "label": "系统盘",
+          "number": {
+            "param": "SystemDisk.Size",
+            "min": 40,
+            "max": 500,
+            "step": 10,
+            "default": 100,
+            "unit": " GB"
+          }
+        },
+        {
+          "id": "net",
+          "label": "公网带宽",
+          "choices": [
+            {
+              "id": "none",
+              "label": "不要公网 IP",
+              "params": {
+                "InternetMaxBandwidthOut": "0"
+              }
+            },
+            {
+              "id": "m5",
+              "label": "5 Mbps",
+              "params": {
+                "InternetMaxBandwidthOut": "5"
+              }
+            }
+          ]
+        },
+        {
+          "id": "billing",
+          "label": "公网计费",
+          "hidden_when": {
+            "net": [
+              "none"
+            ]
+          },
+          "choices": [
+            {
+              "id": "traffic",
+              "label": "按流量",
+              "params": {
+                "InternetChargeType": "PayByTraffic"
+              }
+            },
+            {
+              "id": "bandwidth",
+              "label": "固定带宽",
+              "params": {
+                "InternetChargeType": "PayByBandwidth"
+              }
+            }
+          ]
+        }
+      ],
+      "cost_centers": [
+        {
+          "id": "algo",
+          "label": "算法组"
+        },
+        {
+          "id": "infra",
+          "label": "基础设施"
+        }
+      ],
+      "cost_center_other": true,
+      "risk": "medium"
+    },
+    {
+      "id": "fixture-permission",
+      "kind": "permission",
+      "platform": "aliyun",
+      "account": "100000000000001",
+      "title": "测试用权限包",
+      "category": "存储",
+      "description": "前端测试专用。",
+      "groups": [
+        "fixture-group"
+      ],
+      "max_days": 90,
+      "risk": "low"
+    },
+    {
+      "id": "fixture-credential",
+      "kind": "credential",
+      "platform": "aliyun",
+      "account": "100000000000001",
+      "title": "测试用访问凭证",
+      "category": "存储",
+      "description": "前端测试专用。",
+      "caps": [
+        "list",
+        "download"
+      ],
+      "buckets": [
+        {
+          "name": "fixture-bucket",
+          "region": "cn-hangzhou"
+        }
+      ],
+      "role_arn": "acs:ram::100000000000001:role/fixture-sts-role",
+      "allow_prefix": true,
+      "max_hours": 720,
+      "risk": "medium"
+    }
+  ]
+}

@@ -130,7 +130,7 @@ export function accessRoutes({ load, errorView }) {
         async () => ({ ...(await api("/api/access")), ...(await api("/api/downloads")) }),
         (data) =>
           mount(
-            h("header", { class: "masthead" }, h("h1", {}, "怎么用起来"), h("p", { class: "lede" }, "每个平台的下一步，以及命令行怎么用。")),
+            h("header", { class: "masthead" }, h("h1", {}, "CLI"), h("p", { class: "lede" }, "命令行怎么用，以及你在每个平台的下一步。")),
             section("平台", ...data.platforms.map(platformCard)),
             section(
               "面板命令行",

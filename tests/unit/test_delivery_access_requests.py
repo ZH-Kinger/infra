@@ -332,7 +332,7 @@ class ApprovalTests(unittest.TestCase):
         self.feishu = FakeFeishu()
         self.approval = FeishuApproval(CONFIG, lambda: "tok", transport=self.feishu)
         self.code = self.approval.create(
-            ticket_id="REQ-1", kind_label="权限", summary="s", reason="r", applicant=LI
+            ticket_id="REQ-1", kind="permission", summary="s", reason="r", applicant=LI
         )
 
     def test_create_uses_ticket_as_idempotency_key_and_form(self):
@@ -826,6 +826,8 @@ class RequestsHttpTests(unittest.TestCase):
         self.store.sessions["admin"] = _WebSession(
             user=FeishuUser("ou_admin", "on_admin", "管理员")
         )
+        # 另一个普通用户：开放「申请人自助作废」之后，必须有人来验证他动不了别人的单子
+        self.store.sessions["wang"] = _WebSession(user=FeishuUser("ou_wang", "on_wang", "王五"))
         handler = make_handler(
             PlatformRegistry.load(),
             self.store,
@@ -1085,7 +1087,7 @@ class RequestsHttpTests(unittest.TestCase):
         """链接外泄时管理员要能立刻掐掉。没有这个入口的话，唯一的办法是手改申请单。"""
         rid, key = self.approved_credential()
         self.assertEqual(self.anon("POST", "/api/pickup", {"id": rid, "key": key})[0], 200)
-        # 申请人自己不行：作废的是「已经交出去的东西」，得由管理员决定
+        # 申请人走管理员那条路不行（路径判身份）
         self.assertEqual(self.call("POST", f"/api/admin/requests/{rid}/revoke", {})[0], 403)
         status, data = self.call("POST", f"/api/admin/requests/{rid}/revoke", {}, sid="admin")
         self.assertEqual(status, 200, data)
@@ -1096,10 +1098,37 @@ class RequestsHttpTests(unittest.TestCase):
         self.assertNotIn("sts-secret", json.dumps(data, ensure_ascii=False))
         self.assertNotIn("sts-secret", (self.h.dir / "tickets.json").read_text(encoding="utf-8"))
 
-    def test_revoke_button_only_shows_for_admins_on_issued_credentials(self):
+    def test_applicant_can_revoke_only_their_own_credential(self):
+        """开放自助作废的唯一风险点：别人的单子必须动不了。
+
+        归属按 `union_id` 严格相等判（`flows._own`），不是邮箱也不是姓名 ——
+        那两样都会变，而且同名的人真实存在。看不到别人的单子时回 404 不回 403：
+        403 等于确认「这个单号存在」。
+        """
+        rid, _ = self.approved_credential()
+        # 别人：连看都看不到，作废更不行，而且回的是 404
+        self.assertEqual(self.call("GET", f"/api/requests/{rid}", sid="wang")[0], 404)
+        self.assertEqual(self.call("POST", f"/api/requests/{rid}/revoke", {}, sid="wang")[0], 404)
+        # 自己：可以
+        status, data = self.call("POST", f"/api/requests/{rid}/revoke", {})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["request"]["status"], "revoked")
+        # 作废之后按钮就该灭掉，再点一次是空转
+        again = self.call("GET", f"/api/requests/{rid}")[1]["request"]
+        self.assertFalse(again["actions"]["revoke"])
+        self.assertEqual(self.call("POST", f"/api/requests/{rid}/revoke", {})[0], 409)
+
+    def test_revoke_button_shows_for_the_applicant_and_for_admins(self):
+        """作废按钮申请人自己也有。
+
+        发现链接外泄的第一个人通常就是申请人，让他等管理员响应等于把泄漏窗口拉长。
+        作废只会**减少**权限，开放它没有提权风险；最坏是误点一次，重新申请即可。
+        （早先只给管理员，理由是「作废的是已经交出去的东西」—— 但那个理由管的是
+        「要不要通知使用方」，不是「谁有权掐断」。）
+        """
         rid, _ = self.approved_credential()
         mine = self.call("GET", f"/api/requests/{rid}")[1]["request"]
-        self.assertFalse(mine["actions"]["revoke"])
+        self.assertTrue(mine["actions"]["revoke"])
         admin = self.call("GET", "/api/admin/requests", sid="admin")[1]
         got = {r["id"]: r["actions"]["revoke"] for r in admin["requests"]}
         self.assertIs(got[rid], True)

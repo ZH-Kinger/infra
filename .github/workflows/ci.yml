@@ -54,6 +54,24 @@ jobs:
       # 单元测试必须在无网络、无云凭证的环境下通过。
       - run: python -m unittest discover -s tests -v
 
+  web:
+    name: Panel front-end tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: python -m pip install -e .
+      # 直接调 node，不走 make test-web —— Makefile 那条守卫是「没装 node 就跳过并返回 0」，
+      # 在 CI 里那等于「node 装失败 = 测试通过」。这里宁可硬失败。
+      # 面板前端是零构建的原生 ES module，这 10 条用例是它唯一的回归网：
+      # 「后端加了一种轴、前端不认识」和「切换分类时页面闪一下」都只有这里能发现。
+      - run: node --test tests/web/*.test.mjs
+
   e2e:
     name: Local end-to-end
     runs-on: ubuntu-latest

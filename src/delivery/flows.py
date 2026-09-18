@@ -18,7 +18,7 @@ import time
 import urllib.parse
 from dataclasses import MISSING, asdict, fields
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Mapping, Optional
+from typing import Callable, Mapping, Optional, Sequence
 
 from . import catalog as catalog_mod
 from . import grants as grants_mod
@@ -66,7 +66,15 @@ _EXEC_FIELDS = (
     "buckets",
     "allow_prefix",
     "max_days",
-    "specs",
+    # 这里**故意没有 options**。它才是带云参数的那一项（每个选项的 params、数字轴的
+    # with_params），原先写的 `specs` 是条死比较 —— Template 上根本没有这个字段，
+    # 两边都取到 None。但现在不能直接换成 options：
+    #   · 比较用的是快照的严格相等，而快照里 options 的形状是会演进的（这版就新增了
+    #     文本轴的 text 键）。旧单子的快照缺这个键，纳入核对当天全部报「模板被修改」
+    #   · 模板本身也在改（这版给 ECS 加了两个轴），在途单子会被一并作废
+    # 今天没有安全后果：Template.automatic 恒 False，选项参数没有任何代码去调云 API，
+    # 管理员照的是冻结在单子里的 summary 人工开通。接线（catalog.automatic 改成
+    # bool(self.specs)）之前必须先把 options 纳进来，并给嵌套键补默认值再比。
     "resource_type",
     "region",
     "username_pattern",
@@ -120,6 +128,7 @@ def _snapshot(template: catalog_mod.Template) -> dict:
             "label": a.label,
             "choices": [{"id": c, "label": cl, "params": dict(cp)} for c, cl, cp in a.choices],
             "number": None if a.number is None else asdict(a.number),
+            "text": None if a.text is None else {"max": a.text[0], "hint": a.text[1]},
             "hidden_when": {k: list(v) for k, v in a.hidden_when},
         }
         for a in template.options
@@ -169,11 +178,96 @@ def _same_grantee(other: dict, template: dict, user: str) -> bool:
     )
 
 
+#: 登记开通结果时能填几个实例 ID。一张单子开一批机器是常见的，但也不该无限
+_RESOURCE_IDS_MAX = 50
+#: 云资源 ID 的字符集。两朵云都是「字母数字加连字符」，这里只做形状校验 ——
+#: 真假由资产快照对账（指派时那个 ID 不在快照里，管理员自己会发现）
+_RESOURCE_ID = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{2,63}\Z")
+
+
+def _resource_ids(raw: object) -> list:
+    """登记时填的实例 ID。去重、保序、逐个过形状校验。"""
+    if isinstance(raw, str):
+        raw = re.split(r"[\s,，、;；]+", raw)
+    if not isinstance(raw, (list, tuple)):
+        raise FlowError("实例 ID 要按行或逗号分隔")
+    out: list = []
+    for item in raw:
+        one = str(item or "").strip()
+        if not one or one in out:
+            continue
+        if not _RESOURCE_ID.match(one):
+            raise FlowError(f"实例 ID 看起来不对：{one[:40]}")
+        out.append(one)
+    if len(out) > _RESOURCE_IDS_MAX:
+        raise FlowError(f"一张单子最多登记 {_RESOURCE_IDS_MAX} 个实例 ID")
+    return out
+
+
 def _duration(hours: int) -> str:
     """8 → 「8 小时」；720 → 「30 天」。整天的时长写成小时，人一眼看不出是多久。"""
     if hours >= 24 and hours % 24 == 0:
         return f"{hours // 24} 天"
     return f"{hours} 小时"
+
+
+def _axis_value(texts: Mapping, labels: Mapping, axis_id: str) -> str:
+    """取某个轴填的值：文本轴存在 `texts`，选项轴的显示名存在 `labels`。"""
+    return str(texts.get(axis_id) or labels.get(axis_id) or "")
+
+
+def _approval_fields(tpl: Mapping, payload: Mapping) -> dict:
+    """按申请类型，把 payload 拆成审批表单里的独立字段。
+
+    为什么不只给一段摘要：审批人要快速看清「谁、什么权限、多久」，一段话得逐字读。
+    键是审批定义里的 custom_id；定义里没有这个键会被静默跳过（见 approval.create），
+    所以这里多给几个不会让单子发不出去 —— 审批定义还没加新字段时也照常工作。
+    """
+    kind = str(tpl.get("kind") or "")
+    # 云账号 / 使用环境 / 成本归属 / 权限这几栏在审批定义里是**单选控件**，提交的是选项 key，
+    # 中文由飞书按选项渲染。送中文过去匹配不到任何选项，而条件分支正是按它们分流的
+    # 送 `平台/账号`，不是只送平台：同一朵云下可能有多个主账号（1949 就是），
+    # 只送 `aliyun` 的话，两个账号的申请在审批单上长得一模一样，
+    # 而审批人正是按这一栏分流和担责的。审批定义里的选项 key 要和这个串对齐
+    acct = f"{tpl.get('platform') or ''}/{tpl.get('account') or ''}"
+    if kind == catalog_mod.KIND_CREDENTIAL:
+        scheme = platforms_mod.get(str(tpl.get("platform") or "")).storage_scheme
+        bucket, prefix = str(payload.get("bucket") or ""), str(payload.get("prefix") or "")
+        # 权限这一栏的选项 key 就是 caps 本身按固定顺序拼起来（list_download_write），
+        # 模板里的组合是有限的几种，定义里逐个列出
+        caps = "_".join(c for c in catalog_mod.CAPS if c in (tpl.get("caps") or []))
+        hours = int(payload.get("hours") or 0)
+        return {
+            "account": acct,
+            "subject": str(payload.get("subject") or ""),
+            "scope": f"{scheme}://{bucket}/{prefix}" if bucket else "",
+            "caps": caps,
+            "valid": _duration(hours) if hours else "",
+        }
+    if kind == catalog_mod.KIND_RESOURCE:
+        # 调用方传的应该是校验后的 payload，但这里不假设 —— 非 dict 直接 .get() 会
+        # AttributeError，而这一路上的异常会把单子打成「提交失败」
+        texts = payload.get("texts")
+        texts = texts if isinstance(texts, Mapping) else {}
+        labels = payload.get("labels")
+        labels = labels if isinstance(labels, Mapping) else {}
+        return {
+            "account": acct,
+            "spec": str(payload.get("spec") or ""),
+            # 成本归属送 key（algo / other…）；「其他」自己填的名字在申请内容里看得到
+            "cost": str(payload.get("cost_center") or ""),
+            "until": str(payload.get("until") or ""),
+            # 轴 id 全局唯一，同一个 id 不可能既是文本轴又是选项轴，所以两边都找一下即可，
+            # 不存在优先级问题。模板没配这一轴就是空串
+            "project": _axis_value(texts, labels, "project"),
+            # 使用环境配成选项轴时取**选项 id**（dev/prod，和 bot 那条 ECS 审批逐字一致），
+            # 配成文本轴时只能取原文 —— 后者在审批单的单选控件上匹配不到选项，
+            # 所以模板里这一轴应当配成选项轴，这里的回退只是不让它整个丢掉
+            "env": str((payload.get("choices") or {}).get("env") or texts.get("env") or ""),
+        }
+    # 开账号 / 云账号权限：审批人关心「给谁、在哪个云账号」
+    user = str(payload.get("username") or payload.get("cloud_user") or "")
+    return {"account": acct, "cloud_user": user}
 
 
 def view_base(env: Optional[Mapping] = None) -> str:
@@ -599,10 +693,15 @@ class Flows:
         try:
             code = approval.create(
                 ticket_id=ticket["id"],
-                kind_label=catalog_mod.KIND_LABELS[snapshot["kind"]],
+                kind=str(snapshot["kind"]),
                 summary=summary,
                 reason=reason,
                 applicant=applicant,
+                # **必须是 clean 不是 payload**：payload 是申请人原样提交的。
+                # 用它的话，配了选项轴的模板照样能另塞一个 spec 贴到审批单的「规格」上，
+                # 审批人看到「8 卡 A100 整机」，台账里却是选出来的小规格；主体名里的
+                # 换行也没被压平，能在审批单上伪造出一整行假的「AccessKey Secret：」
+                extra=_approval_fields(snapshot, clean),
             )
         except Exception as exc:  # noqa: BLE001 — 任何异常都要落到「提交失败」，不能卡在「提交中」
             return self.store.update(
@@ -853,18 +952,32 @@ class Flows:
         到底是什么。所以配了选项轴的模板一律走选择；没配的才回落成一段自由描述，
         那种模板本来也是人工开通。
         """
-        picked, numbers, parts = {}, {}, []
+        picked, numbers, texts, labels, parts = {}, {}, {}, {}, []
         if tpl.options:
             raw = payload.get("choices")
             if not isinstance(raw, dict):
                 raise FlowError("请把每一项都选上")
             numbers_in = payload.get("numbers")
             numbers_in = numbers_in if isinstance(numbers_in, dict) else {}
+            texts_in = payload.get("texts")
+            texts_in = texts_in if isinstance(texts_in, dict) else {}
             # 被隐藏的轴不校验也不进摘要：选了「不要公网 IP」就不该再问计费方式。
             # 按当前选择算，不是按模板静态算 —— 隐藏与否取决于别的轴选了什么
             skip = tpl.hidden_axes({k: str(v) for k, v in raw.items()})
             for axis in tpl.options:
                 if axis.id in skip:
+                    continue
+                if axis.text is not None:
+                    top, _hint = axis.text
+                    # 压成单行再砍长度：这段会原样进审批摘要，留着换行就能在里面
+                    # 伪造出「审批意见：同意」之类的行，把审批人看晕
+                    value = re.sub(r"\s+", " ", str(texts_in.get(axis.id) or "")).strip()
+                    if not value:
+                        raise FlowError(f"「{axis.label}」没填")
+                    if len(value) > top:
+                        raise FlowError(f"「{axis.label}」最多 {top} 个字")
+                    texts[axis.id] = value
+                    parts.append(f"{axis.label} {value}")
                     continue
                 if axis.number is not None:
                     try:
@@ -881,6 +994,9 @@ class Flows:
                 if choice is None:
                     raise FlowError(f"「{axis.label}」没选，或选了一个不存在的项")
                 picked[axis.id] = choice[0]
+                # 显示名也留一份：审批表单和台账要给人看的是「生产」，不是内部 id `prod`。
+                # 只有 spec 那一长串里带显示名，从里面切字段等于解析自然语言
+                labels[axis.id] = choice[1]
                 parts.append(f"{axis.label} {choice[1]}")
             spec = "、".join(parts)
         else:
@@ -913,7 +1029,9 @@ class Flows:
             "days": days,
             "until": until,
             "choices": picked,
+            "labels": labels,
             "numbers": numbers,
+            "texts": texts,
             "cost_center": cost_center,
             "cost_center_name": cost_label,
         }
@@ -1149,16 +1267,25 @@ class Flows:
         )
         return self._emit("fulfilling" if resource else "done", done)
 
-    def fulfil(self, ticket_id: str, *, actor: str, note: str) -> dict:
-        """管理员登记资源开通结果：实例 ID / 规格 / 地域。到期时间从这一刻起算。"""
+    def fulfil(
+        self, ticket_id: str, *, actor: str, note: str, resource_ids: Sequence[str] = ()
+    ) -> dict:
+        """管理员登记资源开通结果：实例 ID / 规格 / 地域。到期时间从这一刻起算。
+
+        `resource_ids` 是**机器可读**的那一份。原先只有一段自由文本，实例 ID 埋在句子里，
+        于是「这台机器是谁的」这个信息，明明在开通那一刻就知道，却没有任何地方记下来 ——
+        资产页的归属表因此一直是空的，员工进去看到的永远是 0。
+        记下来之后，调用方（server）会拿它去写归属表。
+        """
         ticket = self.store.get(ticket_id)
         if ticket.get("kind") != catalog_mod.KIND_RESOURCE:
             raise FlowError("只有资源开通申请需要登记开通结果", 409)
         note = str(note or "").strip()
         if not note:
             raise FlowError("请写明开通了什么（实例 ID、规格、地域），这行会进台账")
+        ids = _resource_ids(resource_ids)
         now = self._clock()
-        fields = {"result": note[:500], "done_at_ts": now}
+        fields = {"result": note[:500], "done_at_ts": now, "resource_ids": ids}
         days = int((ticket.get("payload") or {}).get("days") or 0)
         if days:
             expires = now + days * 86400
@@ -1338,8 +1465,24 @@ class Flows:
                 out.append(f"{ticket['id']}：回收失败（{describe_error(exc)}），下次重试")
         return out
 
+    def revoke_mine(self, ticket_id: str, *, union_id: str) -> dict:
+        """申请人作废**自己申请的**那份凭证。
+
+        为什么开放给申请人：发现链接外泄的第一个人通常就是申请人自己，让他等管理员响应
+        等于把泄漏窗口拉长。而作废只会**减少**权限，开放它没有任何提权风险 ——
+        最坏的情况是他误点一次，重新申请即可。
+
+        归属检查在 `_own`（按 union_id 严格相等，不是邮箱）；之后的每一道门都和管理员
+        那条路共用同一段代码，不另写一份。
+        """
+        self._own(ticket_id, union_id)
+        return self.revoke_now(ticket_id, actor=union_id)
+
     def revoke_now(self, ticket_id: str, *, actor: str) -> dict:
-        """管理员手动作废一份已发出的访问凭证。链接外泄时用这个。
+        """作废一份已发出的访问凭证。链接外泄时用这个。
+
+        **这个方法本身不做归属检查** —— 调用方负责：管理员走 `/api/admin/...`，
+        申请人走 `revoke_mine`。
 
         两件事一起做，缺一不可：
           · **把密文清掉** —— 链接立刻打不开了，不依赖任何状态判断，也不依赖云那边成功

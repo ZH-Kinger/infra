@@ -16,7 +16,7 @@ from delivery import health
 from delivery import tickets as t
 from delivery.errors import DeliveryError
 
-from .test_delivery_access_requests import CONFIG, TEMPLATES
+from .test_delivery_access_requests import APPROVAL_JSON, TEMPLATES
 
 NOW = 1_800_000_000.0
 ACC = "1000000000000001"
@@ -30,10 +30,10 @@ class FakeBackend:
     def __init__(self, **over):
         d = Path(tempfile.mkdtemp())
         self.approval_path = str(d / "approval.json")
-        Path(self.approval_path).write_text(
-            json.dumps({"approval_code": CONFIG.approval_code, "widgets": dict(CONFIG.widgets)}),
-            encoding="utf-8",
-        )
+        # 和线上那份 identity/approval.json 一样含 comment_open_id：**少了它凭证申请一提交
+        # 就被拒**（评论是凭证的唯一出口）。夹具不配的话，这一页每一条「全绿」都是假的 ——
+        # 线上正是这么漏过去的：体检 12 项全绿、测试全绿，凭证申请却一张都发不出来
+        Path(self.approval_path).write_text(json.dumps(APPROVAL_JSON), encoding="utf-8")
         self._catalog = catalog_mod.parse(TEMPLATES)
         self._snapshot = SimpleNamespace(
             captured_at=_iso(NOW - 3600),
@@ -198,14 +198,66 @@ class HealthTests(unittest.TestCase):
         self.assertNotIn("/srv/panel", detail)
         self.assertNotIn("Expecting", detail)
 
-    def test_self_approval_allowed_warns(self):
-        backend = FakeBackend()
+    def write_approval(self, backend, **changes):
+        """改这个 backend 的 identity/approval.json。值给 None = 删掉这个键。"""
         conf = json.loads(Path(backend.approval_path).read_text(encoding="utf-8"))
-        Path(backend.approval_path).write_text(
-            json.dumps({**conf, "allow_self_approval": True}), encoding="utf-8"
-        )
+        for key, value in changes.items():
+            if value is None:
+                conf.pop(key, None)
+            else:
+                conf[key] = value
+        Path(backend.approval_path).write_text(json.dumps(conf), encoding="utf-8")
+        return backend
+
+    def test_self_approval_allowed_warns(self):
+        backend = self.write_approval(FakeBackend(), allow_self_approval=True)
         _, checks = run(backend, EXEC)
         self.assertEqual(checks[("登录与审批", "飞书审批")]["level"], health.WARN)
+
+    # ── 下发凭证的评论身份 ────────────────────────────────────────────────
+    #
+    # 线上真出过：identity/approval.json 从来没配过 comment_open_id，于是**访问凭证申请
+    # 在提交那一刻就被拒**（凭证的唯一出口是审批评论，而飞书评论接口的 user_id 必填、
+    # 没有「以应用名义发」的选项）。而当时体检 12 项全绿、测试全绿 —— 症状离原因很远，
+    # 体检页不点名就没人指得回来。下面三条把「点名」这件事钉死。
+
+    def test_credential_templates_without_a_comment_identity_are_crit(self):
+        backend = self.write_approval(FakeBackend(), comment_open_id=None)
+        _, checks = run(backend, with_base())
+        check = checks[("登录与审批", "飞书审批")]
+        self.assertEqual(check["level"], health.CRIT)
+        self.assertIn("凭证", check["detail"])
+        # 修法要能照着做：改哪个文件的哪个键、为什么非得有一个自然人身份
+        self.assertIn("comment_open_id", check["fix"])
+        self.assertIn("user_id", check["fix"])
+        key = ("登录与审批", "飞书审批")
+        # 空串和没有这个键一样：JSON 里留个 "" 是最常见的「配了但没填」
+        blank = self.write_approval(FakeBackend(), comment_open_id="")
+        self.assertEqual(run(blank, with_base())[1][key]["level"], health.CRIT)
+        # 同时还开了自审批时报更严重的那条，不能被 warn 盖掉
+        both = self.write_approval(FakeBackend(), comment_open_id=None, allow_self_approval=True)
+        self.assertEqual(run(both, with_base())[1][key]["level"], health.CRIT)
+        # 配上就恢复原样（这项不会因为别的原因常驻 crit）
+        self.assertEqual(run(FakeBackend(), with_base())[1][key]["level"], health.OK)
+
+    def test_without_credential_templates_the_comment_identity_is_not_required(self):
+        """一个凭证模板都没有的部署根本不发凭证，缺评论身份不该拦着它全绿。"""
+        backend = self.write_approval(self.no_credential_backend(), comment_open_id=None)
+        data, checks = run(backend, with_base())
+        self.assertEqual(checks[("登录与审批", "飞书审批")]["level"], health.OK)
+        self.assertEqual(data["summary"]["crit"], 0, data)
+
+    def test_unreadable_templates_make_the_comment_check_strict(self):
+        """模板读不出来时从严：宁可多报一条，也别因为读不到模板就默认「这里不发凭证」。"""
+        backend = self.write_approval(
+            FakeBackend(_catalog=DeliveryError("模板 x：groups 必须是用户组名数组")),
+            comment_open_id=None,
+        )
+        with mock.patch("sys.stderr"):
+            _, checks = run(backend, with_base())
+        check = checks[("登录与审批", "飞书审批")]
+        self.assertEqual(check["level"], health.CRIT)
+        self.assertIn("凭证", check["detail"])
 
     def test_notify_switches(self):
         _, checks = run(FakeBackend(), EXEC)
