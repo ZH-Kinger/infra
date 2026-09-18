@@ -1529,10 +1529,17 @@ def make_handler(
                     print(f"[hygiene] 查在职状态失败：{type(exc).__name__}: {exc}", file=sys.stderr)
                     status_error = str(exc) or exc.__class__.__name__
 
+            # 数据集在**资产**快照里（另一个文件）。读不了就传 None，
+            # hygiene 会记一笔跳过 —— 传空列表等于断言「一条被遗弃的都没有」
+            try:
+                snap_assets = backend.assets()
+            except DeliveryError:
+                snap_assets = None
             report = hygiene.build(
                 snapshot,
                 roster,
                 statuses=statuses,
+                datasets=(snap_assets or {}).get("datasets"),
                 services=backend.service_names(),
                 stale_days=backend.stale_days or hygiene.STALE_KEY_DAYS,
                 unused_days=backend.unused_days or hygiene.UNUSED_KEY_DAYS,

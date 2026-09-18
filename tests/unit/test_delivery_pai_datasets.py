@@ -238,3 +238,134 @@ class RoaSigningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RecycleBinTests(unittest.TestCase):
+    """回收站：**趁保留期内把 UserId → 姓名固化下来**。
+
+    过了保留期，一个离职的人就只剩一个数字 UserId，而他留下的数据集、目录、机器还在。
+    线上已经有一条是这样了（`/cwr`，删于 2026-08-05，回收站里查不到，没人说得清是谁的）。
+    """
+
+    def bin_body(self, users, truncated=False, marker=""):
+        return {
+            "IsTruncated": truncated,
+            "Marker": marker,
+            "Users": {"User": users},
+        }
+
+    def entry(self, uid, login, name, when="2026-09-05T00:12:22Z"):
+        return {
+            "UserId": uid,
+            "UserPrincipalName": f"{login}@1704065796538912.onaliyun.com",
+            "DisplayName": name,
+            "RecycleDate": when,
+        }
+
+    def test_the_principal_is_trimmed_to_a_bare_login(self):
+        """回收站给的是 `名@UID.onaliyun.com`，别处的登录名是裸的。
+        不裁的话两边永远对不上，而对不上就等于没认出人。"""
+
+        def transport(url, headers=None):
+            return 200, self.bin_body([self.entry("999", "JunleiZhu", "朱俊磊")])
+
+        got = assets.collect_recycle_bin(aliyun.Credentials("a", "b"), transport=transport)
+        self.assertEqual(got[0]["login"], "JunleiZhu")
+        self.assertEqual(got[0]["name"], "朱俊磊")
+        self.assertEqual(got[0]["user_id"], "999")
+        self.assertTrue(got[0]["deleted_at"].startswith("2026-09-05"))
+
+    def test_it_pages(self):
+        pages = [
+            self.bin_body([self.entry("1", "a", "甲")], truncated=True, marker="m2"),
+            self.bin_body([self.entry("2", "b", "乙")]),
+        ]
+
+        def transport(url, headers=None):
+            return 200, pages.pop(0)
+
+        got = assets.collect_recycle_bin(aliyun.Credentials("a", "b"), transport=transport)
+        self.assertEqual([u["user_id"] for u in got], ["1", "2"])
+
+
+class AbandonedTests(unittest.TestCase):
+    """体检清单里「人的号已经删了，东西还留着」那一类。"""
+
+    def owned(self, kind, **kw):
+        base = {
+            "region": "cn-hangzhou",
+            "workspace": "640957",
+            "name": "zhujl",
+            "path": "/zhujl",
+            "owner_kind": kind,
+            "owner_user_id": "999",
+            "owner_login": "",
+            "owner_name": "",
+            "owner_deleted_at": "",
+        }
+        base.update(kw)
+        return base
+
+    def test_only_gone_owners_land_here(self):
+        """`root` 是主账号建的公共目录，`user` 是人还在 —— 混进来这一栏就全是噪音。
+        线上实测 61 条里 root 有 13 条，真 gone 只有 5 条。"""
+        from delivery import hygiene
+
+        rep = hygiene.build(
+            None,
+            [],
+            datasets=[
+                self.owned("root", name="share"),
+                self.owned("user", name="wzh", owner_login="wangzihan"),
+                self.owned("gone", owner_login="JunleiZhu", owner_name="朱俊磊"),
+            ],
+        )
+        self.assertEqual([f.subject for f in rep.abandoned], ["zhujl"])
+
+    def test_a_recycled_owner_is_named_outright(self):
+        from delivery import hygiene
+
+        rep = hygiene.build(
+            None,
+            [],
+            datasets=[
+                self.owned(
+                    "gone",
+                    owner_login="JunleiZhu",
+                    owner_name="朱俊磊",
+                    owner_deleted_at="2026-09-05T00:12:22Z",
+                )
+            ],
+        )
+        (f,) = rep.abandoned
+        self.assertIn("朱俊磊", f.why)
+        self.assertIn("2026-09-05", f.why)
+
+    def test_an_owner_past_the_retention_window_says_so_plainly(self):
+        """认不出来要明说，否则看的人会以为只是漏填了名字、以为还能查。"""
+        from delivery import hygiene
+
+        rep = hygiene.build(None, [], datasets=[self.owned("gone")])
+        (f,) = rep.abandoned
+        self.assertIn("保留期已过", f.why)
+        self.assertIn("999", f.why)
+
+    def test_this_category_survives_a_missing_permission_snapshot(self):
+        """数据集来自**资产**快照，和权限快照是两个文件。
+        算在权限快照那道门后面的话，权限快照一缺这一类会跟着消失。"""
+        from delivery import hygiene
+
+        rep = hygiene.build(None, [], datasets=[self.owned("gone", owner_name="朱俊磊")])
+        self.assertEqual(len(rep.abandoned), 1)
+        self.assertTrue(any("权限快照" in s for s in rep.skipped))
+
+    def test_no_datasets_at_all_is_reported_as_skipped(self):
+        """传 None = 没采到。**不能当成「一条被遗弃的都没有」**。"""
+        from delivery import hygiene
+
+        rep = hygiene.build(None, [], datasets=None)
+        self.assertEqual(rep.abandoned, [])
+        self.assertTrue(any("数据集" in s for s in rep.skipped))
+
+        clean = hygiene.build(None, [], datasets=[])
+        self.assertFalse(any("数据集" in s for s in clean.skipped))

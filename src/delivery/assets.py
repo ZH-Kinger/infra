@@ -167,7 +167,48 @@ OWNER_ROOT = "root"  # 主账号自己建的，通常是公共目录
 OWNER_GONE = "gone"  # RAM 里已经查无此人 —— 人走了，数据集和目录还留着
 
 
-def collect_pai_datasets(creds, *, regions=PAI_REGIONS, transport=None, progress=None) -> tuple:
+def collect_recycle_bin(creds, *, transport=None) -> list:
+    """RAM 用户回收站：删掉但还没过保留期的子账号。`IMS.ListUsersInRecycleBin`。
+
+    **趁保留期内把 UserId → 姓名固化下来。** 过了期这个人就只剩一个数字 UserId，
+    而他留下的数据集、目录、机器还在 —— 实测已经有一条是这样了（`/cwr`，删于
+    2026-08-05，回收站里已经查不到，现在没人说得清那是谁的）。
+
+    这是**离职回收缺的那半块**：体检清单原本只能回答「这个号的主人还在不在通讯录里」，
+    回收站回答的是反向的那个问题 —— 号已经没了，他留下的东西还在没在。
+    """
+    from .clouds import aliyun
+
+    out, marker = [], ""
+    for _ in range(_MAX_PAGES):
+        query = {"MaxItems": "100"}
+        if marker:
+            query["Marker"] = marker
+        body = aliyun.call(
+            *aliyun.IMS, "ListUsersInRecycleBin", query, creds=creds, transport=transport
+        )
+        for u in (body.get("Users") or {}).get("User") or []:
+            principal = str(u.get("UserPrincipalName") or "")
+            out.append(
+                {
+                    "user_id": str(u.get("UserId") or ""),
+                    # 登录名是 `<名>@<UID>.onaliyun.com`，只留 @ 前面那段，和别处的登录名对得上
+                    "login": principal.split("@", 1)[0],
+                    "name": str(u.get("DisplayName") or ""),
+                    "deleted_at": str(u.get("RecycleDate") or ""),
+                }
+            )
+        if not body.get("IsTruncated"):
+            return out
+        marker = str(body.get("Marker") or "")
+        if not marker:
+            return out
+    raise AssetError("回收站翻页超过上限，数据不完整，已中断")
+
+
+def collect_pai_datasets(
+    creds, *, regions=PAI_REGIONS, recycled=None, transport=None, progress=None
+) -> tuple:
     """PAI 数据集清单。返回 `(数据集列表, 跳过的地区说明)`。
 
     **这是唯一一类自带归属的资产。** 资源中心对 ECS/OSS 一个归属标签都不给，所以那些
@@ -200,6 +241,9 @@ def collect_pai_datasets(creds, *, regions=PAI_REGIONS, transport=None, progress
             transport=transport,
         )
     }
+    # 回收站只用来**认人**，不改 owner_kind：号确实已经删了，
+    # 只是趁保留期还在，把「那是谁」记下来
+    bin_users = {str(u.get("user_id") or ""): u for u in (recycled or ())}
     out: list = []
     skipped: list = []
     for region in regions:
@@ -230,6 +274,10 @@ def collect_pai_datasets(creds, *, regions=PAI_REGIONS, transport=None, progress
                 uid = str(d.get("UserId") or "")
                 owner = ram_users.get(uid, {})
                 kind = OWNER_USER if owner else (OWNER_ROOT if uid == account else OWNER_GONE)
+                recycled_at = ""
+                if kind == OWNER_GONE and uid in bin_users:
+                    owner = bin_users[uid]
+                    recycled_at = str(owner.get("deleted_at") or "")
                 uri = str(d.get("Uri") or "")
                 out.append(
                     {
@@ -246,6 +294,9 @@ def collect_pai_datasets(creds, *, regions=PAI_REGIONS, transport=None, progress
                         "owner_kind": kind,
                         "owner_login": str(owner.get("login") or ""),
                         "owner_name": str(owner.get("name") or ""),
+                        # 非空 = 属主的号删了但还在回收站里，认得出是谁；
+                        # kind 是 gone 而这里为空 = 保留期也过了，**再也认不出来了**
+                        "owner_deleted_at": recycled_at,
                     }
                 )
         if progress:
@@ -352,7 +403,9 @@ def assume_role_for(
 Job = tuple  # (platform, 凭证前缀提示, collect() -> (account, resources))
 
 
-def build_snapshot(jobs: Iterable[Job], *, datasets=None, dataset_error: str = "") -> dict:
+def build_snapshot(
+    jobs: Iterable[Job], *, datasets=None, dataset_error: str = "", recycled=None
+) -> dict:
     """`datasets` 放在快照顶层而不是塞进某个账号的 `resources` 里。
 
     两个原因：它跨地区跨工作空间，本来就不属于「某个账号下的某个地区」这个结构；
@@ -374,6 +427,10 @@ def build_snapshot(jobs: Iterable[Job], *, datasets=None, dataset_error: str = "
         out["datasets"] = list(datasets)
     if dataset_error:
         out["dataset_error"] = dataset_error[:300]
+    # 回收站有保留期。**每次采集都把它抄一份存下来**：过期之后云上就查不到了，
+    # 而快照里这份会一直留着 —— 这是「过期之后还认得出那是谁的东西」的唯一办法
+    if recycled is not None:
+        out["recycle_bin"] = list(recycled)
     return out
 
 

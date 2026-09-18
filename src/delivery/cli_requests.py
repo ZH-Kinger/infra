@@ -242,6 +242,11 @@ def add_parsers(commands) -> None:
     hyg.add_argument(
         "--services", default="identity/services.json", help="服务号清单（这些不算「无主」）"
     )
+    hyg.add_argument(
+        "--assets",
+        default="identity/assets.json",
+        help="资产快照（PAI 数据集在里面，用来看「人的号删了东西还在」）",
+    )
     hyg.add_argument("--stale-days", type=int, default=0, help=f"AK 多久算该换（默认 {180}）")
     hyg.add_argument("--unused-days", type=int, default=0, help=f"多久没用算闲置（默认 {90}）")
 
@@ -571,6 +576,7 @@ def _hygiene(args) -> int:
     退出码：有待办 → 1，干净 → 0。定时任务据此决定要不要推通知。
     数据不完整（快照没采全、通讯录没拿到）同样返回 1 —— 那本身就是要人看一眼的事。
     """
+    from . import assets as assets_mod
     from . import hygiene, inventory
     from . import people as people_mod
 
@@ -604,10 +610,21 @@ def _hygiene(args) -> int:
 
     from .cli import _load_service_names
 
+    # 资产快照缺 / 坏 都不该让体检整个跑不起来 —— 那一类记一笔跳过就行。
+    # **拿不到时传 None 而不是空列表**：空列表等于断言「一条被遗弃的都没有」
+    datasets = None
+    try:
+        snapshot_assets = assets_mod.load(args.assets)
+        if snapshot_assets is not None:
+            datasets = snapshot_assets.get("datasets")
+    except DeliveryError as exc:
+        print(f"资产快照读不了，本次不看数据集：{exc}", file=sys.stderr)
+
     report = hygiene.build(
         snap,
         roster,
         statuses=statuses,
+        datasets=datasets,
         services=_load_service_names(args.services),
         stale_days=args.stale_days or hygiene.STALE_KEY_DAYS,
         unused_days=args.unused_days or hygiene.UNUSED_KEY_DAYS,
@@ -644,21 +661,26 @@ def _assets(args) -> int:
             )
         # PAI 数据集：和资源中心是两条路（那边不给归属，这边 UserId 就是属主）。
         # 采不到只记一笔，不让整次资产采集失败
-        sets, skipped, ds_err = None, [], ""
+        sets, skipped, ds_err, recycled = None, [], "", None
         if not args.skip_pai:
             base = args.aliyun_profile[0] if args.aliyun_profile else "ALIYUN"
+            creds = aliyun.Credentials.from_env(base)
             try:
-                sets, skipped = assets.collect_pai_datasets(aliyun.Credentials.from_env(base))
+                # 回收站先采：数据集的属主要靠它认人，而它有保留期 —— 过期就再也查不到了
+                recycled = assets.collect_recycle_bin(creds)
+                sets, skipped = assets.collect_pai_datasets(creds, recycled=recycled)
             except DeliveryError as exc:
                 ds_err = next((ln.strip() for ln in str(exc).splitlines() if ln.strip()), "")
 
-        data = assets.build_snapshot(jobs, datasets=sets, dataset_error=ds_err)
+        data = assets.build_snapshot(jobs, datasets=sets, dataset_error=ds_err, recycled=recycled)
         out = _write_private(args.out, data)
         failed = [a for a in data["accounts"] if a.get("error")]
         total = sum(len(a.get("resources") or []) for a in data["accounts"])
         print(f"已写入 {out}（权限 600）：{total} 个资源")
+        if recycled is not None:
+            print(f"  RAM 回收站 {len(recycled)} 个已删账号（趁保留期内固化姓名）")
         if sets is not None:
-            gone = [d for d in sets if not d["owner_login"]]
+            gone = [d for d in sets if d["owner_kind"] == assets.OWNER_GONE]
             tail = f"，其中 {len(gone)} 条属主已经不在了" if gone else ""
             print(f"  PAI 数据集 {len(sets)} 条{tail}")
             for note in skipped:

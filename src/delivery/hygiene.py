@@ -63,6 +63,12 @@ _SECTIONS = (
     ),
     ("orphan", "认不出属主的云账号", "出了事找不到人，这批最该先补上归属。"),
     (
+        "abandoned",
+        "人的号已经删了，东西还留着",
+        "先找他原来的组确认还要不要、要不要交接。**别急着删** —— 离职交接最常见的情况"
+        "恰恰是数据要留给接手的人，而删掉的训练数据找不回来。",
+    ),
+    (
         "rotate",
         "AK 建出来超过 {stale_days} 天，该换了",
         "提醒本人换，别代劳：新旧两把并存一段时间才不会断服务。",
@@ -85,6 +91,9 @@ class Report:
     unused: list = field(default_factory=list)
     #: 认不出属主的云账号（最该先处理的那批：出了事找不到人）
     orphan: list = field(default_factory=list)
+    #: 属主的 RAM 号已经删了，他建的东西还在（PAI 数据集、CPFS 目录……）。
+    #: 和 `left` 正好是一对：那边是号还在人走了，这边是号没了东西还在
+    abandoned: list = field(default_factory=list)
     #: 在飞书里**查不到**的人。注意：飞书对「不在应用可用范围内」和「已被移出通讯录」
     #: 回的是同一个错误码，所以这批只能是「要人确认」，不能当成已离职
     unknown: list = field(default_factory=list)
@@ -103,6 +112,7 @@ class Report:
             + len(self.unused)
             + len(self.orphan)
             + len(self.unknown)
+            + len(self.abandoned)
         )
 
     def sections(self) -> list:
@@ -188,6 +198,47 @@ def _owner_of(person) -> str:
     return f"{person.name} {person.email}".strip()
 
 
+def _abandoned(datasets: Optional[Iterable]) -> list:
+    """属主的 RAM 号已经删了、东西还留着的那些。
+
+    只看 `owner_kind == "gone"`：`root` 是主账号建的公共目录（share、backbones 这类，
+    本来就没有个人属主），`user` 是人还在。混进来的话这一栏会有四分之三是噪音 ——
+    实测 61 条里 root 有 13 条、真 gone 只有 5 条。
+
+    回收站里还查得到的，`owner_name` 有值 —— 这条能直接写出是谁的。查不到的说明
+    **保留期也过了**，那就只剩一个数字 UserId，谁都认不出来了；这种要单独说清楚，
+    否则看的人会以为只是漏填了名字。
+    """
+    out = []
+    for d in datasets or ():
+        if str(d.get("owner_kind") or "") != "gone":
+            continue
+        name = str(d.get("owner_name") or "").strip()
+        login = str(d.get("owner_login") or "").strip()
+        deleted = str(d.get("owner_deleted_at") or "")[:10]
+        if name or login:
+            why = f"属主 {name} {login}".strip() + (
+                f" 的账号已于 {deleted} 删除" if deleted else " 的账号已删除"
+            )
+        else:
+            why = (
+                f"属主（UserId {d.get('owner_user_id') or '未知'}）的账号已删除，"
+                "且回收站保留期已过 —— 现在没人认得出这是谁的"
+            )
+        out.append(
+            Finding(
+                kind="abandoned",
+                platform="pai",
+                account=f"{d.get('region') or '?'}/{d.get('workspace') or '?'}",
+                subject=str(d.get("name") or "?"),
+                owner=f"{name} {login}".strip(),
+                why=why,
+                detail=str(d.get("path") or d.get("uri") or ""),
+            )
+        )
+    return out
+
+
 def build(
     snapshot: Optional[inventory.Snapshot],
     people: Iterable,
@@ -195,6 +246,7 @@ def build(
     directory_uids: Optional[set] = None,
     statuses: Optional[Mapping] = None,
     services: Optional[Iterable] = None,
+    datasets: Optional[Iterable] = None,
     now: Optional[float] = None,
     stale_days: int = STALE_KEY_DAYS,
     unused_days: int = UNUSED_KEY_DAYS,
@@ -208,6 +260,12 @@ def build(
     report = Report(stale_days=stale_days, unused_days=unused_days)
     now = now if now is not None else time.time()
     known_services = {str(x or "").lower() for x in (services or ())} - {""}
+
+    # **在权限快照那道门之前算**：数据集来自资产快照，是另一个文件。
+    # 放到后面的话，权限快照一缺，这一类会跟着一起消失 —— 而它本来跟权限快照没关系
+    report.abandoned.extend(_abandoned(datasets))
+    if datasets is None:
+        report.skipped.append("没有资产快照里的数据集，这次不看「人的号删了东西还在」")
 
     if snapshot is None:
         report.skipped.append("没有权限快照，AK 和归属这两类都没法算")
@@ -307,7 +365,7 @@ def build(
     if all(u.keys is None for u in snapshot.users) and snapshot.users:
         report.skipped.append("一个账号的 AK 都没采到 —— 检查采集身份有没有 ram:ListAccessKeys")
 
-    for bucket in (report.left, report.orphan, report.rotate, report.unused):
+    for bucket in (report.left, report.orphan, report.rotate, report.unused, report.abandoned):
         bucket.sort(key=lambda f: (f.platform, f.account, f.subject))
     return report
 
@@ -322,6 +380,7 @@ def summary(report: Report) -> Mapping:
     return {
         "left": len(report.left),
         "orphan": len(report.orphan),
+        "abandoned": len(report.abandoned),
         "rotate": len(report.rotate),
         "unused": len(report.unused),
         "incomplete": bool(report.skipped),
