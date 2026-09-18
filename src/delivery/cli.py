@@ -211,6 +211,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="identity/policy-rules.json",
         help="权限策略申请规则（可选，不存在时用内置禁用清单）",
     )
+    srv.add_argument(
+        "--services",
+        default="identity/services.json",
+        help="服务号清单（体检时这些不算「无主」）",
+    )
+    # 和 `delivery hygiene` 的同名参数必须配一致：定时任务按 90 天判、网页按 180 天判的话，
+    # 同一把 AK 在两个地方会有两种说法，而 _SECTIONS 那次重构就是为了消灭这种分歧
+    srv.add_argument("--stale-days", type=int, default=0, help="AK 多久算该换（默认 180）")
+    srv.add_argument("--unused-days", type=int, default=0, help="多久没用算闲置（默认 90）")
     srv.add_argument("--templates", default="identity/request-templates.json", help="申请模板目录")
     srv.add_argument(
         "--approval", default="identity/approval.json", help="飞书审批定义与表单控件配置"
@@ -926,17 +935,11 @@ def _cmd_doctor(args) -> int:
 
 
 def _load_service_names(path: str) -> list:
-    file = Path(path)
-    if not file.exists():
-        return []
-    try:
-        data = json.loads(file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise DeliveryError(f"读不了服务号名单 {path}：{exc}") from exc
-    names = data.get("names") if isinstance(data, dict) else None
-    if not isinstance(names, list) or not all(isinstance(n, str) and n.strip() for n in names):
-        raise DeliveryError(f'{path} 格式应为 {{"names": ["服务号", ...]}}')
-    return [n.strip() for n in names]
+    """服务号清单。实现在 `hygiene.load_service_names` —— 面板服务端也要读同一份，
+    留在这里的话服务端就得反向 import CLI（顺带把整套 argparse 拉进内存）。"""
+    from . import hygiene
+
+    return hygiene.load_service_names(path)
 
 
 def _cmd_identity_ssomap(args) -> int:
@@ -1627,6 +1630,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 labels_path=args.labels,
                 **_review_paths(args),
                 **_request_paths(args),
+                services_path=args.services,
+                stale_days=args.stale_days,
+                unused_days=args.unused_days,
                 sessions_path=_sessions_path(args),
                 downloads_path=args.downloads,
                 auth=args.auth,

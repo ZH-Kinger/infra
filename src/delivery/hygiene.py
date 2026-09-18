@@ -45,6 +45,36 @@ class Finding:
         return f"{self.platform}/{self.account}/{self.subject}"
 
 
+#: 五类各自的标题和那句给人看的话。**只在这里写一份** —— 命令行和面板是同一批结论，
+#: 各写各的迟早会出现「网页上说该停用、命令行说该轮换」这种自相矛盾的提示。
+#: 顺序就是展示顺序：人的问题排在密钥问题前面。
+#: 标题和说明会过一次 `str.format`（填阈值），所以**正文里不能出现裸的花括号**。
+_SECTIONS = (
+    (
+        "left",
+        "人已经不在通讯录里，云账号还在",
+        "确认离职后再收。名字对不上也可能是没绑 union_id，别直接删。",
+    ),
+    (
+        "unknown",
+        "飞书里查不到这个人",
+        "可能已离职，也可能只是不在应用可用范围内 —— 飞书两种情况回同一个错误码。"
+        "**先确认再动手**。",
+    ),
+    ("orphan", "认不出属主的云账号", "出了事找不到人，这批最该先补上归属。"),
+    (
+        "rotate",
+        "AK 建出来超过 {stale_days} 天，该换了",
+        "提醒本人换，别代劳：新旧两把并存一段时间才不会断服务。",
+    ),
+    (
+        "unused",
+        "AK 超过 {unused_days} 天没用过",
+        "这批该问「还要不要」。不要就**停用**（可逆），别直接删。",
+    ),
+)
+
+
 @dataclass
 class Report:
     #: 人已经不在通讯录里，云账号还在
@@ -60,6 +90,10 @@ class Report:
     unknown: list = field(default_factory=list)
     #: 为什么某一类没算出来。**不是空列表就说明这份清单不完整**
     skipped: list = field(default_factory=list)
+    #: 这次实际用的阈值。**要记在报告里**：`--stale-days 30` 跑出来的清单，
+    #: 标题却印着默认的 180 天，看的人会以为这批 AK 老得多、按错的紧迫度处理
+    stale_days: int = STALE_KEY_DAYS
+    unused_days: int = UNUSED_KEY_DAYS
 
     @property
     def total(self) -> int:
@@ -71,47 +105,53 @@ class Report:
             + len(self.unknown)
         )
 
+    def sections(self) -> list:
+        """[(kind, 标题, 说明, 条目), ...]，空的那几类也在里面（计数用）。"""
+        fmt = {"stale_days": self.stale_days, "unused_days": self.unused_days}
+        return [
+            (kind, title.format(**fmt), note.format(**fmt), getattr(self, kind))
+            for kind, title, note in _SECTIONS
+        ]
+
     def render(self) -> str:
         lines = ["云账号体检"]
-
-        def section(title: str, items: list, note: str = "") -> None:
+        for _, title, note, items in self.sections():
             if not items:
-                return
+                continue
             lines.append(f"\n{title}（{len(items)}）")
-            if note:
-                lines.append(f"  {note}")
+            lines.append(f"  {note}")
             for f in items:
                 who = f" · {f.owner}" if f.owner else ""
                 lines.append(f"  · {f.scope}{who}")
                 lines.append(f"      {f.why}" + (f"（{f.detail}）" if f.detail else ""))
-
-        section(
-            "人已经不在通讯录里，云账号还在",
-            self.left,
-            "确认离职后再收。名字对不上也可能是没绑 union_id，别直接删。",
-        )
-        section(
-            "飞书里查不到这个人",
-            self.unknown,
-            "可能已离职，也可能只是不在应用可用范围内 —— 飞书两种情况回同一个错误码。"
-            "**先确认再动手**。",
-        )
-        section("认不出属主的云账号", self.orphan, "出了事找不到人，这批最该先补上归属。")
-        section(
-            f"AK 建出来超过 {STALE_KEY_DAYS} 天，该换了",
-            self.rotate,
-            "提醒本人换，别代劳：新旧两把并存一段时间才不会断服务。",
-        )
-        section(
-            f"AK 超过 {UNUSED_KEY_DAYS} 天没用过",
-            self.unused,
-            "这批该问「还要不要」。不要就**停用**（可逆），别直接删。",
-        )
         for note in self.skipped:
             lines.append(f"\n⚠ {note}")
         if not self.total and not self.skipped:
             lines.append("\n没有发现需要处理的。")
         return "\n".join(lines)
+
+
+def load_service_names(path: Optional[str]) -> list:
+    """`identity/services.json` 里人工登记的服务号清单。没配就是空清单。
+
+    **坏文件要抛，不能当空清单**：读成空 = 那几十个服务号全部涌进「无主」那一栏，
+    而一份一半是噪音的清单没人会看第二遍。缺文件才是正常的初始状态。
+    """
+    import json
+    from pathlib import Path
+
+    from .errors import DeliveryError
+
+    if not path or not Path(path).exists():
+        return []
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DeliveryError(f"读不了服务号名单 {path}：{exc}") from exc
+    names = data.get("names") if isinstance(data, dict) else None
+    if not isinstance(names, list) or not all(isinstance(n, str) and n.strip() for n in names):
+        raise DeliveryError(f'{path} 格式应为 {{"names": ["服务号", ...]}}')
+    return [n.strip() for n in names]
 
 
 def _is_service(name: str, services: set) -> bool:
@@ -165,7 +205,7 @@ def build(
     见 identity/directory.py）。给 `None` 表示这次没拿到通讯录 —— 那就不算离职那一类，
     并在 `skipped` 里说明。拿不到通讯录却照算，等于把全公司报成离职。
     """
-    report = Report()
+    report = Report(stale_days=stale_days, unused_days=unused_days)
     now = now if now is not None else time.time()
     known_services = {str(x or "").lower() for x in (services or ())} - {""}
 
@@ -238,7 +278,7 @@ def build(
                     account=user.account,
                     subject=user.name,
                     owner=owner,
-                    why=f"AK {k.id}… 建于 {k.created[:10] or '未知'}",
+                    why=f"AK {k.id[:8]}… 建于 {k.created[:10] or '未知'}",
                     detail=f"最近用过：{k.last_used[:10] or '从没用过'}",
                 )
             )
@@ -250,7 +290,7 @@ def build(
                     account=user.account,
                     subject=user.name,
                     owner=owner,
-                    why=f"AK {k.id}… "
+                    why=f"AK {k.id[:8]}… "
                     + ("从来没用过" if not k.last_used_ts else f"最后一次用是 {k.last_used[:10]}"),
                     detail=f"建于 {k.created[:10] or '未知'}",
                 )
@@ -258,6 +298,12 @@ def build(
 
     if statuses is None and directory_uids is None:
         report.skipped.append("没查飞书在职状态，这次不判断谁离职了")
+    elif statuses is not None and not statuses:
+        # **查了、但一个人都查不成**（名册里没有 union_id —— 没登录过面板的人就是这样）。
+        # 不说的话：`render()` 打出「没有发现需要处理的」、`_hygiene` 退出码 0、
+        # `summary()["incomplete"]` 为 False —— 定时任务据此判定「一切正常」，
+        # 而实际上离职这一类**一个人都没查**
+        report.skipped.append("在职状态一个人都没查到（名册里没有 union_id），本次不判断谁离职")
     if all(u.keys is None for u in snapshot.users) and snapshot.users:
         report.skipped.append("一个账号的 AK 都没采到 —— 检查采集身份有没有 ram:ListAccessKeys")
 
@@ -279,4 +325,40 @@ def summary(report: Report) -> Mapping:
         "rotate": len(report.rotate),
         "unused": len(report.unused),
         "incomplete": bool(report.skipped),
+    }
+
+
+def view(report: Report) -> dict:
+    """同一份结论的 JSON 形态，给面板的只读接口用。
+
+    `skipped` 照原样带出去，**不能在接口这一层丢掉**：网页上只显示条目、不显示
+    「这次没算某一类」的话，一份残缺清单看起来会和一份干净清单一模一样。
+    """
+    return {
+        "summary": dict(summary(report)),
+        "total": report.total,
+        "stale_days": report.stale_days,
+        "unused_days": report.unused_days,
+        "sections": [
+            {
+                "kind": kind,
+                "title": title,
+                "note": note,
+                "count": len(items),
+                "items": [
+                    {
+                        "platform": f.platform,
+                        "account": f.account,
+                        "subject": f.subject,
+                        "scope": f.scope,
+                        "owner": f.owner,
+                        "why": f.why,
+                        "detail": f.detail,
+                    }
+                    for f in items
+                ],
+            }
+            for kind, title, note, items in report.sections()
+        ],
+        "skipped": list(report.skipped),
     }

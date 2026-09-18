@@ -120,7 +120,85 @@ function holdingsCard(items) {
       h("tbody", {}, ...rows))));
 }
 
-function assetsPage(data, admin) {
+// 两种标记的措辞是**给持有人看的动作**，不是给运维看的状态词。
+// 「该换了」要说清楚怎么换才不断服务，否则人会直接删掉旧的那把。
+const KEY_FLAG = {
+  rotate: ["该换了", "crit", "建得太久。找管理员发一把新的，两把并存几天、程序都切过去之后再停旧的。"],
+  unused: ["没人用", "warn", "还要用吗？不用就请管理员停用 —— 停用是可逆的，随时能改回来。"],
+};
+
+function ageText(days) {
+  if (days === null || days === undefined) return h("span", { class: "muted" }, "不详");
+  if (days >= 365) return `${Math.floor(days / 365)} 年 ${days % 365} 天`;
+  return `${days} 天`;
+}
+
+/** 自己的 AK 台账：每把建了多久、上次什么时候用过。 */
+function keysCard(data) {
+  const keys = data.keys || [];
+  const uncollected = data.uncollected || [];
+  // 「有账号但一把都没有」值得说一句（是好事）；「压根没有云账号」就别占地方了
+  if (!keys.length && !uncollected.length && !data.accounts) return null;
+
+  const rows = keys.map((k) => {
+    const flags = (k.flags || []).map((f) => {
+      const [label, tone] = KEY_FLAG[f] || [f, ""];
+      return h("span", { class: `pill ${tone}` }, label);
+    });
+    if (!k.active) flags.push(h("span", { class: "pill" }, "已停用"));
+    return h("tr", { class: k.active ? "" : "dim" },
+      h("td", {}, h("span", { class: "mono" }, `${k.id}…`)),
+      h("td", {}, h("span", { class: "pname" }, k.user), h("span", { class: "pmail" }, k.account_label || k.account)),
+      h("td", {}, ageText(k.age_days), k.created ? h("span", { class: "pmail" }, k.created.slice(0, 10)) : null),
+      h("td", {}, k.never_used
+        ? h("span", { class: "warn-text" }, "从来没用过")
+        : k.idle_days === null || k.idle_days === undefined
+          ? h("span", { class: "muted" }, "不详")
+          : `${k.idle_days} 天前`),
+      h("td", {}, ...flags));
+  });
+
+  const advice = [...new Set(keys.flatMap((k) => k.flags || []))]
+    .map((f) => KEY_FLAG[f] && h("p", { class: "opt-desc" }, h("b", {}, `${KEY_FLAG[f][0]}：`), KEY_FLAG[f][2]))
+    .filter(Boolean);
+
+  // **三态在这一层最容易被合回去**：后端分得清清楚楚（keys / uncollected / accounts），
+  // 渲染时一个 `keys.length ? 表格 : "你没有密钥"` 就把「没采到」重新说成了「没有」。
+  // 采集身份掉了 ram:ListAccessKeys 的那天，全员会同时看到那句假的安心话 ——
+  // 而那正是最该被发现的状态。所以「一把都没采到」必须走自己的分支，连头上那个
+  // 数字都不能写 0：写 0 就等于替云上回答了一个我们这次根本没问到的问题。
+  const blind = !keys.length && uncollected.length;
+  return h("section", { class: "card asset-card" },
+    h("div", { class: "asset-head" },
+      h("div", { class: "chips" }, h("b", {}, "你的访问密钥")),
+      h("span", { class: "asset-total" }, h("b", {}, blind ? "?" : String(keys.length)), " 把")),
+    h("p", { class: "pad muted" },
+      `只显示密钥 ID 的前 8 位 —— 面板不保存、也拿不到完整密钥。超过 ${data.stale_days ?? 180} 天该换，超过 ${data.unused_days ?? 90} 天没用过该问还要不要。`),
+    data.captured_at
+      // 年龄和「多久没用」是拿请求时刻减快照里的时间算的。快照放旧了，一把昨天还在用的
+      // 密钥会显示成「15 天前」，再配上「没人用，停掉吧」的建议 —— 有人真会去停一把在跑的
+      ? h("p", { class: "pad muted" }, `依据 ${fmtTime(data.captured_at)} 的权限快照，晚于这个时间的使用记录还没采进来。`)
+      : null,
+    keys.length
+      ? h("div", { class: "scroll" }, h("table", {},
+          h("thead", {}, h("tr", {},
+            h("th", {}, "密钥"), h("th", {}, "子账号"), h("th", {}, "建了多久"), h("th", {}, "最近用过"), h("th", {}, "状态"))),
+          h("tbody", {}, ...rows)))
+      : blind
+        ? null
+        : h("p", { class: "pad" }, "你名下没有长期访问密钥 —— 这是好事：临时凭证到期自己失效，没有需要惦记轮换的东西。"),
+    advice.length ? h("div", { class: "pad" }, ...advice) : null,
+    uncollected.length
+      ? h("div", { class: "banner warn" },
+          blind
+            ? `这次一把都没采到（${uncollected.map((u) => u.user).join("、")}）。这**不是**说你没有密钥，是说这次没查到 —— 请管理员检查采集身份的 ram:ListAccessKeys 权限。`
+            : `上面这份不完整：没采到 ${uncollected.map((u) => u.user).join("、")} 的密钥清单（不等于没有）。请管理员检查采集身份的 ram:ListAccessKeys 权限。`)
+      : null);
+}
+
+// 导出只为可测：密钥卡那条「没采到 ≠ 没有」的规矩服务端用例抓不到（后端返回是对的），
+// 只有在这一层渲染出来才看得见。同 requests.js 的 applyPage。
+export function assetsPage(data, admin) {
   const accounts = data.accounts || [];
   const nodes = [
     h("header", { class: "masthead" }, h("h1", {}, admin ? "云资产" : "云账号资产"), capturedLine(data.captured_at)),
@@ -131,9 +209,21 @@ function assetsPage(data, admin) {
     // 放在最前面：这是唯一一份归属确定的数据（申请人就写在申请单里）。
     // 云上采来的资源要管理员一条条指归属，没指之前员工那边一定是空的
     if (holdings.length) nodes.push(holdingsCard(holdings));
+    const keys = keysCard(data.keys || {});
+    if (keys) nodes.push(keys);
   }
   if (!accounts.length) {
-    nodes.push(h("div", { class: "card empty" }, h("h2", {}, admin ? "还没有资产数据" : "你还没有云账号"), h("p", {}, admin ? "开通两家的资源中心，并用只读身份运行 delivery assets collect。" : "需要云账号时从「申请」开始。")));
+    // 资产快照（assets collect）和权限快照（inventory collect）是两套独立采集，
+    // 前者没跑是常态。这时候上面可能已经列出了持有物和密钥 —— 密钥本身就是账号存在的
+    // 证据，紧跟着再说一句「你还没有云账号」就是自相矛盾，看的人只会不信这一页。
+    const denies = !admin && nodes.length > 2;
+    nodes.push(h("div", { class: "card empty" },
+      h("h2", {}, admin ? "还没有资产数据" : denies ? "还没采到你的云资源" : "你还没有云账号"),
+      h("p", {}, admin
+        ? "开通两家的资源中心，并用只读身份运行 delivery assets collect。"
+        : denies
+          ? "上面那些来自权限快照和面板发出的凭证。云上的机器和存储要等管理员跑一次资产采集才会出现在这里。"
+          : "需要云账号时从「申请」开始。")));
     return nodes;
   }
   for (const acc of accounts) {

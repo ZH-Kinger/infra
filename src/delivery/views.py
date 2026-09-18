@@ -290,4 +290,100 @@ def admin_people(
     }
 
 
-__all__ = ["FILTERS", "Labels", "admin_overview", "admin_people", "person_detail"]
+def my_keys(
+    person: Optional[Person],
+    snapshot: Optional[Snapshot],
+    labels: Labels,
+    *,
+    now: Optional[float] = None,
+    stale_days: int = 0,
+    unused_days: int = 0,
+) -> dict:
+    """这个人自己的 AK 台账：每把建了多久、上次什么时候用过。
+
+    **只列本人子账号上的**（`person.accounts`，按 union_id 认出来的那些），和
+    `person_detail` 同一份依据 —— 这一页上不该出现任何别人的东西。
+
+    三态在返回值里必须分得开（同 `hygiene.py` 开头那条规矩）：
+      · `keys` 里有条目               → 采到了，就是这些
+      · `keys` 空且 `uncollected` 空  → 采到了，确实一把都没有
+      · `uncollected` 里有            → **这个子账号的 AK 没采到**，不是「他没有 AK」
+
+    混成一个「0 把」的话，采集身份哪天掉了 `ram:ListAccessKeys`，全员都会看到
+    「你没有访问密钥」——而那恰恰是最该被发现的状态。
+
+    已停用的 AK 照列（`active=False`、不打标）：体检清单不管它们（换一把停用的
+    没有意义），但**台账要让人看见自己有什么**，停用 ≠ 不存在。
+    """
+    import time
+
+    from . import hygiene
+
+    stale_days = stale_days or hygiene.STALE_KEY_DAYS
+    unused_days = unused_days or hygiene.UNUSED_KEY_DAYS
+    now = now if now is not None else time.time()
+
+    def days_since(ts: float) -> Optional[int]:
+        return int((now - ts) // 86400) if ts else None
+
+    rows: list = []
+    uncollected: list = []
+    seen = 0
+    for ref in person.accounts if person else ():
+        user = snapshot.user(ref.platform, ref.account, ref.name) if snapshot else None
+        if user is None:
+            continue
+        seen += 1
+        where = {
+            "platform": ref.platform,
+            "platform_display": labels.platform(ref.platform),
+            "account": ref.account,
+            "account_label": labels.account(ref.platform, ref.account),
+            "user": ref.name,
+        }
+        if user.keys is None:
+            uncollected.append(dict(where))
+            continue
+        # 判据只在 inventory.stale_keys / unused_keys 里定义一次，这里不重算阈值：
+        # 台账上说「该换了」而体检清单里没有它，两边就都不可信了
+        stale = set(user.stale_keys(days=stale_days, now=now))
+        unused = set(user.unused_keys(days=unused_days, now=now))
+        for k in user.keys:
+            flags = []
+            # 顺序有意义：没人用的先问「还要不要」，要留着才谈轮换
+            if k in unused:
+                flags.append("unused")
+            if k in stale:
+                flags.append("rotate")
+            rows.append(
+                {
+                    **where,
+                    # **截断在这里也做一次**：采集那一步已经只存前 8 位，但页面上写着
+                    # 「只显示前 8 位」，这个承诺该由渲染方自己保证 —— 将来有人手工拼过
+                    # 一份快照、或者新加一朵云的采集忘了截断，那句话就变成假的且没人发现
+                    "id": k.id[:8],
+                    "status": k.status,
+                    "active": k.active,
+                    "created": k.created,
+                    "age_days": days_since(k.created_ts),
+                    "last_used": k.last_used,
+                    "idle_days": days_since(k.last_used_ts),
+                    "never_used": not k.last_used_ts,
+                    "flags": flags,
+                }
+            )
+    # 启用的排前面，同组里越老越靠前 —— 最该处理的那把落在第一行
+    rows.sort(key=lambda r: (not r["active"], -(r["age_days"] or 0), r["id"]))
+    return {
+        "captured_at": snapshot.captured_at if snapshot else "",
+        "stale_days": stale_days,
+        "unused_days": unused_days,
+        # 快照里认出来的本人子账号个数。**前端要靠它区分两件事**：
+        # 「你有账号但一把密钥都没有」（该说，是好事）和「你压根没有云账号」（不用说）
+        "accounts": seen,
+        "keys": rows,
+        "uncollected": uncollected,
+    }
+
+
+__all__ = ["FILTERS", "Labels", "admin_overview", "admin_people", "my_keys", "person_detail"]

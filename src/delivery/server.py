@@ -80,7 +80,7 @@ from .registry import PlatformRegistry
 from .requests_api import TICKET_ID as _ID
 from .requests_api import Caller, RequestsApi
 from .roles import ROLE_ADMIN, Admins, load_admins
-from .views import FILTERS, Labels, admin_overview, admin_people, person_detail
+from .views import FILTERS, Labels, admin_overview, admin_people, my_keys, person_detail
 
 #: 工具下载目录（`--downloads`）。九章的 aladdin 没有公开下载地址，只能我们自己托管；
 #: 阿里和火山的 CLI 有官方地址，页面上直接给链接，不在这里放第二份。
@@ -621,6 +621,14 @@ def _setup_hint(base: str = "") -> str:
 
 
 #: 前端静态文件。**白名单，不做目录映射**：路径不经过文件系统解析，谈不上穿越。
+#: 可以原样回给浏览器的报错开头。**白名单而不是黑名单**：异常里可能带服务器路径和邮箱，
+#: 默认一律换成通用文案。只有这几句是我们自己写的、确认不含敏感信息，而且照着它就能修好。
+#: 一律通用文案的代价是管理员只看到「请联系管理员查看服务端日志」—— 而他自己就是管理员。
+_SAFE_ERRORS = (
+    "人员名册还没生成",
+    "读不了服务号名单",
+)
+
 WEB_DIR = Path(__file__).with_name("web")
 _STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -633,6 +641,7 @@ _STATIC = {
     "/assets.js": ("assets.js", "text/javascript; charset=utf-8"),
     "/permissions.js": ("permissions.js", "text/javascript; charset=utf-8"),
     "/health.js": ("health.js", "text/javascript; charset=utf-8"),
+    "/hygiene.js": ("hygiene.js", "text/javascript; charset=utf-8"),
     "/iam.js": ("iam.js", "text/javascript; charset=utf-8"),
 }
 #: 页面只加载同源资源。前端不拼 innerHTML，这条 CSP 是第二道闸。
@@ -703,9 +712,17 @@ class Backend:
         policy_rules_path: Optional[str] = None,
         iam_spec_path: Optional[str] = None,
         iam_out_path: Optional[str] = None,
+        services_path: Optional[str] = None,
+        stale_days: int = 0,
+        unused_days: int = 0,
         notify: Optional[Callable[[str, dict], None]] = None,
     ):
         self._notify = notify
+        self.services_path = services_path
+        # 0 = 用 hygiene 的默认值。面板和命令行必须能配成同一套阈值
+        # 钳到非负：`--stale-days -5` 会让每把 AK 都算「该换」，标题还印成「超过 -5 天」
+        self.stale_days = max(0, stale_days)
+        self.unused_days = max(0, unused_days)
         self.iam_spec_path = iam_spec_path
         self.iam_out_path = iam_out_path
         self.assets_path = assets_path
@@ -764,6 +781,16 @@ class Backend:
             return inventory.load(self.inventory_path)
 
         return self._cached("inventory", self._stamp(self.inventory_path), build)
+
+    def service_names(self) -> list:
+        """服务号清单（体检时这些不算「无主」）。没配就是空清单 —— 只会多报几条，不会漏。"""
+
+        def build():
+            from . import hygiene
+
+            return hygiene.load_service_names(self.services_path)
+
+        return self._cached("services", self._stamp(self.services_path), build)
 
     def people(self) -> people_mod.PeopleIndex:
         def build():
@@ -1103,7 +1130,7 @@ def make_handler(
                     print(f"[api] {path}: {type(exc).__name__}: {exc}", file=sys.stderr)
                     lines = str(exc).splitlines() if isinstance(exc, DeliveryError) else []
                     brief = lines[0] if lines else ""
-                    safe = brief if brief.startswith("人员名册还没生成") else ""
+                    safe = brief if brief.startswith(_SAFE_ERRORS) else ""
                     return self._json(
                         500, {"error": safe or "面板数据暂不可用，请联系管理员查看服务端日志"}
                     )
@@ -1394,7 +1421,21 @@ def make_handler(
                         if flows is not None
                         else []
                     )
+                    # 自己的 AK 建了多久、上次什么时候用过。以前这份数据采到了却只有
+                    # 命令行看得见，于是持有人根本不知道手上那把密钥有多老 ——
+                    # 「该轮换了」的提醒推过去也没有地方可点、可核对
+                    view["keys"] = my_keys(
+                        person,
+                        backend.snapshot(),
+                        labels,
+                        stale_days=backend.stale_days,
+                        unused_days=backend.unused_days,
+                    )
                 return self._json(200, view)
+            if path == "/api/admin/hygiene":
+                if self._require(admin=True) is None:
+                    return None
+                return self._json(200, self._hygiene(backend))
             if path == _ADMIN_POLICY_RULES:
                 if self._require(admin=True) is None:
                     return None
@@ -1455,6 +1496,55 @@ def make_handler(
             if not isinstance(payload, dict):
                 return None, self._json(400, {"error": "请求体必须是对象"})
             return payload, None
+
+        def _hygiene(self, backend) -> dict:
+            """体检清单的只读接口。**只算不改**，和命令行 `delivery hygiene` 同一份逻辑。
+
+            默认**不查**飞书在职状态：那是几十个串行 HTTP 请求，挂在页面加载上会让
+            管理后台无缘无故卡十几秒。带 `?status=1` 才查（页面上是一个按钮），
+            结果按 `_STATUS_TTL` 缓存，免得刷几下页面就把飞书接口打一遍。
+
+            查不到状态时**不判断离职**，由 `hygiene.build` 记进 `skipped` —— 拿不到
+            通讯录却照算，等于把全公司报成离职。
+            """
+            from . import hygiene
+
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            want_status = (query.get("status") or ["0"])[0] == "1"
+
+            snapshot = backend.snapshot()
+            roster = backend.people().people
+            statuses, status_error = None, ""
+            asked = missing_uid = 0
+            if want_status and app_id and app_secret:
+                try:
+                    statuses, asked, missing_uid = _employment_statuses(roster, app_id, app_secret)
+                except Exception as exc:  # noqa: BLE001
+                    # 查询故障 ≠ 这些人离职，**更不该等于整页打不开**。飞书读超时抛的是
+                    # TimeoutError、响应不是 JSON 抛的是 ValueError，都不是 DeliveryError，
+                    # 只 catch DeliveryError 的话它们会穿到 do_GET 的兜底、渲染成
+                    # 「面板数据暂不可用」——而真实原因只是飞书慢了一下。
+                    # 照样打日志：这里也可能吃到我们自己的 bug（AttributeError 之类），
+                    # 那时只剩页面上一句没人会转述的提示，服务端一点痕迹都不留
+                    print(f"[hygiene] 查在职状态失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+                    status_error = str(exc) or exc.__class__.__name__
+
+            report = hygiene.build(
+                snapshot,
+                roster,
+                statuses=statuses,
+                services=backend.service_names(),
+                stale_days=backend.stale_days or hygiene.STALE_KEY_DAYS,
+                unused_days=backend.unused_days or hygiene.UNUSED_KEY_DAYS,
+            )
+            out = hygiene.view(report)
+            out["status_checked"] = statuses is not None
+            out["status_asked"] = asked
+            out["status_missing_uid"] = missing_uid
+            out["status_error"] = status_error
+            out["status_available"] = bool(app_id and app_secret)
+            out["captured_at"] = snapshot.captured_at if snapshot else ""
+            return out
 
         def _requests(self, method: str, path: str, body):
             admin = path.startswith("/api/admin/")
@@ -1827,6 +1917,38 @@ def _tenant_token_cache(app_id: str, app_secret: str) -> Callable[[], str]:
     return get
 
 
+#: 飞书在职状态的缓存时长。查一次是几十个串行请求，管理员连点几下不该每次都打一遍；
+#: 而离职这种事以天计，十分钟的滞后没有任何影响
+_STATUS_TTL = 600.0
+_status_cache: dict = {"key": None, "at": 0.0, "value": None}
+_status_lock = threading.Lock()
+
+
+def _employment_statuses(roster, app_id: str, app_secret: str) -> tuple:
+    """名册里每个人的飞书在职状态。返回 `({union_id: 状态 或 None}, 查了几个, 没 union_id 的几个)`。
+
+    **后两个数不是装饰**：只有绑过 union_id 的人查得到（没登录过面板的人名册里就没有），
+    而「查了 12 个」和「查了 60 个」得出的「没发现离职」完全不是一回事。不把这两个数
+    交出去，页面就会拿一句「已查过在职状态」盖住「其实一多半人根本没查」。
+
+    缓存 10 分钟：离职这种事以天计，而查一次是几十个串行请求。
+    """
+    from .identity import directory
+
+    uids = tuple(sorted({p.union_id for p in roster if p.union_id}))
+    missing = sum(1 for p in roster if not p.union_id)
+    # 键带上 app_id：换了飞书应用就是另一套可见范围，拿旧结果等于拿别人的答案
+    ckey = (app_id, uids)
+    with _status_lock:
+        if _status_cache["key"] == ckey and time.time() - _status_cache["at"] < _STATUS_TTL:
+            return dict(_status_cache["value"]), len(uids), missing
+    # **锁外发请求**：几十个串行 HTTP，占着锁会把并发的管理员请求一起卡住
+    value = directory.status_of(uids, app_id, app_secret)
+    with _status_lock:
+        _status_cache.update(key=ckey, at=time.time(), value=value)
+    return dict(value), len(uids), missing
+
+
 def serve(
     *,
     host: str = "127.0.0.1",
@@ -1846,6 +1968,9 @@ def serve(
     policy_rules_path: Optional[str] = None,
     iam_spec_path: Optional[str] = None,
     iam_out_path: Optional[str] = None,
+    services_path: Optional[str] = None,
+    stale_days: int = 0,
+    unused_days: int = 0,
     sessions_path: Optional[str] = None,
     downloads_path: Optional[str] = None,
     auth: Optional[str] = None,
@@ -1881,6 +2006,9 @@ def serve(
         policy_rules_path=policy_rules_path,
         iam_spec_path=iam_spec_path,
         iam_out_path=iam_out_path,
+        services_path=services_path,
+        stale_days=stale_days,
+        unused_days=unused_days,
         feishu_token=token,
         notify=notify,
     )

@@ -509,3 +509,7 @@ dl.kv dd{margin:0; display:flex; gap:.5rem; align-items:center; min-width:0}
 .pad-block{margin:.8rem 1.25rem}
 .pad-notes{margin:0 1.25rem 1rem}
 .pad-foot{padding:0 1.25rem 2rem}
+
+/* AK 台账：已停用的那几行压暗（还在，但不用管），「从来没用过」标黄 */
+tr.dim td{opacity:.55}
+.warn-text{color:var(--warn)}
