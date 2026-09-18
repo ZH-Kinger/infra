@@ -127,16 +127,32 @@ def call(
     extra: Optional[dict] = None,
     creds: Credentials,
     transport=None,
+    service: bool = False,
 ) -> bytes:
     send = transport or _http
     query = {str(k): str(v) for k, v in (query or {}).items()}
-    host = f"{bucket}.{region}.aliyuncs.com"
+    # **服务级请求要显式说，不从「桶名是空的」推断出来。**
+    # 推断过一版，漏得很难看：守卫写成「桶名空且带 key 就抛」，可 list_prefixes /
+    # list_objects 的前缀走的是 query、`key` 恒为空 —— 于是 `list_prefixes("", "wzh/")`
+    # 照样发出一个合法的 GET Service，拿回 ListAllMyBucketsResult，找不到 CommonPrefixes，
+    # **安静返回 []**，被上层读成「这个桶里一个目录都没有」，而那正是判断「谁换了组、
+    # 有没有多余目录」的依据。根子在于「调用方少填一个桶名」和「我要列所有桶」
+    # 在类型上长得一模一样 —— 那就别让它们长得一样
+    if service:
+        if bucket or key:
+            raise OssError("服务级请求不能带桶名或对象名")
+    elif not bucket:
+        raise OssError("桶名不能为空")
+    # `bucket` 留空 = 服务级请求（ListBuckets）：主机名不带桶名，签名串里的
+    # CanonicalizedResource 是光秃秃的 `/`。拼成 `.oss-cn-hangzhou.aliyuncs.com`
+    # 或者 `//` 都只会换来 SignatureDoesNotMatch，而那个报错不会告诉你差在哪
+    host = f"{region}.aliyuncs.com" if service else f"{bucket}.{region}.aliyuncs.com"
     stamp = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime())
     md5 = base64.b64encode(hashlib.md5(body).digest()).decode() if body else ""  # noqa: S324
 
     sub = sorted((k, v) for k, v in query.items() if k in _SUBRESOURCES)
     tail = "&".join(f"{k}={v}" if v else k for k, v in sub)
-    resource = f"/{bucket}/{key}" + (f"?{tail}" if tail else "")
+    resource = ("/" if service else f"/{bucket}/{key}") + (f"?{tail}" if tail else "")
     # `x-oss-` 开头的头**必须按字典序进签名串**（`名:值\n`，名小写）。
     # 服务端复制靠的就是 `x-oss-copy-source` 这个头 —— 漏掉它就是 SignatureDoesNotMatch，
     # 而错误信息只会说签名不对，不会说少签了哪个头
@@ -215,6 +231,45 @@ def list_prefixes(bucket: str, prefix: str = "", *, region: str, creds, transpor
             # 而这个清单是拿来判断「这个人的目录建没建过」的 —— 少一条就会重复建
             raise OssError("OSS 说还有下一页却没给 continuation-token，清单不完整，已中断")
     raise OssError(f"OSS 列举超过 {_MAX_PAGES} 页，疑似死循环，已中断")
+
+
+def list_buckets(*, region: str, creds, transport=None) -> list:
+    """这个主账号下的**全部**桶，返回 `[{"name", "region", "created"}, …]`。
+
+    ListBuckets 是服务级请求：随便哪个地域的 endpoint 都返回所有地域的桶，
+    每条自带 `Location`（形如 `oss-cn-hangzhou`）。所以 `region` 只是拨号用的，
+    **不是过滤条件** —— 别拿它当「只看杭州的桶」使。
+
+    用途是体检里那条「桶在云上，但没登记在任何白名单里」。所以**宁可中断也不能少列**：
+    少列出来的那个桶正好就是没人管的那个，而它会安安静静地不出现在清单上。
+    """
+    out, marker = [], ""
+    for _ in range(_MAX_PAGES):
+        query = {"max-keys": "1000"}
+        if marker:
+            query["marker"] = marker
+        raw = call(
+            "GET", "", region=region, query=query, creds=creds, transport=transport, service=True
+        )
+        root = _parse(raw.decode(errors="replace"))
+        ns = _ns(root)
+        for b in root.iter(f"{ns}Bucket"):
+            name = b.findtext(f"{ns}Name") or ""
+            if name:
+                out.append(
+                    {
+                        "name": name,
+                        "region": b.findtext(f"{ns}Location") or "",
+                        "created": b.findtext(f"{ns}CreationDate") or "",
+                    }
+                )
+        if (root.findtext(f"{ns}IsTruncated") or "false").lower() != "true":
+            return out
+        # 同 list_prefixes：说还有下一页却不给游标，就是只拿到一部分，不能假装列完了
+        marker = root.findtext(f"{ns}NextMarker") or ""
+        if not marker:
+            raise OssError("OSS 说还有下一页却没给 NextMarker，桶清单不完整，已中断")
+    raise OssError(f"OSS 列举桶超过 {_MAX_PAGES} 页，疑似死循环，已中断")
 
 
 def put_folder(bucket: str, prefix: str, *, region: str, creds, transport=None) -> None:

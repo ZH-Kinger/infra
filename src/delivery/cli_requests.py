@@ -249,6 +249,9 @@ def add_parsers(commands) -> None:
     )
     hyg.add_argument("--stale-days", type=int, default=0, help=f"AK 多久算该换（默认 {180}）")
     hyg.add_argument("--unused-days", type=int, default=0, help=f"多久没用算闲置（默认 {90}）")
+    # 这两个是「已登记的桶」的两个来源，用来判断哪些桶没登记
+    hyg.add_argument("--templates", default="identity/request-templates.json", help="申请模板目录")
+    hyg.add_argument("--allowed", default="identity/dataset-buckets.json", help="数据集桶白名单")
 
     assets = commands.add_parser("assets", help="云账号资产：我能看到的云账号里有哪些资源")
     asub_assets = assets.add_subparsers(dest="assets_command")
@@ -696,24 +699,38 @@ def _hygiene(args) -> int:
     # 资产快照缺 / 坏 都不该让体检整个跑不起来 —— 那一类记一笔跳过就行。
     # **拿不到时传 None 而不是空列表**：空列表等于断言「一条被遗弃的都没有」
     datasets = None
+    cloud_buckets = None
     try:
         snapshot_assets = assets_mod.load(args.assets)
         if snapshot_assets is not None:
             datasets = snapshot_assets.get("datasets")
+            cloud_buckets = snapshot_assets.get("buckets")
     except DeliveryError as exc:
         print(f"资产快照读不了，本次不看数据集：{exc}", file=sys.stderr)
 
+    _reg = _registered_buckets(args)
     report = hygiene.build(
         snap,
         roster,
         statuses=statuses,
         datasets=datasets,
+        buckets=cloud_buckets,
+        registered=_reg[0],
+        registered_notes=_reg[1],
         services=_load_service_names(args.services),
         stale_days=args.stale_days or hygiene.STALE_KEY_DAYS,
         unused_days=args.unused_days or hygiene.UNUSED_KEY_DAYS,
     )
     print(report.render())
     return 1 if (report.total or report.skipped) else 0
+
+
+def _registered_buckets(args):
+    """已登记的桶：凭证模板 + 数据集白名单。实现在 `hygiene.load_registered_buckets` ——
+    面板服务端读的是同一份，各写一份的那一版漏防了白名单那一路。"""
+    from . import hygiene
+
+    return hygiene.load_registered_buckets(args.templates, getattr(args, "allowed", None))
 
 
 def _refuse_issuer(profile: str) -> None:
@@ -1140,6 +1157,7 @@ def _assets(args) -> int:
         # PAI 数据集：和资源中心是两条路（那边不给归属，这边 UserId 就是属主）。
         # 采不到只记一笔，不让整次资产采集失败
         sets, skipped, ds_err, fresh_bin, bin_err = None, [], "", None, ""
+        buckets, bkt_err = None, ""
         # 上一份快照里攒下来的回收站记录：云上那份有保留期，这份没有。
         # **读不了就当没有**，不能让它挡住这次采集
         kept_bin = None
@@ -1167,7 +1185,23 @@ def _assets(args) -> int:
         else:
             recycled = assets.merge_recycle_bin(kept_bin, None)
 
-        data = assets.build_snapshot(jobs, datasets=sets, dataset_error=ds_err, recycled=recycled)
+        # 列桶和 PAI 没有关系，所以**不在 --skip-pai 里面**：放进去的话，
+        # 有人为了绕开 PAI 权限加个 --skip-pai，会连体检里「没登记的桶」一起悄悄关掉。
+        # 单独一个 try 的理由同上 —— 少一个 oss:ListBuckets 不该把别的采集带走
+        try:
+            base = args.aliyun_profile[0] if args.aliyun_profile else "ALIYUN"
+            buckets = assets.collect_buckets(aliyun.Credentials.from_env(base))
+        except DeliveryError as exc:
+            bkt_err = next((ln.strip() for ln in str(exc).splitlines() if ln.strip()), "")
+
+        data = assets.build_snapshot(
+            jobs,
+            datasets=sets,
+            dataset_error=ds_err,
+            recycled=recycled,
+            buckets=buckets,
+            bucket_error=bkt_err,
+        )
         out = _write_private(args.out, data)
         failed = [a for a in data["accounts"] if a.get("error")]
         total = sum(len(a.get("resources") or []) for a in data["accounts"])
@@ -1178,6 +1212,10 @@ def _assets(args) -> int:
             added = len(recycled) - len(kept_bin or ())
             note = f"，本次新增 {added}" if added > 0 else ""
             print(f"  RAM 回收站累计 {len(recycled)} 个已删账号{note}")
+        if bkt_err:
+            print(f"  ⚠ OSS 桶清单没采到：{bkt_err}（体检里「没登记的桶」这一类会标成跳过）")
+        if buckets is not None:
+            print(f"  OSS 桶 {len(buckets)} 个")
         if sets is not None:
             gone = [d for d in sets if d["owner_kind"] == assets.OWNER_GONE]
             tail = f"，其中 {len(gone)} 条属主已经不在了" if gone else ""

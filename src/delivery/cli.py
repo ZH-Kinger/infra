@@ -216,6 +216,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="identity/services.json",
         help="服务号清单（体检时这些不算「无主」）",
     )
+    srv.add_argument(
+        "--dataset-buckets",
+        default="identity/dataset-buckets.json",
+        help="数据集桶白名单（和申请模板一起决定体检里哪些桶算「没登记」）",
+    )
     # 和 `delivery hygiene` 的同名参数必须配一致：定时任务按 90 天判、网页按 180 天判的话，
     # 同一把 AK 在两个地方会有两种说法，而 _SECTIONS 那次重构就是为了消灭这种分歧
     srv.add_argument("--stale-days", type=int, default=0, help="AK 多久算该换（默认 180）")
@@ -1631,6 +1636,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 **_review_paths(args),
                 **_request_paths(args),
                 services_path=args.services,
+                dataset_buckets_path=args.dataset_buckets,
                 stale_days=args.stale_days,
                 unused_days=args.unused_days,
                 sessions_path=_sessions_path(args),

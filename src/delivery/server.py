@@ -713,12 +713,14 @@ class Backend:
         iam_spec_path: Optional[str] = None,
         iam_out_path: Optional[str] = None,
         services_path: Optional[str] = None,
+        dataset_buckets_path: Optional[str] = None,
         stale_days: int = 0,
         unused_days: int = 0,
         notify: Optional[Callable[[str, dict], None]] = None,
     ):
         self._notify = notify
         self.services_path = services_path
+        self.dataset_buckets_path = dataset_buckets_path
         # 0 = 用 hygiene 的默认值。面板和命令行必须能配成同一套阈值
         # 钳到非负：`--stale-days -5` 会让每把 AK 都算「该换」，标题还印成「超过 -5 天」
         self.stale_days = max(0, stale_days)
@@ -791,6 +793,22 @@ class Backend:
             return hygiene.load_service_names(self.services_path)
 
         return self._cached("services", self._stamp(self.services_path), build)
+
+    def registered_buckets(self):
+        """已登记的桶（凭证模板 + 数据集白名单）。**读不到返回 None**，体检据此说
+        「没法判断」而不是把云上每个桶都报成没登记 —— 两个文件都是 gitignored 的，
+        新部署第一次开面板正好是这个状态。"""
+
+        def build():
+            from . import hygiene
+
+            return hygiene.load_registered_buckets(self.templates_path, self.dataset_buckets_path)
+
+        return self._cached(
+            "registered_buckets",
+            (self._stamp(self.templates_path), self._stamp(self.dataset_buckets_path)),
+            build,
+        )
 
     def people(self) -> people_mod.PeopleIndex:
         def build():
@@ -1557,11 +1575,15 @@ def make_handler(
                 snap_assets = None
                 asset_error = str(exc).splitlines()[0]
                 print(f"[hygiene] 资产快照读不了：{type(exc).__name__}: {exc}", file=sys.stderr)
+            _reg = backend.registered_buckets()
             report = hygiene.build(
                 snapshot,
                 roster,
                 statuses=statuses,
                 datasets=(snap_assets or {}).get("datasets"),
+                buckets=(snap_assets or {}).get("buckets"),
+                registered=_reg[0],
+                registered_notes=_reg[1],
                 services=backend.service_names(),
                 stale_days=backend.stale_days or hygiene.STALE_KEY_DAYS,
                 unused_days=backend.unused_days or hygiene.UNUSED_KEY_DAYS,
@@ -2000,6 +2022,7 @@ def serve(
     iam_spec_path: Optional[str] = None,
     iam_out_path: Optional[str] = None,
     services_path: Optional[str] = None,
+    dataset_buckets_path: Optional[str] = None,
     stale_days: int = 0,
     unused_days: int = 0,
     sessions_path: Optional[str] = None,
@@ -2038,6 +2061,7 @@ def serve(
         iam_spec_path=iam_spec_path,
         iam_out_path=iam_out_path,
         services_path=services_path,
+        dataset_buckets_path=dataset_buckets_path,
         stale_days=stale_days,
         unused_days=unused_days,
         feishu_token=token,

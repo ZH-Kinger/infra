@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-from .clouds import aliyun, volcano
+from .clouds import aliyun, oss, volcano
 from .errors import DeliveryError
 
 ALIYUN_RC = ("resourcecenter.aliyuncs.com", "2022-12-01")
@@ -538,8 +538,24 @@ def assume_role_for(
 Job = tuple  # (platform, 凭证前缀提示, collect() -> (account, resources))
 
 
+def collect_buckets(creds, *, region: str = "oss-cn-hangzhou", transport=None) -> list:
+    """这个主账号下所有 OSS 桶。`region` 只是拨号用的，ListBuckets 返回的是全地域。
+
+    体检里「桶在云上但没登记在任何白名单里」那条要用它。**采不到就抛**，
+    由上层记成 `bucket_error` —— 绝不能返回空清单，那会被下游当成
+    「云上一个桶都没有」，于是那条检查永远报「没问题」。
+    """
+    return oss.list_buckets(region=region, creds=creds, transport=transport)
+
+
 def build_snapshot(
-    jobs: Iterable[Job], *, datasets=None, dataset_error: str = "", recycled=None
+    jobs: Iterable[Job],
+    *,
+    datasets=None,
+    dataset_error: str = "",
+    recycled=None,
+    buckets=None,
+    bucket_error: str = "",
 ) -> dict:
     """`datasets` 放在快照顶层而不是塞进某个账号的 `resources` 里。
 
@@ -566,6 +582,12 @@ def build_snapshot(
     # 而快照里这份会一直留着 —— 这是「过期之后还认得出那是谁的东西」的唯一办法
     if recycled is not None:
         out["recycle_bin"] = list(recycled)
+    # 同 datasets：**采不到就不写这个键**。写成空列表的话，哪天 oss:ListBuckets 掉了，
+    # 体检里「没登记的桶」会变成一片干净 —— 而那正是它该报警的时候
+    if buckets is not None:
+        out["buckets"] = list(buckets)
+    if bucket_error:
+        out["bucket_error"] = bucket_error[:300]
     return out
 
 

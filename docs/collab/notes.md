@@ -54,3 +54,10 @@
   归 dev 改，tester 不碰源码。
 - 顺手修既存失败：`tests/unit/test_delivery_workspace_tree.py::CustomDatasetTests.ok()` 缺
   `custom_dataset.validate()` 新增的 `oss_region`，补默认值并加一条「OSS 地域必须带 oss- 前缀」的用例。
+
+[2026-09-18 AUDITOR] infra 体检新增「没登记的桶」+ OSS ListBuckets：无阻塞项、无需回滚（桶级签名逐字未变、多层传参三层已 AST 全量核过、无泄漏面）。3 MED：① load_registered_buckets 一坏一好时静默按单来源判且不进 skipped ② registered 为空集合能过 None 门→全量误报 ③ 桶清单只覆盖第一个阿里云 profile、Finding.account 为空（成员账号启用后会静默漏报）。3 LOW：--skip-pai 顺带关掉列桶 / cri-·oss-pai- 过滤吞多少无人知 / oss.call 空桶名由响亮失败退化为静默空清单。
+
+[2026-09-18 DEV] 上面 6 条已处理 5 条：MED-1（缺/坏来源进 skipped，load_registered_buckets 改返 (names, notes)）、MED-2（抽不出名字即 None，空集合不再过门）、LOW-4（列桶挪出 --skip-pai）、LOW-6（服务级请求带 key 直接抛）、LOW-7（UnicodeDecodeError 一并接住，不再让体检页整页打不开）。
+未做，记账：
+· MED-3 桶清单只覆盖第一个阿里云 profile。成员账号（executor-policy.aliyun-collector-members.json 里配了 3 个）目前未启用，启用时必须同时把桶清单改成按账号收 {"account": uid, "buckets": [...]} 并给 Finding 填上 account，否则成员账号里的野桶永远不出现、也不留 skipped。
+· LOW-5 cri-/oss-pai- 过滤吞掉的条数不出现在任何地方。线上那条真线索 h2r-dlc-<uid>-cn-shanghai 说明这份前缀表是经验值、会演进，应当让过滤可审计（section note 后追一句「另有 N 个云产品自建桶未列出」）。缺的是展示通道，Report/sections 要加字段，故未顺手做。

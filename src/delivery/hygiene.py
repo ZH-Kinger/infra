@@ -26,6 +26,11 @@ UNUSED_KEY_DAYS = 90
 #: 程序发出去的临时凭证子账号。它们**有到期时间、由清理任务负责**，不是「无主」——
 #: 混进无主清单里会让那一栏的一半都是噪音，而一份一半是噪音的清单没人会看第二遍
 _ISSUED_PREFIXES = ("tempak-", "temp-ak-", "panel-")
+#: 云产品自己建的桶，不该出现在「没登记」那一栏 —— 它们本来就不是给人申请的：
+#: `cri-*-registry` 是容器镜像服务建的，`oss-pai-*` 是 PAI 建的。
+#: 理由同 _ISSUED_PREFIXES：真机上这类占了没登记那一栏的三分之二，
+#: 而一份三分之二是噪音的清单，第二次就没人看了
+_MANAGED_BUCKET_PREFIXES = ("cri-", "oss-pai-")
 
 
 @dataclass(frozen=True)
@@ -42,7 +47,9 @@ class Finding:
 
     @property
     def scope(self) -> str:
-        return f"{self.platform}/{self.account}/{self.subject}"
+        # 空的段直接跳过：桶不属于任何子账号，`account` 是空的，
+        # 照拼会渲染成 `aliyun//桶名` 那样裸着一条斜杠
+        return "/".join(x for x in (self.platform, self.account, self.subject) if x)
 
 
 #: 六类各自的标题和那句给人看的话。**只在这里写一份** —— 命令行和面板是同一批结论，
@@ -67,6 +74,12 @@ _SECTIONS = (
         "人的号已经删了，东西还留着",
         "先找他原来的组确认还要不要、要不要交接。**别急着删** —— 离职交接最常见的情况"
         "恰恰是数据要留给接手的人，而删掉的训练数据找不回来。",
+    ),
+    (
+        "stray_bucket",
+        "桶在云上，但没登记在任何地方",
+        "没登记就没人申请得到它，也就没人在管它。确认用途后登记进凭证模板或数据集白名单；"
+        "**确认没用了再删** —— 桶名全局唯一，删掉就可能被外人抢注同名。",
     ),
     (
         "rotate",
@@ -94,6 +107,9 @@ class Report:
     #: 属主的 RAM 号已经删了，他建的东西还在（PAI 数据集、CPFS 目录……）。
     #: 和 `left` 正好是一对：那边是号还在人走了，这边是号没了东西还在
     abandoned: list = field(default_factory=list)
+    #: 云上有、但任何凭证模板和数据集白名单里都没有的桶。没登记 = 申请流程里选不到它，
+    #: 于是它既不会被人合法申请，也不会有人定期看它 —— 数据就是这么悄悄躺在外面的
+    stray_bucket: list = field(default_factory=list)
     #: 在飞书里**查不到**的人。注意：飞书对「不在应用可用范围内」和「已被移出通讯录」
     #: 回的是同一个错误码，所以这批只能是「要人确认」，不能当成已离职
     unknown: list = field(default_factory=list)
@@ -113,6 +129,7 @@ class Report:
             + len(self.orphan)
             + len(self.unknown)
             + len(self.abandoned)
+            + len(self.stray_bucket)
         )
 
     def sections(self) -> list:
@@ -139,6 +156,114 @@ class Report:
         if not self.total and not self.skipped:
             lines.append("\n没有发现需要处理的。")
         return "\n".join(lines)
+
+
+def registered_buckets(templates: Optional[Iterable] = None, allowed: Optional[Iterable] = None):
+    """已登记的桶名集合（小写）：凭证模板里能选的 + 数据集白名单里的。
+
+    **两个来源都给 None 就返回 None**，调用方据此跳过这一类。返回空集合的话，
+    云上每一个桶都会被报成「没登记」—— 一份全是噪音的清单，第二天就没人看了。
+    """
+    if templates is None and allowed is None:
+        return None
+    names = set()
+    for tpl in templates or ():
+        # 模板可能是 catalog.Template 也可能是原始 dict，两种都认
+        buckets = getattr(tpl, "buckets", None)
+        if buckets is None and isinstance(tpl, Mapping):
+            buckets = tpl.get("buckets")
+        for b in buckets or ():
+            # 三种形状都认：catalog.Template 里是 `(桶名, 地域)` 二元组，
+            # 原始 JSON 里是 `{"name": …}`，白名单里是裸字符串
+            if isinstance(b, Mapping):
+                name = b.get("name")
+            elif isinstance(b, (tuple, list)):
+                name = b[0] if b else ""
+            else:
+                name = b
+            if isinstance(name, str) and name.strip():
+                names.add(name.strip().lower())
+    for name in allowed or ():
+        if isinstance(name, str) and name.strip():
+            names.add(name.strip().lower())
+    # **空集合按「没读到」处理**：文件合法但一个带桶的模板都没有时，`catalog.load()`
+    # 返回的就是空目录 —— 那时候把云上每个桶都报成「没登记」，而这一栏的建议里
+    # 写着「确认没用了再删」。空白名单和读不到白名单，在这里是分不开的两件事，
+    # 而分不开时只能选不报（多报的代价是让人拿着合法桶去考虑删不删）
+    return names or None
+
+
+def _stray_buckets(buckets: Optional[Iterable], registered: Optional[set]) -> list:
+    """云上有、白名单里没有的桶。"""
+    out = []
+    for b in buckets or ():
+        name = str((b.get("name") if isinstance(b, Mapping) else b) or "").strip()
+        if not name or name.lower() in (registered or set()):
+            continue
+        if name.lower().startswith(_MANAGED_BUCKET_PREFIXES):
+            continue
+        region = str(b.get("region") or "") if isinstance(b, Mapping) else ""
+        created = str(b.get("created") or "") if isinstance(b, Mapping) else ""
+        out.append(
+            Finding(
+                kind="stray_bucket",
+                platform="aliyun",
+                account="",
+                subject=name,
+                # **不在这里重复段落说明**：那句话每行照抄一遍就是纯噪音。
+                # 这里只放这个桶独有的事实，人要判断「这是什么桶」靠的是地域和建桶时间
+                why=" · ".join(x for x in (region, f"建于 {created[:10]}" if created else "") if x)
+                or "地域和创建时间都没采到",
+            )
+        )
+    return sorted(out, key=lambda f: f.subject)
+
+
+def load_registered_buckets(templates_path=None, allowed_path=None):
+    """从两个文件读「已登记的桶」。**一个都没真读到就返回 None**，调用方据此跳过这一类。
+
+    这里必须自己判断文件在不在，不能指望那两个 loader：`catalog.load()` 对缺失文件
+    返回**空目录**、`custom_dataset.load_allowed()` 返回**空列表**，两者对各自的本职
+    （「没有可申请的模板」「什么都不许登记」）都是安全的一侧，但对这里正好相反 ——
+    空清单会让云上每一个桶都被报成「没登记」。`identity/` 整个是 gitignored 的，
+    新部署第一次开面板就是这个状态，那一栏会直接刷出十几条假线索。
+
+    面板和命令行都走这一个函数：这段逻辑写两遍的那一版，命令行防住了模板、
+    漏了白名单，面板两边都没防。
+    """
+    from pathlib import Path
+
+    from . import catalog as catalog_mod
+    from . import custom_dataset
+    from .errors import DeliveryError
+
+    templates = allowed = None
+    notes = []
+    for path, label, read in (
+        (templates_path, "申请模板", lambda q: list(catalog_mod.load(q).templates)),
+        (allowed_path, "数据集白名单", custom_dataset.load_allowed),
+    ):
+        if not path:
+            continue
+        if not Path(path).exists():
+            notes.append(f"{label} {path} 不在")
+            continue
+        try:
+            got = read(path)
+        except (DeliveryError, ValueError, OSError) as exc:
+            # ValueError 是为了 UnicodeDecodeError：模板文件不是 UTF-8 时
+            # `read_text` 抛的是它，穿过去会让整个体检页变成「面板数据暂不可用」
+            notes.append(f"{label} 读不了（{type(exc).__name__}）")
+            continue
+        if label == "申请模板":
+            templates = got
+        else:
+            allowed = got
+    names = registered_buckets(templates, allowed)
+    # **只有在真算出了名字、却又缺来源时才出声**。两个来源都没有时 names 已经是 None，
+    # 那一类会整个跳过、skipped 里有话说；这里管的是「按半份数据判了」那种情况 ——
+    # 不说的话，登记在缺失那一半里的桶会被报成野桶，而看的人以为清单是全的
+    return names, tuple(notes) if names is not None else ()
 
 
 def load_service_names(path: Optional[str]) -> list:
@@ -248,6 +373,9 @@ def build(
     statuses: Optional[Mapping] = None,
     services: Optional[Iterable] = None,
     datasets: Optional[Iterable] = None,
+    buckets: Optional[Iterable] = None,
+    registered: Optional[set] = None,
+    registered_notes: Iterable = (),
     now: Optional[float] = None,
     stale_days: int = STALE_KEY_DAYS,
     unused_days: int = UNUSED_KEY_DAYS,
@@ -267,6 +395,18 @@ def build(
     report.abandoned.extend(_abandoned(datasets))
     if datasets is None:
         report.skipped.append("没有资产快照里的数据集，这次不看「人的号删了东西还在」")
+
+    # 桶清单同样来自资产快照，所以也放在权限快照那道门之前。
+    # **两个条件都要有才算**：缺桶清单就不知道云上有什么，缺白名单就等于把所有桶都报一遍
+    if buckets is None:
+        report.skipped.append("没有 OSS 桶清单，这次不看「没登记的桶」")
+    elif registered is None:
+        report.skipped.append("没有凭证模板和数据集白名单，没法判断哪些桶没登记")
+    else:
+        report.stray_bucket.extend(_stray_buckets(buckets, registered))
+        for note in registered_notes or ():
+            # 按半份白名单判出来的清单会多报，看的人有权知道
+            report.skipped.append(f"{note}，「没登记的桶」这一类可能多报")
 
     if snapshot is None:
         report.skipped.append("没有权限快照，AK 和归属这两类都没法算")
@@ -377,15 +517,14 @@ def directory_uids(entries: Iterable) -> set:
 
 
 def summary(report: Report) -> Mapping:
-    """给飞书卡片/接口用的计数。"""
-    return {
-        "left": len(report.left),
-        "orphan": len(report.orphan),
-        "abandoned": len(report.abandoned),
-        "rotate": len(report.rotate),
-        "unused": len(report.unused),
-        "incomplete": bool(report.skipped),
-    }
+    """给飞书卡片/接口用的计数。
+
+    **按 `_SECTIONS` 生成，不要手抄类别**：手抄那版漏过 `unknown`（`total` 算了它、
+    summary 里没有），加 `stray_bucket` 时又差点漏第二次。类别清单只该有一份。
+    """
+    out = {kind: len(getattr(report, kind)) for kind, _, _ in _SECTIONS}
+    out["incomplete"] = bool(report.skipped)
+    return out
 
 
 def view(report: Report) -> dict:
