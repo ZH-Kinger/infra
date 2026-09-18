@@ -128,6 +128,45 @@ def from_feishu(
     return list(seen.values())
 
 
+#: 逐个查状态时，飞书对「不在应用可用范围内」和「人已经被移出通讯录」回的是**同一个**
+#: 错误码。所以它只能是「查不到，要人确认」，绝不能当成「已离职」—— 那会把范围外的
+#: 同事一起报成离职，而第一次误伤就会让这份清单失去可信度
+NO_AUTHORITY = 41050
+
+
+def status_of(union_ids, app_id: str, app_secret: str, *, get=None, token: str = "") -> dict:
+    """按 union_id 逐个查在职状态。`{union_id: 状态字典 或 None}`，None 表示查不到。
+
+    为什么不用 `/contact/v3/users/find_by_department` 拉全量：那个接口要部门权限
+    （`no dept authority`），而应用的通讯录可用范围通常不覆盖全员。逐个查只要
+    `contact:user.base:readonly`，而且我们本来就只关心名册里那几十个有云账号的人。
+
+    返回的状态里 `is_resigned` 才是「离职」，`is_frozen` 是暂停、`is_exited` 是已退出租户。
+    三者含义不同，判定留给调用方。
+    """
+    get = get or _get
+    token = token or tenant_token(app_id, app_secret)
+    out = {}
+    for uid in union_ids:
+        uid = str(uid or "").strip()
+        if not uid:
+            continue
+        body = get(
+            f"{API}/contact/v3/users/{urllib.parse.quote(uid, safe='')}?user_id_type=union_id",
+            token,
+        )
+        if not body.get("code"):
+            out[uid] = ((body.get("data") or {}).get("user") or {}).get("status") or {}
+        elif body.get("code") == NO_AUTHORITY:
+            out[uid] = None
+        else:
+            raise FeishuError(
+                f"查 {uid[:12]}… 的在职状态失败：code={body.get('code')} msg={body.get('msg')}。"
+                f"这不是「这个人不在」——已中断，免得把查询故障当成离职。"
+            )
+    return out
+
+
 _CSV_COLUMNS = {
     "union_id": ("feishu_union_id", "union_id"),
     "name": ("name", "姓名"),

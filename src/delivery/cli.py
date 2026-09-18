@@ -1636,7 +1636,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return _cmd_inventory_collect(args)
         if args.command == "refresh":
             return _cmd_refresh(args)
-        if args.command in ("request", "requests", "approval", "assets", "policies"):
+        if args.command in ("request", "requests", "approval", "assets", "policies", "hygiene"):
             from . import cli_requests
 
             return cli_requests.dispatch(args)

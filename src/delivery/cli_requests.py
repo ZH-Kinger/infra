@@ -228,6 +228,23 @@ def add_parsers(commands) -> None:
     pcollect.add_argument("--aliyun-profile", action="append", default=[], metavar="PREFIX")
     pcollect.add_argument("--skip-volcano", action="store_true")
 
+    hyg = commands.add_parser(
+        "hygiene", help="体检：人走了号还在、AK 太久没换、AK 没人用（只出清单，不改任何东西）"
+    )
+    hyg.add_argument("--inventory", default="identity/inventory.json", help="权限快照")
+    hyg.add_argument("--people", default="identity/people.json", help="人员名册")
+    hyg.add_argument(
+        "--check-status",
+        action="store_true",
+        help="按 union_id 逐个查飞书在职状态，据此列出「人走了号还在」。"
+        "不加就不判断离职 —— 查不到却照算，等于把全公司报成离职",
+    )
+    hyg.add_argument(
+        "--services", default="identity/services.json", help="服务号清单（这些不算「无主」）"
+    )
+    hyg.add_argument("--stale-days", type=int, default=0, help=f"AK 多久算该换（默认 {180}）")
+    hyg.add_argument("--unused-days", type=int, default=0, help=f"多久没用算闲置（默认 {90}）")
+
     assets = commands.add_parser("assets", help="云账号资产：我能看到的云账号里有哪些资源")
     asub_assets = assets.add_subparsers(dest="assets_command")
     collect = asub_assets.add_parser("collect", help="服务端：用资源中心采集资产快照（只读）")
@@ -262,6 +279,8 @@ def dispatch(args: argparse.Namespace):
         return _sweep(args)
     if args.command == "approval":
         return _widgets(args)
+    if args.command == "hygiene":
+        return _hygiene(args)
     if args.command == "assets":
         return _assets(args)
     if args.command == "policies":
@@ -543,6 +562,57 @@ def _brief(exc: Exception) -> str:
     from .provision import describe_error
 
     return (describe_error(exc) or type(exc).__name__)[:120]
+
+
+def _hygiene(args) -> int:
+    """打印体检清单。**只读**：不停用、不删除、不改任何东西。
+
+    退出码：有待办 → 1，干净 → 0。定时任务据此决定要不要推通知。
+    数据不完整（快照没采全、通讯录没拿到）同样返回 1 —— 那本身就是要人看一眼的事。
+    """
+    from . import hygiene, inventory
+    from . import people as people_mod
+
+    snap = None
+    try:
+        snap = inventory.load(args.inventory)
+    except DeliveryError as exc:
+        print(f"权限快照读不了：{exc}", file=sys.stderr)
+    roster = ()
+    try:
+        roster = people_mod.load(args.people).people
+    except DeliveryError as exc:
+        print(f"人员名册读不了：{exc}", file=sys.stderr)
+
+    statuses = None
+    if args.check_status:
+        from .identity import directory
+
+        app_id = os.environ.get("DELIVERY_FEISHU_APP_ID", "")
+        secret = os.environ.get("DELIVERY_FEISHU_APP_SECRET", "")
+        try:
+            # **按 union_id 逐个查，不拉全量部门**：拉全量要通讯录部门权限
+            # （应用的可用范围通常不覆盖全员，会 40004），而我们只关心名册里
+            # 这几十个有云账号的人
+            statuses = directory.status_of(
+                [p.union_id for p in roster if p.union_id], app_id, secret
+            )
+        except DeliveryError as exc:
+            # 查不了就不判离职，别硬算 —— 见 hygiene.build 的说明
+            print(f"查不了在职状态，本次不判断离职：{exc}", file=sys.stderr)
+
+    from .cli import _load_service_names
+
+    report = hygiene.build(
+        snap,
+        roster,
+        statuses=statuses,
+        services=_load_service_names(args.services),
+        stale_days=args.stale_days or hygiene.STALE_KEY_DAYS,
+        unused_days=args.unused_days or hygiene.UNUSED_KEY_DAYS,
+    )
+    print(report.render())
+    return 1 if (report.total or report.skipped) else 0
 
 
 def _assets(args) -> int:
