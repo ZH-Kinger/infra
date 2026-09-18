@@ -1,0 +1,18 @@
+[Unit]
+Description=Cloud panel: snapshot identity/ (local, rotating)
+Documentation=file:///opt/infra/deploy/panel/README.md
+
+[Service]
+Type=oneshot
+User=delivery
+Group=delivery
+WorkingDirectory=/opt/infra
+# 只读 identity/、只写 /var/backups/delivery/。不碰云、不要任何凭证
+ExecStart=/opt/infra/deploy/panel/backup-identity.sh
+# 备份目录必须是 delivery 自己的：面板进程写得进去，别人读不到（下面 0700）
+StateDirectory=
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/backups/delivery

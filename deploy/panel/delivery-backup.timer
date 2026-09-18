@@ -1,0 +1,14 @@
+[Unit]
+Description=Cloud panel: snapshot identity/ hourly
+
+[Timer]
+# 每小时一份。挡的是误覆盖、写坏、手滑删除 —— 这类事故里，"上一个整点的样子"
+# 几乎总是够用的；而按天备份会让一次中午的手滑吃掉大半天的申请记录。
+OnCalendar=hourly
+# 机器关过机的话，开机后补跑一次：漏掉的那几小时正是最可能出事的时候
+Persistent=true
+# 整点全都在跑任务，错开一点
+RandomizedDelaySec=180
+
+[Install]
+WantedBy=timers.target
