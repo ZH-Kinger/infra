@@ -95,6 +95,10 @@ class Platform:
     session_policy: bool
     #: 长期凭证（建子账号 + 时间窗策略 + 长期 AK）实现并验证过没有
     long_term: bool
+    #: 自助管理 AccessKey 的控制台地址。**面板只把人领到这里，不代办** ——
+    #: 代办意味着面板要经手用户的 secret，而 `sealed` 那一整套存在的理由
+    #: 就是「面板不持有明文」。为省几次点击把面板变成所有人密钥的中转站，不划算
+    key_console: str = ""
     storage: Optional[StorageDialect] = field(default=None)
 
     def bucket_url(self, bucket: str, region: str) -> str:
@@ -110,6 +114,7 @@ ALIYUN = Platform(
     storage_scheme="oss",
     endpoint="oss-{region}.aliyuncs.com",
     console_login="https://signin.aliyun.com/{account}.onaliyun.com/login.htm",
+    key_console="https://ram.console.aliyun.com/profile/access-keys",
     role_pattern=re.compile(r"^acs:ram::(?P<account>[0-9]+):role/[A-Za-z0-9._-]{1,64}$"),
     env_ak="ACCESS_KEY_ID",
     env_sk="ACCESS_KEY_SECRET",
@@ -141,6 +146,7 @@ VOLCANO = Platform(
     storage_scheme="tos",
     endpoint="tos-{region}.volces.com",
     console_login="https://console.volcengine.com/auth/login/user/{account}",
+    key_console="https://console.volcengine.com/iam/keymanage/",
     role_pattern=re.compile(r"^trn:iam::(?P<account>[0-9]+):role/[A-Za-z0-9._-]{1,64}$"),
     env_ak="ACCESS_KEY",
     env_sk="SECRET_KEY",

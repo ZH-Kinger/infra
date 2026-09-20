@@ -210,6 +210,50 @@ def _volcano_policies(result: dict, action: str) -> list:
     return sorted(set(out))
 
 
+def _volcano_keys(creds, user: str, transport) -> Optional[list]:
+    """一个火山 IAM 子账号的 AK 清单。**绝不返回 secret**（接口本来也不给）。
+
+    和阿里那侧同一套三态语义：拿不到权限返回 **None**（上层按 `keys is None`
+    区分「没有 AK」和「没采到」），绝不吞成空列表。
+
+    火山的 `ListAccessKeys` 直接在每条里带 `CreateDate`/`UpdateDate`/`Status`，
+    **没有**阿里那种单独的 `GetAccessKeyLastUsed` —— 所以「多久没用过」这一维
+    火山这边拿不到，`last_used` 只能留空。下游据此只会报「该换了」，
+    不会报「没人用」（那一类需要最近使用时间，没有就不该猜）。
+    """
+    try:
+        items = volcano.paginate(
+            *volcano.IAM,
+            "ListAccessKeys",
+            key="AccessKeyMetadata",
+            params={"UserName": user},
+            creds=creds,
+            transport=transport,
+        )
+    except volcano.VolcanoDenied:
+        return None
+    out = []
+    for k in items:
+        kid = str(k.get("AccessKeyId") or "")
+        if not kid:
+            continue
+        out.append(
+            {
+                # 同阿里：只留前 8 位，够在两次采集之间认出是同一把，
+                # 又不至于把完整 AKId 写进一个会被传阅的快照文件
+                "id": kid[:8],
+                "status": str(k.get("Status") or ""),
+                "created": str(k.get("CreateDate") or ""),
+                # **火山给不了最近使用时间**，所以这里标明「不知道」而不是留空。
+                # 留空会被下游当成「从来没用过」→ 44 把 AK 同时被报成「没人用，停掉吧」，
+                # 而那是 44 条假线索，足以让这一栏从此没人看
+                "last_used": "",
+                "last_used_known": False,
+            }
+        )
+    return out
+
+
 def collect_volcano(creds, *, transport=None, progress: Optional[Progress] = None) -> dict:
     users = volcano.paginate(
         *volcano.IAM, "ListUsers", key="UserMetadata", creds=creds, transport=transport
@@ -282,6 +326,7 @@ def collect_volcano(creds, *, transport=None, progress: Optional[Progress] = Non
                 "email": str(u.get("Email") or ""),
                 "policies": policies,
                 "groups": sorted(user_groups.get(name, [])),
+                "keys": _volcano_keys(creds, name, transport),
             }
         )
     return {"platform": "volcano", "account": account, "users": out_users, "groups": out_groups}

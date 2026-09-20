@@ -132,6 +132,37 @@ class LedgerTests(unittest.TestCase):
             sorted(f.why.split()[1] for f in report.rotate), sorted(["NEVER000…", "OLDUSED0…"])
         )
 
+    def test_a_key_whose_cloud_cannot_answer_is_never_flagged_unused(self):
+        """**体检里「没用过」从 23 条跳到 67 条那次，多出来的 44 条就是这个形状。**
+
+        火山的 `ListAccessKeys` 不返回最近使用时间，`last_used` 只能留空 ——
+        而空串一度被当成「从来没用过」。台账的徽章和体检清单是同一套判据，
+        所以两边一起锁：`unused` 一条都不能有，`rotate` 照常（年龄自己算得出来）。
+        判据看的是 `last_used_known` 这个标记、不是平台名，所以用例不必换平台。
+        """
+        users = [
+            {
+                "name": "lisi",
+                "keys": [
+                    {
+                        "id": "AKLT0001",
+                        "status": "Active",
+                        "created": iso(NOW - 400 * DAY),
+                        "last_used": "",
+                        "last_used_known": False,
+                    }
+                ],
+            }
+        ]
+        (row,) = self.view(users)["keys"]
+        self.assertEqual(row["flags"], ["rotate"])
+        self.assertIs(row["last_used_known"], False)
+        self.assertFalse(row["never_used"], "「这朵云查不到」不能记成「从来没用过」")
+
+        report = hygiene.build(snapshot(users), [], services=[], now=NOW)
+        self.assertEqual(report.unused, [], "拿不到最近使用时间，就不该报「没人用」")
+        self.assertEqual({f.subject for f in report.rotate}, {"lisi"})
+
     def test_a_disabled_key_is_listed_but_not_nagged_about(self):
         """停用 ≠ 不存在：台账要让人看见自己有什么。但别催他轮换一把已经停用的。"""
         out = self.view(

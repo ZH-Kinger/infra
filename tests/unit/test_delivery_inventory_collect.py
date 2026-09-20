@@ -281,12 +281,19 @@ def project(name):
 
 
 class VolcanoFake:
-    def __init__(self, *, users, groups, members, user_policies, group_policies, overrides=None):
+    def __init__(
+        self, *, users, groups, members, user_policies, group_policies, overrides=None, keys=None
+    ):
         self.users = users
         self.groups = groups
         self.members = members
         self.user_policies = user_policies
         self.group_policies = group_policies
+        #: {用户名: [AK, …]}。没给的人当作一把都没有 —— 和「没采到」是两件事，
+        #: 后者由 overrides 让 ListAccessKeys 回 403 来模拟。
+        #: **火山的 ListAccessKeys 不带最近使用时间**，也没有阿里那种
+        #: GetAccessKeyLastUsed 可以补问，所以这里的条目里根本没有 LastUsedDate
+        self.keys = keys or {}
         self.overrides = overrides or {}
         self.calls = []
 
@@ -309,6 +316,8 @@ class VolcanoFake:
         if action == "ListUsersForGroup":
             names = self.members.get(q["UserGroupName"], [])
             return 200, {"Result": {"Users": page([{"UserName": n} for n in names])}}
+        if action == "ListAccessKeys":
+            return 200, {"Result": {"AccessKeyMetadata": page(self.keys.get(q["UserName"], []))}}
         if action == "ListAttachedUserPolicies":
             return 200, {
                 "Result": {"AttachedPolicyMetadata": self.user_policies.get(q["UserName"], [])}
@@ -476,6 +485,93 @@ class VolcanoCollectTests(unittest.TestCase):
         )
         with self.assertRaises(volcano.VolcanoDenied):
             self.collect(fake)
+
+
+class VolcanoKeyCollectTests(unittest.TestCase):
+    """火山的 AK 采集。**这朵云给不了「最近使用时间」**，所以采上来的每一把都要标明
+    「不知道」—— 留空会被下游当成「从来没用过」，44 把 AK 同时变成假线索。
+
+    （真机第一版就是这么错的：体检的「超过 90 天没用过」从 23 条跳到 67 条，
+    多出来的 44 条全是火山的，而那 44 条里没有一条是真的。）
+    """
+
+    def vkey(self, kid, *, status="Active", created="20260204T104530Z", **extra):
+        item = {"AccessKeyId": kid, "Status": status, "CreateDate": created}
+        item.update(extra)
+        return item
+
+    def collect(self, **kw):
+        fake = volcano_fixture(**kw)
+        return collect_volcano(VCREDS, transport=fake), fake
+
+    def users_of(self, out):
+        return {u["name"]: u for u in out["users"]}
+
+    def test_keys_come_through_marked_as_last_used_unknown(self):
+        out, _ = self.collect(keys={"ShenYi": [self.vkey("AKLT0123456789ABCDEF")]})
+        (k,) = self.users_of(out)["ShenYi"]["keys"]
+        self.assertEqual(k["status"], "Active")
+        self.assertEqual(k["created"], "20260204T104530Z")
+        # 两件事要同时成立：值是空的，**并且**明确标了「这朵云查不到」。
+        # 只留空的话下游没法区分「没用过」和「不知道」
+        self.assertEqual(k["last_used"], "")
+        self.assertIs(k["last_used_known"], False)
+        # 同阿里：只进前 8 位，快照会被传阅
+        self.assertEqual(k["id"], "AKLT0123")
+        self.assertNotIn("ABCDEF", repr(out))
+
+    def test_secret_is_never_collected(self):
+        """接口本来也不给，但万一以后给了，也不能顺手带进快照。"""
+        out, _ = self.collect(
+            keys={"ShenYi": [self.vkey("AKLT0001", SecretAccessKey="super-secret")]}
+        )
+        self.assertNotIn("super-secret", repr(out))
+        self.assertEqual(
+            set(self.users_of(out)["ShenYi"]["keys"][0]),
+            {"id", "status", "created", "last_used", "last_used_known"},
+        )
+
+    def test_update_date_is_not_mistaken_for_last_used(self):
+        """火山的条目里有 `UpdateDate`，那是**上次改状态**的时间，不是上次使用。
+        拿它冒充「最近使用」会让这个 bug 换个马甲回来：值看起来很新，
+        于是这把 AK 永远不会被问「还要不要」，而它可能从建出来就没人用过。"""
+        out, _ = self.collect(
+            keys={"ShenYi": [self.vkey("AKLT0002", UpdateDate="20260901T000000Z")]}
+        )
+        k = self.users_of(out)["ShenYi"]["keys"][0]
+        self.assertEqual(k["last_used"], "")
+        self.assertIs(k["last_used_known"], False)
+
+    def test_every_user_is_asked(self):
+        out, fake = self.collect(keys={"ShenYi": [self.vkey("AKLT0003")]})
+        asked = [q["UserName"] for a, q in fake.calls if a == "ListAccessKeys"]
+        self.assertEqual(sorted(asked), ["ShenYi", "WangEr"])
+        # 一把都没有的人是空列表，不是 None（None 的含义是「没采到」）
+        self.assertEqual(self.users_of(out)["WangEr"]["keys"], [])
+
+    def test_permission_denied_reports_not_collected_not_empty(self):
+        """缺 `iam:ListAccessKeys` 时是「没采到」。装成空列表的话，
+        全公司会看到「你没有密钥」，而那正是最该被发现的状态。"""
+        out, _ = self.collect(
+            overrides={
+                "ListAccessKeys": lambda q: (
+                    403,
+                    {"ResponseMetadata": {"Error": {"Code": "AccessDenied", "Message": "no"}}},
+                )
+            }
+        )
+        self.assertTrue(all(u["keys"] is None for u in out["users"]))
+        # 但这一次的其余部分照常采到 —— AK 拿不到不该把整份快照作废
+        self.assertEqual(self.users_of(out)["ShenYi"]["policies"][0], "ECSReadOnlyAccess")
+
+    def test_other_errors_are_not_swallowed(self):
+        """只吞「被拒」这一种。接口 500、响应缺键这些要炸出来 ——
+        吞了就会把「这次没查成」记成「这个人没有 AK」。"""
+        out = {
+            "ListAccessKeys": lambda q: (200, {"Result": {"Other": []}}),  # 缺列表键
+        }
+        with self.assertRaises(volcano.VolcanoError):
+            self.collect(overrides=out)
 
 
 # ── build_snapshot ────────────────────────────────────────────────────────

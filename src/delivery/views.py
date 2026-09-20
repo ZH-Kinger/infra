@@ -290,6 +290,16 @@ def admin_people(
     }
 
 
+def _key_console(platform: str) -> str:
+    """这朵云自助管理 AccessKey 的控制台地址。认不出的平台返回空串，前端就不画链接。"""
+    from . import platforms as platforms_mod
+
+    try:
+        return platforms_mod.get(platform).key_console
+    except Exception:  # noqa: BLE001 — 新平台还没登记时不该让整页打不开
+        return ""
+
+
 def my_keys(
     person: Optional[Person],
     snapshot: Optional[Snapshot],
@@ -340,6 +350,9 @@ def my_keys(
             "account": ref.account,
             "account_label": labels.account(ref.platform, ref.account),
             "user": ref.name,
+            # 自助换密钥去哪。**面板只领路不代办** —— 代办要经手用户的 secret，
+            # 而 sealed 那一整套存在的理由就是面板不持有明文
+            "key_console": _key_console(ref.platform),
         }
         if user.keys is None:
             uncollected.append(dict(where))
@@ -368,7 +381,9 @@ def my_keys(
                     "age_days": days_since(k.created_ts),
                     "last_used": k.last_used,
                     "idle_days": days_since(k.last_used_ts),
-                    "never_used": not k.last_used_ts,
+                    # 「这朵云查不到」和「从来没用过」是两件事，前端要分开说
+                    "last_used_known": k.last_used_known,
+                    "never_used": k.last_used_known and not k.last_used_ts,
                     "flags": flags,
                 }
             )

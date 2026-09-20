@@ -59,6 +59,11 @@ class AccessKey:
     status: str = ""
     created: str = ""
     last_used: str = ""
+    #: 这朵云**给不给**最近使用时间。火山的 ListAccessKeys 没有这一项 ——
+    #: `last_used` 空在那边是「不知道」，不是「从来没用过」。
+    #: 混成一个的话，火山每一把 AK 都会被报成「没人用，停掉吧」，
+    #: 而那是 44 条同时出现的假线索，这一栏从此没人看
+    last_used_known: bool = True
 
     @property
     def active(self) -> bool:
@@ -75,13 +80,19 @@ class AccessKey:
 
 
 def _ts(iso: str) -> float:
-    from datetime import datetime
+    from datetime import datetime, timezone
 
-    text = str(iso or "").strip().replace("Z", "+00:00")
+    text = str(iso or "").strip()
     if not text or text.upper() == "N/A":
         return 0.0
     try:
-        return datetime.fromisoformat(text).timestamp()
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        pass
+    # 火山给的是紧凑格式 `20260204T104530Z`，fromisoformat 不认（3.11 起才认一部分）。
+    # 解析不了就返回 0 —— 但那会让年龄变成「不详」而不是「很老」，方向是安全的
+    try:
+        return datetime.strptime(text, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc).timestamp()
     except ValueError:
         return 0.0
 
@@ -129,7 +140,9 @@ class UserPermissions:
         return tuple(
             k
             for k in (self.keys or ())
-            if k.active and (not k.last_used_ts or k.last_used_ts < cut)
+            # **拿不到最近使用时间的一律不算**：不知道 ≠ 没人用。
+            # 「该轮换」那一类只看年龄，不受影响，所以火山的 AK 照样会被提醒换
+            if k.active and k.last_used_known and (not k.last_used_ts or k.last_used_ts < cut)
         )
 
 
@@ -224,6 +237,7 @@ def _keys(raw, who: str) -> Optional[tuple]:
                 status=str(k.get("status") or ""),
                 created=str(k.get("created") or ""),
                 last_used=str(k.get("last_used") or ""),
+                last_used_known=bool(k.get("last_used_known", True)),
             )
         )
     return tuple(out)

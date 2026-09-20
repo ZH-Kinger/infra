@@ -4,7 +4,7 @@
 //   · 没指过的显示「未指定」，不按名字或创建时间猜 —— 猜错一次这张表就没人信了
 //   · 员工看不到别人的资源明细，只看得到数量
 
-import { api, apiPost, fill as fillEl, fmtTime, h, mount, openDrawer, platformTag } from "./core.js";
+import { api, apiPost, fill as fillEl, fmtTime, h, mount, openDrawer, platformTag, safeHttps } from "./core.js";
 
 function fact(label, value, mono) {
   return h("div", { class: "perm" },
@@ -125,10 +125,12 @@ const SOURCE_LABEL = { BMCPFS: "CPFS", CPFS: "CPFS", OSS: "OSS", NAS: "NAS" };
 const ACCESS_LABEL = {
   PRIVATE: ["只有你看得到", ""],
   ROLE_PUBLIC: ["工作空间内可见", ""],
-  // 徽章的职责是「扫一眼就看见有问题」，四个字够了。**为什么**谁都能删
-  // （组里那条 pai:* 策略对 PUBLIC 无条件放行）是一整句因果，塞不进小标签 ——
-  // 那句话在卡片顶部的说明行里。另外这里是 createTextNode，星号会原样显示
-  PUBLIC: ["谁都能删", "crit"],
+  // 一度写成「谁都能删」，**那是错的**：官方角色表里 paidataset:DeleteDataset 只给
+  // 工作空间负责人/管理员，外加各角色自己建的 PRIVATE —— PUBLIC 的数据集连建它的人
+  // 自己都删不掉。（Designer/Flow 那边 PUBLIC 确实他人可删，我把那条规则套错了资源类型。）
+  // 真正的问题是「全账号可见」：谁都看得见、都能挂进自己的 DSW 读里面的数据。
+  // 这里是 createTextNode，星号会原样显示
+  PUBLIC: ["全账号可见", "warn"],
 };
 
 /** 数据集：**唯一一类归属自带的资产**（UserId 就是属主），所以这一栏不用等管理员指派。 */
@@ -157,9 +159,9 @@ function datasetCard(data, admin) {
       h("span", { class: "asset-total" }, h("b", {}, String(items.length)), " 条")),
     anyPublic
       ? h("p", { class: "pad muted" },
-          "标着「谁都能删」的那几条可见范围是 PUBLIC —— 用户组里那条 pai 策略对 PUBLIC "
-          + "无条件放行，包括删除。改成「工作空间内可见」就没人删得掉了，"
-          + "而且不碰一个字节的数据。")
+          "标着「全账号可见」的那几条是 PUBLIC —— 这个云账号下任何人都看得见、"
+          + "都能把它挂进自己的 DSW 读里面的数据，不限于本工作空间。"
+          + "改成「工作空间内可见」就只有同空间的人看得到，而且不碰一个字节的数据。")
       : null,
     admin && data.abandoned
       ? h("div", { class: "banner warn" },
@@ -177,14 +179,44 @@ function datasetCard(data, admin) {
 // 两种标记的措辞是**给持有人看的动作**，不是给运维看的状态词。
 // 「该换了」要说清楚怎么换才不断服务，否则人会直接删掉旧的那把。
 const KEY_FLAG = {
-  rotate: ["该换了", "crit", "建得太久。找管理员发一把新的，两把并存几天、程序都切过去之后再停旧的。"],
-  unused: ["没人用", "warn", "还要用吗？不用就请管理员停用 —— 停用是可逆的，随时能改回来。"],
+  rotate: ["该换了", "crit", "建得太久。**自己去控制台建一把新的**（下面有入口），两把并存几天、程序都切过去之后再停旧的。"],
+  unused: ["没人用", "warn", "还要用吗？不用就去控制台停用 —— 停用是可逆的，随时能改回来。"],
 };
 
 function ageText(days) {
   if (days === null || days === undefined) return h("span", { class: "muted" }, "不详");
   if (days >= 365) return `${Math.floor(days / 365)} 年 ${days % 365} 天`;
   return `${days} 天`;
+}
+
+/** 报「没采到」时要说清楚是**哪朵云**的采集身份缺权限。
+ *
+ * 原来写死的是 `ram:ListAccessKeys` —— 那是阿里云的动作名，而没采到的可能是火山账号
+ * （火山 IAM 的接口叫法不一样）。照着去阿里云的 RAM 里找，会找到一个不存在的问题。
+ */
+function platformsOf(list) {
+  const names = [...new Set((list || []).map((u) => u.platform_display || u.platform).filter(Boolean))];
+  return names.length ? `${names.join(" / ")} ` : "";
+}
+
+/** 自助换密钥的入口，每个云账号一个。
+ *
+ * **面板不代办换密钥**：代办就要经手用户的 secret，而这张卡开头那句「面板不保存、
+ * 也拿不到完整密钥」就不成立了。换一把密钥是控制台上几次点击的事，不值得为此
+ * 让面板变成所有人密钥的中转站。真正的难点从来不是操作麻烦，是没人知道自己该换了 ——
+ * 那正是这张卡在解决的事。
+ */
+function keyConsoles(keys, uncollected) {
+  const seen = new Map();
+  for (const row of [...(keys || []), ...(uncollected || [])]) {
+    if (!row.key_console) continue;
+    const label = `${row.platform_display || row.platform} · ${row.account_label || row.account}`;
+    if (!seen.has(label)) seen.set(label, row.key_console);
+  }
+  if (!seen.size) return null;
+  const links = [...seen].map(([label, url]) =>
+    h("a", { class: "linkbtn", href: safeHttps(url), target: "_blank", rel: "noopener noreferrer" }, `去${label}换 →`));
+  return h("p", { class: "pad muted" }, "要换或停用密钥，自己在控制台做：", ...links);
 }
 
 /** 自己的 AK 台账：每把建了多久、上次什么时候用过。 */
@@ -204,11 +236,15 @@ function keysCard(data) {
       h("td", {}, h("span", { class: "mono" }, `${k.id}…`)),
       h("td", {}, h("span", { class: "pname" }, k.user), h("span", { class: "pmail" }, k.account_label || k.account)),
       h("td", {}, ageText(k.age_days), k.created ? h("span", { class: "pmail" }, k.created.slice(0, 10)) : null),
-      h("td", {}, k.never_used
-        ? h("span", { class: "warn-text" }, "从来没用过")
-        : k.idle_days === null || k.idle_days === undefined
-          ? h("span", { class: "muted" }, "不详")
-          : `${k.idle_days} 天前`),
+      // 三态：这朵云查不到 / 确实从来没用过 / 多久以前用过。
+      // 前两者混成一个的话，火山每一把都会被写成「从来没用过」—— 那不是事实，是我们看不到
+      h("td", {}, k.last_used_known === false
+        ? h("span", { class: "muted", title: "这朵云的接口不返回最近使用时间" }, "这朵云查不到")
+        : k.never_used
+          ? h("span", { class: "warn-text" }, "从来没用过")
+          : k.idle_days === null || k.idle_days === undefined
+            ? h("span", { class: "muted" }, "不详")
+            : `${k.idle_days} 天前`),
       h("td", {}, ...flags));
   });
 
@@ -228,6 +264,10 @@ function keysCard(data) {
       h("span", { class: "asset-total" }, h("b", {}, blind ? "?" : String(keys.length)), " 把")),
     h("p", { class: "pad muted" },
       `只显示密钥 ID 的前 8 位 —— 面板不保存、也拿不到完整密钥。超过 ${data.stale_days ?? 180} 天该换，超过 ${data.unused_days ?? 90} 天没用过该问还要不要。`),
+    // **面板只领路，不代办**：代办就得经手你的 secret，而这一页开头那句
+    // 「面板不保存、也拿不到完整密钥」就不成立了。换密钥是几次点击的事，
+    // 不值得为此让面板变成所有人密钥的中转站
+    keyConsoles(keys, uncollected),
     data.captured_at
       // 年龄和「多久没用」是拿请求时刻减快照里的时间算的。快照放旧了，一把昨天还在用的
       // 密钥会显示成「15 天前」，再配上「没人用，停掉吧」的建议 —— 有人真会去停一把在跑的
@@ -245,8 +285,8 @@ function keysCard(data) {
     uncollected.length
       ? h("div", { class: "banner warn" },
           blind
-            ? `这次一把都没采到（${uncollected.map((u) => u.user).join("、")}）。这**不是**说你没有密钥，是说这次没查到 —— 请管理员检查采集身份的 ram:ListAccessKeys 权限。`
-            : `上面这份不完整：没采到 ${uncollected.map((u) => u.user).join("、")} 的密钥清单（不等于没有）。请管理员检查采集身份的 ram:ListAccessKeys 权限。`)
+            ? `这次一把都没采到（${uncollected.map((u) => u.user).join("、")}）。这不是说你没有密钥，是说这次没查到 —— 请管理员检查${platformsOf(uncollected)}采集身份列 AccessKey 的权限。`
+            : `上面这份不完整：没采到 ${uncollected.map((u) => u.user).join("、")} 的密钥清单（不等于没有）。请管理员检查${platformsOf(uncollected)}采集身份列 AccessKey 的权限。`)
       : null);
 }
 

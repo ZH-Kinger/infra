@@ -102,6 +102,80 @@ test("卡上必须标出快照时间", () => {
   assert.match(card.textContent, /权限快照/);
 });
 
+// 「最近使用」这一列是三态：**这朵云查不到** / 确实从来没用过 / N 天前。
+// 前两者混成一个的话，火山那 44 把 AK 会全部写成「从来没用过」—— 那不是事实，
+// 是我们看不到；而 44 条同时出现的假线索足以让这一栏从此没人看。
+// 后端已经分出 last_used_known 了（单测钉着），最后一米在这里。
+function rows(card) {
+  return [...card.walk()].filter((n) => n.tagName === "TR").map((n) => n.textContent);
+}
+
+test("火山那把：写「这朵云查不到」，绝不能写「从来没用过」", () => {
+  // 火山的 ListAccessKeys 不返回最近使用时间，也没有阿里那种 GetAccessKeyLastUsed 可以补问。
+  // 后端据此把 never_used 置成 false 并标 last_used_known:false
+  const { card } = render({
+    ...BASE,
+    accounts: 1,
+    keys: [key({ id: "AKLT0001", last_used_known: false, never_used: false, idle_days: null })],
+    uncollected: [],
+  });
+  assert.match(card.textContent, /这朵云查不到/);
+  assert.doesNotMatch(card.textContent, /从来没用过/, "「查不到」被渲染成了「没用过」");
+  // 也不能退化成「不详」—— 那句看起来像数据缺了一点，而这是这朵云根本不提供
+  assert.doesNotMatch(card.textContent, /不详/);
+});
+
+test("阿里那把确实没用过时，照旧直说", () => {
+  // 反向锁：别为了修上一条，把「真的没用过」也一起改成「查不到」——
+  // 那一句是 GetAccessKeyLastUsed 回 N/A 得来的事实，该报
+  const { card } = render({
+    ...BASE,
+    accounts: 1,
+    keys: [key({ last_used_known: true, never_used: true })],
+    uncollected: [],
+  });
+  assert.match(card.textContent, /从来没用过/);
+  assert.doesNotMatch(card.textContent, /这朵云查不到/);
+});
+
+test("两朵云混在一张表里：逐行判断，不整列一刀切", () => {
+  const { card } = render({
+    ...BASE,
+    accounts: 2,
+    keys: [
+      key({ id: "LTAI0001", last_used_known: true, never_used: true }),
+      key({
+        id: "AKLT0001",
+        platform: "volcano",
+        user: "ShenYi",
+        last_used_known: false,
+        never_used: false,
+        idle_days: null,
+      }),
+      key({ id: "LTAI0002", last_used_known: true, never_used: false, idle_days: 3 }),
+    ],
+    uncollected: [],
+  });
+  const byId = (id) => rows(card).find((t) => t.includes(id));
+  assert.match(byId("LTAI0001"), /从来没用过/);
+  assert.match(byId("AKLT0001"), /这朵云查不到/);
+  assert.doesNotMatch(byId("AKLT0001"), /从来没用过/);
+  assert.match(byId("LTAI0002"), /3 天前/);
+});
+
+test("老数据没有 last_used_known 这个字段：按「查得到」处理", () => {
+  // 字段是后加的，旧响应里没有。缺省当 false 的话，阿里那一整列会集体变成
+  // 「这朵云查不到」—— 而它明明查得到，那等于把唯一准的那一维也关掉
+  const { card } = render({
+    ...BASE,
+    accounts: 1,
+    keys: [key({ never_used: true })], // 注意：没有 last_used_known
+    uncollected: [],
+  });
+  assert.match(card.textContent, /从来没用过/);
+  assert.doesNotMatch(card.textContent, /这朵云查不到/);
+});
+
 test("已停用的密钥照列，但不催人轮换", () => {
   const { card } = render({
     ...BASE,
@@ -158,15 +232,17 @@ test("没采到时整张卡不出现，也不说「你没有数据集」", () =>
   assert.doesNotMatch(text, /还没有数据集/);
 });
 
-test("PUBLIC 要明说「谁都能删」，不能只印枚举值", () => {
-  // 组里那条 pai:* 策略对 PUBLIC 无条件放行，包括删除。印个 "PUBLIC" 没人看得懂风险
+test("PUBLIC 要说清楚风险，不能只印枚举值", () => {
+  // 一度写成「谁都能删」，是错的：paidataset:DeleteDataset 只给工作空间管理员和
+  // 自己建的 PRIVATE，PUBLIC 连创建者都删不掉。真正的风险是全账号可见
   const text = page({ collected: true, items: [ds({ accessibility: "PUBLIC" })], abandoned: 0 });
-  assert.match(text, /谁都能删/);
+  assert.match(text, /全账号可见/);
+  assert.doesNotMatch(text, /谁都能删/, "这个说法已被官方角色表证伪");
   // 徽章走的是 createTextNode，**星号会原样显示** —— 本仓库没有 Markdown 渲染。
   // 不断言这条的话，`**谁都能删**` 和 `谁都能删` 两种写法都会绿
   assert.doesNotMatch(text, /\*\*/, "徽章里不该出现 Markdown 星号");
-  // 为什么谁都能删，得在卡片说明里讲清楚 —— 塞不进小标签
-  assert.match(text, /无条件放行/);
+  // 为什么有风险，得在卡片说明里讲清楚 —— 塞不进小标签
+  assert.match(text, /挂进自己的 DSW/);
 });
 
 test("管理员那边多一列属主，还要提示有几条是被遗弃的", () => {
