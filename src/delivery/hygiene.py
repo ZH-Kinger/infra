@@ -79,7 +79,7 @@ _SECTIONS = (
         "stray_bucket",
         "桶在云上，但没登记在任何地方",
         "没登记就没人申请得到它，也就没人在管它。确认用途后登记进凭证模板或数据集白名单；"
-        "**确认没用了再删** —— 桶名全局唯一，删掉就可能被外人抢注同名。",
+        "**确认没用了再删** —— 桶名全局唯一，删掉就可能被外人抢注同名。{filtered_note}",
     ),
     (
         "rotate",
@@ -110,6 +110,10 @@ class Report:
     #: 云上有、但任何凭证模板和数据集白名单里都没有的桶。没登记 = 申请流程里选不到它，
     #: 于是它既不会被人合法申请，也不会有人定期看它 —— 数据就是这么悄悄躺在外面的
     stray_bucket: list = field(default_factory=list)
+    #: 被 `_MANAGED_BUCKET_PREFIXES` 滤掉的条数。**要说出来**：这一栏的可信度建立在
+    #: 「它报的就是全部」，而那份前缀表是经验值 —— 线上那条 h2r-dlc-<uid>-cn-shanghai
+    #: 就是云产品自建却不带这两个前缀的活例子。吞了不说，下次前缀表漏了也没人知道
+    stray_filtered: int = 0
     #: 在飞书里**查不到**的人。注意：飞书对「不在应用可用范围内」和「已被移出通讯录」
     #: 回的是同一个错误码，所以这批只能是「要人确认」，不能当成已离职
     unknown: list = field(default_factory=list)
@@ -134,7 +138,16 @@ class Report:
 
     def sections(self) -> list:
         """[(kind, 标题, 说明, 条目), ...]，空的那几类也在里面（计数用）。"""
-        fmt = {"stale_days": self.stale_days, "unused_days": self.unused_days}
+        fmt = {
+            "stale_days": self.stale_days,
+            "unused_days": self.unused_days,
+            # 0 的时候是空串：每次都印「另有 0 个未列出」等于没说
+            "filtered_note": (
+                f"（另有 {self.stray_filtered} 个云产品自建的桶未列出，前缀 cri- / oss-pai-）"
+                if self.stray_filtered
+                else ""
+            ),
+        }
         return [
             (kind, title.format(**fmt), note.format(**fmt), getattr(self, kind))
             for kind, title, note in _SECTIONS
@@ -193,14 +206,15 @@ def registered_buckets(templates: Optional[Iterable] = None, allowed: Optional[I
     return names or None
 
 
-def _stray_buckets(buckets: Optional[Iterable], registered: Optional[set]) -> list:
-    """云上有、白名单里没有的桶。"""
-    out = []
+def _stray_buckets(buckets: Optional[Iterable], registered: Optional[set]) -> tuple:
+    """(云上有、白名单里没有的桶, 被云产品前缀滤掉的条数)。"""
+    out, filtered = [], 0
     for b in buckets or ():
         name = str((b.get("name") if isinstance(b, Mapping) else b) or "").strip()
         if not name or name.lower() in (registered or set()):
             continue
         if name.lower().startswith(_MANAGED_BUCKET_PREFIXES):
+            filtered += 1
             continue
         region = str(b.get("region") or "") if isinstance(b, Mapping) else ""
         created = str(b.get("created") or "") if isinstance(b, Mapping) else ""
@@ -216,7 +230,7 @@ def _stray_buckets(buckets: Optional[Iterable], registered: Optional[set]) -> li
                 or "地域和创建时间都没采到",
             )
         )
-    return sorted(out, key=lambda f: f.subject)
+    return sorted(out, key=lambda f: f.subject), filtered
 
 
 def load_registered_buckets(templates_path=None, allowed_path=None):
@@ -403,7 +417,8 @@ def build(
     elif registered is None:
         report.skipped.append("没有凭证模板和数据集白名单，没法判断哪些桶没登记")
     else:
-        report.stray_bucket.extend(_stray_buckets(buckets, registered))
+        found, report.stray_filtered = _stray_buckets(buckets, registered)
+        report.stray_bucket.extend(found)
         for note in registered_notes or ():
             # 按半份白名单判出来的清单会多报，看的人有权知道
             report.skipped.append(f"{note}，「没登记的桶」这一类可能多报")
