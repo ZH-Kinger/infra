@@ -433,6 +433,34 @@ def apply(
         os.close(lock_fd)
 
 
+def log_revoke(paths, *, actor, platform, account, user, done, failed, reason) -> None:
+    """管理员收权留痕。写进同一份 review.log（JSON 行）。
+
+    **这是唯一一条不经申请单的减权通道**，没有台账兜着 —— 事后能查到的只有这一行，
+    所以 `reason` 和撤掉的具体条目都要落进去，不能只记「某某收了权」。
+
+    写不进去**不抛**：权限已经在云上撤掉了，这时候报错只会让人以为没撤成、再点一次。
+    """
+    if paths is None:
+        return
+    try:
+        _append_log(
+            paths.log,
+            {
+                "event": "revoke",
+                "actor": actor,
+                "scope": f"{platform}/{account}/{user}",
+                "removed": list(done),
+                "failed": [f.get("name") for f in (failed or ())],
+                "reason": reason,
+            },
+        )
+    except OSError as exc:
+        # 不抛：权限已经在云上撤掉了，这时候报错只会让人以为没撤成、再点一次。
+        # 但**要出声** —— 静默丢掉唯一的事后凭据，比丢掉本身更糟
+        print(f"[revoke] 留痕写不进去：{type(exc).__name__}: {exc}", file=sys.stderr)
+
+
 def add_link(paths: ReviewPaths, email: str, account: str, *, actor: str) -> None:
     """开账号申请执行成功后：把新账号人工对应给申请人。名册在下一次刷新时生效。
 

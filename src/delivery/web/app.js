@@ -416,7 +416,100 @@ function consoleLink(acct) {
     : null;
 }
 
-function accountCard(acct, requests) {
+/** 管理员收权：勾中要撤的，先预演，看清楚「撤完还剩什么」再执行。
+ *
+ * **两步而不是一步**，因为收权最常见的事故不是撤错一条，是撤完才发现这个人连活都干不了了。
+ * 预演由服务端算（同一套判据），前端不自己判断谁能撤 —— 判据写两份迟早会分叉。
+ * 资源组级的授权（名字里带 `@资源组:`）这里撤不掉，服务端会把它列进「撤不了」并说明原因。
+ */
+function revokeBox(acct) {
+  const pols = (acct.direct_policies || []).filter((p) => !String(p).includes("@"));
+  const groups = acct.groups || [];
+  if (!pols.length && !groups.length) return null;
+
+  const picked = new Set();
+  const out = h("div", { class: "revoke-out" });
+  const reason = h("input", { class: "input", maxlength: "200", placeholder: "为什么收这些权限？执行时必填" });
+  const preview = h("button", { type: "button", class: "btn ghost small" }, "预演");
+  const apply = h("button", { type: "button", class: "btn small", disabled: true }, "执行收权");
+  let confirmLast = false;
+
+  const tick = (kind, name) => {
+    const cb = h("input", { type: "checkbox" });
+    cb.addEventListener("change", () => {
+      const key = `${kind}:${name}`;
+      if (cb.checked) picked.add(key); else picked.delete(key);
+      apply.disabled = true;           // 选择一变，之前那次预演就作废了
+      out.replaceChildren();
+    });
+    return h("label", { class: "revoke-pick" }, cb, h("span", {}, name));
+  };
+
+  const body = () => ({
+    platform: acct.platform, account: acct.account, user: acct.name,
+    policies: [...picked].filter((k) => k.startsWith("policy:")).map((k) => k.slice(7)),
+    groups: [...picked].filter((k) => k.startsWith("group:")).map((k) => k.slice(6)),
+    reason: reason.value.trim(),
+    confirm_last_admin: confirmLast,
+  });
+
+  const render = (res) => {
+    out.replaceChildren();
+    if (res.applied) {
+      out.append(h("p", { class: "good-text" }, `已撤掉 ${(res.done || []).length} 条：${(res.done || []).join("、") || "无"}`));
+      if ((res.failed || []).length) {
+        out.append(h("p", { class: "warn-text" }, `失败 ${res.failed.length} 条：` + res.failed.map((f) => `${f.name}（${f.error}）`).join("；")));
+      }
+      out.append(h("p", { class: "muted" }, "云上已经变了，这一页的内容要下次采集之后才会更新。"));
+      apply.disabled = true;
+      return;
+    }
+    if ((res.remove || []).length) {
+      out.append(h("p", {}, h("b", {}, `会撤掉 ${res.remove.length} 条：`), (res.remove || []).map((i) => i.name).join("、")));
+      apply.disabled = false;
+    } else {
+      out.append(h("p", { class: "muted" }, "按当前选择，一条都撤不了。"));
+      apply.disabled = true;
+    }
+    for (const r of res.refused || []) {
+      out.append(h("p", { class: "warn-text" }, `${r.name}：${r.why}`));
+      // 「最后一个管理员」不是不许做，是要你明确点头 —— 见 revoke.py 模块说明
+      if (r.code === "last_admin" && !confirmLast) {
+        const again = h("button", { type: "button", class: "btn ghost small" }, "我确认，撤掉最后一个管理员");
+        again.addEventListener("click", () => { confirmLast = true; preview.click(); });
+        out.append(again);
+      }
+    }
+    out.append(h("p", { class: "muted" }, `撤完还剩 ${(res.remaining || []).length} 条：${(res.remaining || []).join("、") || "什么都不剩"}`));
+  };
+
+  const call = async (btn, doApply) => {
+    btn.disabled = true;
+    try {
+      render(await apiPost("/api/admin/access/revoke", { ...body(), apply: doApply }));
+    } catch (err) {
+      out.replaceChildren(h("p", { class: "warn-text" }, err.message));
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  preview.addEventListener("click", () => call(preview, false));
+  apply.addEventListener("click", () => {
+    if (!window.confirm(`确定撤掉选中的权限？这会立刻改动云上的授权。`)) return;
+    call(apply, true);
+  });
+
+  return h("div", { class: "section" },
+    h("div", { class: "section-label" }, "收权", h("span", { class: "muted" }, "不经审批，操作会记进 review.log")),
+    h("p", { class: "muted" }, "勾中要撤的，先预演看清楚「撤完还剩什么」。经组继承的策略要去组上改，这里只列直接授予和所在组。注意：撤掉含 Deny 的护栏策略等于放权，那类会被拒。"),
+    h("div", { class: "revoke-picks" },
+      ...pols.map((p) => tick("policy", p)),
+      ...groups.map((g) => tick("group", g))),
+    h("div", { class: "inline" }, reason, preview, apply),
+    out);
+}
+
+function accountCard(acct, requests, admin) {
   const gone = acct.in_snapshot === false;
   const highRisk = acct.high_risk || [];
   const head = h(
@@ -473,6 +566,12 @@ function accountCard(acct, requests) {
         policyList(acct.direct_policies, highRisk),
       ),
     );
+    // 收权只给管理员，而且只针对**直接授予**和**所在组** —— 经组继承的那些要去组上改，
+    // 从这里撤等于把一个人单独摘出组，下次组变动又会回来
+    if (admin) {
+      const box = revokeBox(acct);
+      if (box) sections.push(box);
+    }
     for (const block of acct.group_policies || []) {
       sections.push(
         h(
@@ -575,7 +674,7 @@ function personPage(detail, { admin }) {
         "section",
         { class: "group" },
         h("div", { class: "group-head" }, h("div", { class: "group-label" }, "云账号"), admin ? null : h("a", { class: "linkbtn push", href: "#permissions" }, "申请更多权限 →")),
-        h("div", { class: "accounts" }, accounts.map((a) => accountCard(a, admin ? null : detail.requests))),
+        h("div", { class: "accounts" }, accounts.map((a) => accountCard(a, admin ? null : detail.requests, admin))),
       ),
     );
   }

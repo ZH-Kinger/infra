@@ -57,6 +57,7 @@ from . import notify as notify_mod
 from . import people as people_mod
 from . import policies as policies_mod
 from . import review as review_mod
+from . import revoke as revoke_mod
 from . import tickets as tickets_mod
 from .approval import ApprovalConfig, FeishuApproval
 from .catalog import load as load_catalog
@@ -65,6 +66,7 @@ from .feishu import FeishuError, FeishuUser, exchange_code, fetch_user
 from .flows import Flows
 from .login import _pkce_pair, authorize_url
 from .people import BIND_NONE, BIND_UNION_ID
+from .provision import describe_error as provision_describe
 from .provision import executor_configured as provision_executor_configured
 from .provision import executor_from_env
 from .provision import issuer_configured as provision_issuer_configured
@@ -652,6 +654,7 @@ _CSP = (
 _ADMIN_PEOPLE = "/api/admin/people/"
 _ADMIN_REVIEW = "/api/admin/review"
 _ADMIN_ASSET_OWNER = "/api/admin/assets/owner"
+_ADMIN_REVOKE = "/api/admin/access/revoke"
 _ADMIN_POLICY_RULES = "/api/admin/policies/rules"
 _ADMIN_IAM = "/api/admin/iam-attributes"
 _ADMIN_IAM_FILE = "/api/admin/iam-attributes/file"
@@ -1738,6 +1741,239 @@ def make_handler(
                 return self._json(500, {"error": "名册审核失败，请查看服务端日志"})
             return self._json(200, result)
 
+        def _revoke_access(self):
+            """管理员收权：撤掉子账号身上**不是面板发的**那些策略和用户组。
+
+            默认只**预演**（算出会撤什么、拒什么、剩什么），带 `apply` 才真动。
+            预演不是可有可无的礼貌 —— 收权最常见的事故不是撤错一条，
+            是撤完才发现这个人连活都干不了了，而那时候已经撤完了。
+            """
+            session = self._require(admin=True)
+            if session is None:
+                return None
+            refused = self._same_origin_json()
+            if refused:
+                return self._json(403, {"error": refused})
+            payload, sent = self._json_body()
+            if payload is None:
+                return sent
+
+            platform = str(payload.get("platform") or "")
+            account = str(payload.get("account") or "")
+            user = str(payload.get("user") or "")
+            reason = str(payload.get("reason") or "").strip()
+            if not (platform and account and user):
+                return self._json(400, {"error": "要指明 platform / account / user"})
+            wanted = [
+                revoke_mod.Item("policy", str(n))
+                for n in (payload.get("policies") or [])
+                if str(n or "").strip()
+            ] + [
+                revoke_mod.Item("group", str(n))
+                for n in (payload.get("groups") or [])
+                if str(n or "").strip()
+            ]
+            if not wanted:
+                return self._json(400, {"error": "没有选中要撤的东西"})
+            apply = bool(payload.get("apply"))
+            # 真撤必须写清楚为什么：这是唯一一条「减权限」的直接通道，
+            # 没有申请单兜着，理由就是事后唯一查得到的东西
+            if apply and len(reason) < 5:
+                return self._json(400, {"error": "请写明收权理由（至少 5 个字）"})
+
+            try:
+                ex = backend._executor(platform, account)
+                attached, groups = ex.attached(user)
+            except DeliveryError as exc:
+                # 过一次脱敏再回前端：ProvisionError 的文案里可能带 AccessKeyId
+                return self._json(
+                    502, {"error": (provision_describe(exc) or str(exc).splitlines()[0])[:300]}
+                )
+
+            # **读不到申请单就整个拒掉。** 「面板发的不能从这里撤」这条护栏全靠它，
+            # 读不到却照撤，等于护栏静默消失 —— 而收权是不可逆的
+            tickets = self._all_tickets()
+            if tickets is None:
+                return self._json(
+                    503,
+                    {"error": "读不了申请单台账，暂时不能收权（否则分不清哪些是面板发的）"},
+                )
+            if tickets == "missing":
+                # 给一条 30 秒的出路，并且让「相信这里真的什么都没发过」成为一个
+                # **显式的人工动作** —— 而不是代码替人默认
+                return self._json(
+                    503,
+                    {
+                        "error": f"申请单台账 {backend.tickets_path} 不存在。"
+                        "如果这是全新部署、确实还没有任何申请单，"
+                        '先建一个空台账（{"schema":"wuji-tickets@1","tickets":[]}）再收权'
+                    },
+                )
+            # 每条自定义策略问一次「里面有没有 Deny」。系统策略不问：阿里云的系统策略
+            # 都是纯 Allow，而多问 60 次会让预演变慢到没人愿意点
+            deny_of = {}
+            for p_ in attached:
+                name, ptype = str(p_.get("PolicyName") or ""), str(p_.get("PolicyType") or "")
+                if name and ptype == "Custom":
+                    deny_of[name] = ex.has_deny(ptype, name)
+            plan = revoke_mod.plan(
+                user=user,
+                attached=attached,
+                groups=groups,
+                wanted=wanted,
+                admin_holders=self._admin_holders(platform, account),
+                admin_groups=self._admin_groups(platform, account),
+                protected_groups=self._protected_groups(platform, account),
+                deny_of=deny_of,
+                panel_granted=revoke_mod.granted_by_panel(tickets, platform, account, user),
+                confirm_last_admin=bool(payload.get("confirm_last_admin")),
+            )
+            view = {
+                "user": plan.user,
+                "remove": [
+                    {"kind": i.kind, "name": i.name, "type": i.policy_type} for i in plan.remove
+                ],
+                "refused": [
+                    {"kind": i.kind, "name": i.name, "why": plan.why(code), "code": code}
+                    for i, code in plan.refused
+                ],
+                "remaining": plan.remaining,
+                "applied": False,
+            }
+            if not apply:
+                return self._json(200, view)
+
+            # **拿不到留痕目的地就不执行**。这条通道没有申请单兜底，review.log 是
+            # 事后唯一凭据；而 review_paths() 在「名册审核」那几个路径缺任一时就返回
+            # None —— 一个没开名册审核的部署，收权会一条日志都不留，响应里也看不出来
+            log_to = backend.review_paths()
+            if log_to is None:
+                return self._json(
+                    503, {"error": "服务端没有配置留痕路径，不能收权（这条通道没有别的凭据）"}
+                )
+            done, failed = [], []
+            for item in plan.remove:
+                # **PolicyType 为空不许猜**。猜 "System" 的那一版：阿里会吞
+                # EntityNotExist.User.Policy、火山 has_policy 要求类型精确相等直接 return，
+                # 两边都记进 done —— 界面说撤了、云上一动没动
+                if item.kind == "policy" and not item.policy_type:
+                    failed.append({"name": item.name, "error": "云上没返回策略类型，不敢猜，没撤"})
+                    continue
+                try:
+                    if item.kind == "group":
+                        ex.remove_from_group(user, item.name)
+                    else:
+                        ex.detach_policy(user, item.policy_type or "System", item.name)
+                    done.append(item.name)
+                except Exception as exc:  # noqa: BLE001 — 一条失败不挡住其余，逐条记
+                    failed.append(
+                        {
+                            "name": item.name,
+                            "error": provision_describe(exc) or type(exc).__name__,
+                        }
+                    )
+            view["applied"] = True
+            view["done"] = done
+            view["failed"] = failed
+            # **留痕**：这是唯一一条不经申请单的减权通道，没有台账兜着，
+            # 事后能查到的只有这一行。写不进去也不让整个操作失败 —— 权限已经撤了，
+            # 这时候报错只会让人以为没撤成、再点一次
+            review_mod.log_revoke(
+                log_to,
+                actor=session.user.union_id,
+                platform=platform,
+                account=account,
+                user=user,
+                done=done,
+                failed=failed,
+                reason=reason,
+            )
+            return self._json(200, view)
+
+        def _admin_holders(self, platform: str, account: str) -> set:
+            """这个云账号里还持有管理员策略的登录名。撤最后一个管理员要显式确认，靠它判断。"""
+            try:
+                snap = backend.snapshot()
+            except DeliveryError:
+                return set()
+            out = set()
+            for u in getattr(snap, "users", ()) if snap else ():
+                if (u.platform, u.account) != (platform, account):
+                    continue
+                # **要算经用户组继承的**：火山 `wuji-opration` 组本身就挂着 AdministratorAccess，
+                # 只看 u.policies 的话，那个组里的人不算 holders —— 于是明明还有别的管理员
+                # 却照样弹「最后一个管理员」。弹多了没人看，真到最后一个时也会被一路点过去
+                try:
+                    effective = snap.effective_policies(u)
+                except Exception:  # noqa: BLE001 — 算不出就退回只看直挂的，宁可多问一次
+                    effective = getattr(u, "policies", ())
+                if any(str(p) in revoke_mod.ADMIN_POLICIES for p in effective):
+                    out.add(u.name)
+            return out
+
+        def _admin_groups(self, platform: str, account: str) -> set:
+            """本身就发管理员权限的用户组。移出这种组等于撤管理员，同样要确认。
+
+            火山 `wuji-opration` 就是这种：组上直接挂着 AdministratorAccess。
+            只看 user.policies 的话，把它的成员移出去是零确认的。
+            """
+            try:
+                snap = backend.snapshot()
+            except DeliveryError:
+                return set()
+            out = set()
+            for g in getattr(snap, "groups", ()) if snap else ():
+                if (g.platform, g.account) != (platform, account):
+                    continue
+                if any(str(p) in revoke_mod.ADMIN_POLICIES for p in getattr(g, "policies", ())):
+                    out.add(g.name)
+            return out
+
+        def _protected_groups(self, platform: str, account: str) -> set:
+            """挂着护栏策略（名字命中 `revoke.PROTECTED`）的用户组。
+
+            和 `_admin_groups` 同一个道理：护栏挂在组上时，「把人移出这个组」
+            绕过按策略名的判断。
+            """
+            try:
+                snap = backend.snapshot()
+            except DeliveryError:
+                return set()
+            out = set()
+            for g in getattr(snap, "groups", ()) if snap else ():
+                if (g.platform, g.account) != (platform, account):
+                    continue
+                if any(
+                    str(p).strip().lower().startswith(revoke_mod.PROTECTED)
+                    for p in getattr(g, "policies", ())
+                ):
+                    out.add(g.name)
+            return out
+
+        def _all_tickets(self):
+            """所有申请单。**读不到返回 None，不是空列表。**
+
+            空列表 = 「面板一条权限都没发过」= 什么都不用拒，方向正好错了：
+            一个坏掉的 tickets.json 就能让面板自己发出去的权限被从这里撤掉，
+            而界面上没有任何异常。所以读不到时返回 None，由调用方拒绝整个操作。
+            """
+            # **「不见了」和「坏掉了」同样危险**：TicketStore._read 对不存在的文件
+            # 返回空台账（对它自己是对的），而这里空 = 「面板一条都没发过」=
+            # 什么都不拒。部署把路径挂错、新建卷、文件被删，护栏都会静默消失
+            # 分三态：None=读不了 / "missing"=文件不在 / list=读到了。
+            # **「不在」和「读不了」不是一回事**：全新部署在第一张单子之前本来就没有
+            # 这个文件，而「清理存量权限」恰恰是全新部署最先要做的事
+            path = backend.tickets_path
+            if not path:
+                return None
+            if not Path(path).exists():
+                return "missing"
+            try:
+                flows = backend.flows()
+                return list(flows.store.all()) if flows is not None else None
+            except Exception:  # noqa: BLE001
+                return None
+
         def _asset_owner(self):
             """管理员把一个资源指给某人（email 留空＝取消指派）。
 
@@ -1850,6 +2086,8 @@ def make_handler(
                 return self._policy_rules()
             if path == _ADMIN_ASSET_OWNER:
                 return self._asset_owner()
+            if path == _ADMIN_REVOKE:
+                return self._revoke_access()
             if path == _ADMIN_REVIEW:
                 return self._review()
             if path.rstrip("/") == _ADMIN_IAM:

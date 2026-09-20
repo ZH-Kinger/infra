@@ -26,6 +26,7 @@ import os
 import re
 import secrets
 import string
+import urllib.parse
 from dataclasses import dataclass
 from typing import Callable, Mapping, Optional
 
@@ -223,6 +224,59 @@ class AliyunExecutor:
             gone = exc.code == "EntityNotExist.Policy" and policy_type == "Custom"
             if exc.code not in ("EntityNotExist.User.Policy", "EntityNotExist.User") and not gone:
                 raise
+
+    def attached(self, user: str) -> tuple:
+        """这个子账号**此刻**挂着什么：`([{PolicyName,PolicyType}, …], [用户组名, …])`。
+
+        收权必须读实时的，不能读快照：快照可能是几小时前的，照着它去撤，
+        有可能撤掉一条五分钟前刚通过审批发下去的策略。
+
+        **只返回账号级授权。** 资源组级的（控制台里显示成 `策略名 @资源组:rg-xxx`）
+        走的是 ResourceManager 的接口，`ram:DetachPolicyFromUser` 撤不掉它，
+        所以这里也不列出来 —— 列了却撤不掉，比不列更误导。
+        """
+        self._check_account()
+        # `{"Policies": null}` 和缺键都**不能当作没有授权**：静默返回空会让页面显示
+        # 「这个人什么都没挂」，而他可能挂着超管。与火山那侧、与 has_policy 一致
+        raw = self._call(aliyun.RAM, "ListPoliciesForUser", {"UserName": user}).get("Policies")
+        if not isinstance(raw, dict) or raw.get("Policy") is None:
+            raise ProvisionError("ListPoliciesForUser 返回缺 Policies，不能当作没有授权")
+        pols = [
+            {
+                "PolicyName": str(x.get("PolicyName") or ""),
+                "PolicyType": str(x.get("PolicyType") or ""),
+            }
+            for x in raw["Policy"]
+        ]
+        # 用户组那半边同理：组读空 → 界面一个组都不显示、remaining 里也没有「用户组 X」→
+        # 管理员撤完看到「什么都不剩」，而这人还从组里继承着一堆权限
+        raw_g = self._call(aliyun.RAM, "ListGroupsForUser", {"UserName": user}).get("Groups")
+        if not isinstance(raw_g, dict) or raw_g.get("Group") is None:
+            raise ProvisionError("ListGroupsForUser 返回缺 Groups，不能当作不在任何组")
+        groups = [str(g.get("GroupName") or "") for g in raw_g["Group"]]
+        return pols, [g for g in groups if g]
+
+    def has_deny(self, policy_type: str, policy: str) -> Optional[bool]:
+        """这条策略里有没有 `"Effect": "Deny"`。**读不出来返回 None，不是 False。**
+
+        撤掉一条含 Deny 的策略 = 提权（RAM 里 Deny 优先且跨策略生效）。所以收权
+        之前要问这一句；而「读不出来」绝不能当成「没有 Deny」—— 那正好是最危险的
+        默认值：一条读不了的策略会被当成普通 Allow 放行掉。
+        """
+        self._check_account()
+        try:
+            got = self._call(
+                aliyun.RAM, "GetPolicy", {"PolicyName": policy, "PolicyType": policy_type}
+            )
+            doc = json.loads(
+                urllib.parse.unquote(str(got["DefaultPolicyVersion"]["PolicyDocument"]))
+            )
+        except (aliyun.AliyunError, KeyError, ValueError, TypeError):
+            return None
+        stmts = doc.get("Statement")
+        if not isinstance(stmts, list):
+            return None
+        return any(str(st.get("Effect") or "").lower() == "deny" for st in stmts)
 
     def create_user(self, user: str, display_name: str) -> None:
         self._check_account()
@@ -441,6 +495,69 @@ class VolcanoExecutor:
                 return  # 子账号已经删了，权限自然没了
             raise
         self._call(volcano.IAM, "RemoveUserFromGroup", {"UserName": user, "UserGroupName": group})
+
+    def attached(self, user: str) -> tuple:
+        """这个子账号**此刻**挂着什么：`([{PolicyName,PolicyType}, …], [用户组名, …])`。
+
+        语义与阿里云那一侧一致（见那边的说明）：读实时的，只算全局范围的直接授权，
+        项目范围的不在内 —— `DetachUserPolicy` 撤不掉那一类。
+        """
+        self._check_account()
+        body = self._call(volcano.IAM, "ListAttachedUserPolicies", {"UserName": user})
+        items = body.get("AttachedPolicyMetadata")
+        if items is None:
+            raise ProvisionError(
+                "ListAttachedUserPolicies 返回缺 AttachedPolicyMetadata，不能当作没有授权"
+            )
+        # **只留 Global 范围**：项目范围的 DetachUserPolicy 撤不掉，而 detach_policy
+        # 撤前先 has_policy（它也只认 Global）→ 查不到就直接 return → 面板记进 done、
+        # 界面显示「已撤掉」，云上一动没动。列了却撤不掉，比不列更误导
+        pols = []
+        for x in items:
+            scopes = x.get("PolicyScope") or [{"PolicyScopeType": "Global"}]
+            if not any(sc.get("PolicyScopeType", "Global") == "Global" for sc in scopes):
+                continue
+            pols.append(
+                {
+                    "PolicyName": str(x.get("PolicyName") or ""),
+                    "PolicyType": str(x.get("PolicyType") or ""),
+                }
+            )
+        groups, page = [], 0
+        while page < 50:
+            got = (
+                self._call(
+                    volcano.IAM,
+                    "ListGroupsForUser",
+                    {"UserName": user, "Limit": "100", "Offset": str(page * 100)},
+                ).get("UserGroupMetadata")
+                or []
+            )
+            groups += [str(g.get("UserGroupName") or "") for g in got]
+            if len(got) < 100:
+                return pols, [g for g in groups if g]
+            page += 1
+        raise ProvisionError("火山 ListGroupsForUser 翻页超过上限，已中断")
+
+    def has_deny(self, policy_type: str, policy: str) -> Optional[bool]:
+        """这条策略里有没有 `"Effect": "Deny"`。**读不出来返回 None，不是 False。**
+
+        语义与阿里那侧逐字一致（见那边的说明）。**缺了这个方法比返回错的更糟**：
+        收权那条路会对每条自定义策略调它，没有就直接 AttributeError 崩在半路 ——
+        而那时候前面几条可能已经撤掉了。
+        """
+        self._check_account()
+        try:
+            got = self._call(
+                volcano.IAM, "GetPolicy", {"PolicyName": policy, "PolicyType": policy_type}
+            )
+            doc = json.loads(str((got.get("Policy") or {}).get("PolicyDocument") or ""))
+        except (volcano.VolcanoError, json.JSONDecodeError, ValueError, TypeError):
+            return None
+        stmts = doc.get("Statement")
+        if not isinstance(stmts, list):
+            return None
+        return any(str(st.get("Effect") or "").lower() == "deny" for st in stmts)
 
     def has_policy(self, user: str, policy_type: str, policy: str) -> bool:
         """全局范围的直接授权（不含经用户组继承的、只在某个项目里生效的）。"""

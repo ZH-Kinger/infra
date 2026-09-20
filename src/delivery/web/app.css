@@ -513,3 +513,9 @@ dl.kv dd{margin:0; display:flex; gap:.5rem; align-items:center; min-width:0}
 /* AK 台账：已停用的那几行压暗（还在，但不用管），「从来没用过」标黄 */
 tr.dim td{opacity:.55}
 .warn-text{color:var(--warn)}
+
+/* 收权：勾选框排成两列，长策略名不截断（截断了就分不清 AliyunOSSFullAccess 和 AliyunOSSImportFullAccess） */
+.revoke-picks { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 4px 12px; margin: 8px 0; }
+.revoke-pick { display: flex; align-items: center; gap: 6px; font-size: 13px; word-break: break-all; }
+.revoke-out { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.revoke-out .good-text { color: var(--good, #1a7f37); }
