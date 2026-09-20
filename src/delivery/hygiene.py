@@ -82,6 +82,12 @@ _SECTIONS = (
         "**确认没用了再删** —— 桶名全局唯一，删掉就可能被外人抢注同名。{filtered_note}",
     ),
     (
+        "stray_dir",
+        "CPFS 上有这个目录，但没有任何数据集指向它",
+        "没有数据集就挂不进 DSW/DLC，也就没人知道它是谁的、还要不要。"
+        "**先问清楚再动** —— 目录是人自己 mkdir 出来的，里面多半有他正在用的东西。{dirs_note}",
+    ),
+    (
         "rotate",
         "AK 建出来超过 {stale_days} 天，该换了",
         "提醒本人换，别代劳：新旧两把并存一段时间才不会断服务。",
@@ -114,6 +120,12 @@ class Report:
     #: 「它报的就是全部」，而那份前缀表是经验值 —— 线上那条 h2r-dlc-<uid>-cn-shanghai
     #: 就是云产品自建却不带这两个前缀的活例子。吞了不说，下次前缀表漏了也没人知道
     stray_filtered: int = 0
+    #: CPFS 上有、却没有任何数据集指向的目录。**面板自己看不到 CPFS**（它挂在计算节点上，
+    #: 也没有列文件的云 API），所以这一类靠喂一份 ls 清单进来对账 —— 清单缺了或过期
+    #: 一律跳过，拿旧清单报「这个目录没登记」会指着早就删掉的目录让人去查
+    stray_dir: list = field(default_factory=list)
+    #: 那份目录清单是什么时候采的（给「过期了」的提示用）
+    dirs_captured_at: str = ""
     #: 在飞书里**查不到**的人。注意：飞书对「不在应用可用范围内」和「已被移出通讯录」
     #: 回的是同一个错误码，所以这批只能是「要人确认」，不能当成已离职
     unknown: list = field(default_factory=list)
@@ -134,6 +146,7 @@ class Report:
             + len(self.unknown)
             + len(self.abandoned)
             + len(self.stray_bucket)
+            + len(self.stray_dir)
         )
 
     def sections(self) -> list:
@@ -142,6 +155,9 @@ class Report:
             "stale_days": self.stale_days,
             "unused_days": self.unused_days,
             # 0 的时候是空串：每次都印「另有 0 个未列出」等于没说
+            "dirs_note": (
+                f"（目录清单采于 {self.dirs_captured_at}）" if self.dirs_captured_at else ""
+            ),
             "filtered_note": (
                 f"（另有 {self.stray_filtered} 个云产品自建的桶未列出，前缀 cri- / oss-pai-）"
                 if self.stray_filtered
@@ -280,6 +296,66 @@ def load_registered_buckets(templates_path=None, allowed_path=None):
     return names, tuple(notes) if names is not None else ()
 
 
+def load_cpfs_dirs(path: Optional[str]):
+    """喂进来的 CPFS 目录清单。`{"captured_at": …, "filesystems": {"<fs-id>": ["目录", …]}}`。
+
+    **面板自己列不了 CPFS**：它挂在计算节点上，而 `nas:` 那些动作管的是文件系统、
+    挂载点、DataFlow —— 没有任何云 API 能列出里面的文件。所以这份清单只能由一台
+    挂了 CPFS 的机器 `ls` 出来喂进来。
+
+    返回 `(清单, 采集时间)`。**文件缺了/坏了返回 (None, "")**，由调用方跳过这一类：
+    拿一份旧清单去报「这个目录没登记」，指的可能是早就删掉的目录，而这一栏的建议是
+    「先问清楚再动」—— 让人去问一个不存在的目录，第二次就没人看这一栏了。
+    """
+    import json
+    from pathlib import Path
+
+    if not path or not Path(path).exists():
+        return None, ""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, ""
+    fs = data.get("filesystems") if isinstance(data, Mapping) else None
+    if not isinstance(fs, Mapping):
+        return None, ""
+    out = {}
+    for fsid, names in fs.items():
+        if isinstance(names, list):
+            out[str(fsid)] = {str(n).strip("/") for n in names if isinstance(n, str) and n.strip()}
+    if not out:
+        return None, ""
+    return out, str(data.get("captured_at") or "")
+
+
+def _stray_dirs(dirs, datasets: Optional[Iterable]) -> list:
+    """CPFS 上有、却没有任何数据集指向的目录。"""
+    from . import provision_tree
+
+    covered: dict = {}
+    for d in datasets or ():
+        uri = str((d.get("uri") if isinstance(d, Mapping) else "") or "")
+        if "cpfs" not in uri.split("://")[0]:
+            continue
+        body = uri.split("://", 1)[-1].split("/", 1)
+        top = body[1].strip("/").split("/")[0] if len(body) > 1 and body[1].strip("/") else ""
+        if top:
+            covered.setdefault(provision_tree.storage_of(uri), set()).add(top)
+    out = []
+    for fsid, names in (dirs or {}).items():
+        for name in sorted(names - covered.get(fsid, set())):
+            out.append(
+                Finding(
+                    kind="stray_dir",
+                    platform="pai",
+                    account="",
+                    subject=f"{fsid}/{name}",
+                    why="没有任何数据集指向它，挂不进 DSW/DLC",
+                )
+            )
+    return out
+
+
 def load_service_names(path: Optional[str]) -> list:
     """`identity/services.json` 里人工登记的服务号清单。没配就是空清单。
 
@@ -390,6 +466,8 @@ def build(
     buckets: Optional[Iterable] = None,
     registered: Optional[set] = None,
     registered_notes: Iterable = (),
+    cpfs_dirs=None,
+    dirs_captured_at: str = "",
     now: Optional[float] = None,
     stale_days: int = STALE_KEY_DAYS,
     unused_days: int = UNUSED_KEY_DAYS,
@@ -409,6 +487,15 @@ def build(
     report.abandoned.extend(_abandoned(datasets))
     if datasets is None:
         report.skipped.append("没有资产快照里的数据集，这次不看「人的号删了东西还在」")
+
+    # CPFS 目录：清单没喂进来就整类跳过。**绝不拿旧清单硬算** —— 见 load_cpfs_dirs
+    if cpfs_dirs is None:
+        report.skipped.append("没有 CPFS 目录清单，这次不看「哪些目录没被登记」")
+    elif datasets is None:
+        report.skipped.append("云上那份登记没采到，没法判断哪些 CPFS 目录没被登记")
+    else:
+        report.dirs_captured_at = str(dirs_captured_at or "")
+        report.stray_dir.extend(_stray_dirs(cpfs_dirs, datasets))
 
     # 桶清单同样来自资产快照，所以也放在权限快照那道门之前。
     # **两个条件都要有才算**：缺桶清单就不知道云上有什么，缺白名单就等于把所有桶都报一遍

@@ -1,0 +1,11 @@
+{
+  "_note": "CPFS 目录清单。面板自己列不了 CPFS（挂在计算节点上，没有列文件的云 API），得在挂了盘的机器上 ls 出来喂进来。过期的清单会让体检指着早删掉的目录，所以 captured_at 必填。",
+  "captured_at": "2026-01-01 00:00",
+  "filesystems": {
+    "00000xxxxxxxxxxxxxxx": [
+      "zhangsan",
+      "lisi",
+      "share"
+    ]
+  }
+}

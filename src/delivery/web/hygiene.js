@@ -11,7 +11,7 @@
 import { api, fmtTime, h, mount } from "./core.js";
 
 // 排在前面的是「出了事找不到人 / 人已经不该有这个号」，比密钥太旧更急
-const TONE = { left: "crit", unknown: "warn", orphan: "warn", abandoned: "crit", stray_bucket: "warn", rotate: "crit", unused: "warn" };
+const TONE = { left: "crit", unknown: "warn", orphan: "warn", abandoned: "crit", stray_bucket: "warn", stray_dir: "warn", rotate: "crit", unused: "warn" };
 
 //: 页面里的按钮也要走 app.js 的 load()，不能自己 fetch 了直接 mount：
 //: load() 管两件这一页特别需要的事 —— ① 请求失败时画错误页（`?status=1` 是几十个
@@ -78,7 +78,7 @@ function page(data) {
   return nodes;
 }
 
-const SHORT = { left: "人已离职", unknown: "查不到人", orphan: "无主账号", abandoned: "号已删除", stray_bucket: "没登记的桶", rotate: "该换密钥", unused: "闲置密钥" };
+const SHORT = { left: "人已离职", unknown: "查不到人", orphan: "无主账号", abandoned: "号已删除", stray_bucket: "没登记的桶", stray_dir: "没登记的目录", rotate: "该换密钥", unused: "闲置密钥" };
 function shortTitle(s) {
   return SHORT[s.kind] || s.title;
 }

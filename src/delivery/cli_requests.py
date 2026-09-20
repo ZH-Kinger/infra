@@ -252,6 +252,12 @@ def add_parsers(commands) -> None:
     # 这两个是「已登记的桶」的两个来源，用来判断哪些桶没登记
     hyg.add_argument("--templates", default="identity/request-templates.json", help="申请模板目录")
     hyg.add_argument("--allowed", default="identity/dataset-buckets.json", help="数据集桶白名单")
+    hyg.add_argument(
+        "--cpfs-dirs",
+        default="identity/cpfs-dirs.json",
+        help="CPFS 目录清单。**面板自己列不了 CPFS**（挂在计算节点上，也没有列文件的云 API），"
+        "得由挂了盘的机器 ls 出来喂进来",
+    )
 
     assets = commands.add_parser("assets", help="云账号资产：我能看到的云账号里有哪些资源")
     asub_assets = assets.add_subparsers(dest="assets_command")
@@ -338,9 +344,16 @@ def add_parsers(commands) -> None:
     cd.add_argument("--workspace", required=True, help="建在哪个 PAI 工作空间")
     cd.add_argument(
         "--owner",
-        required=True,
-        help="属主的 RAM 登录名。**必填** —— PAI 的属主事后改不回来"
-        "（UpdateDataset 改 UserId 静默无效），留空会建成面板自己的",
+        default="",
+        help="属主的 RAM 登录名。个人目录**必填** —— PAI 的属主事后改不回来"
+        "（UpdateDataset 改 UserId 静默无效），留空会建成面板自己的。公共目录用 --shared",
+    )
+    cd.add_argument(
+        "--shared",
+        action="store_true",
+        help="公共目录：属主记主账号、不归任何人，可见性 PUBLIC —— 和现网那批"
+        "（ANT / share / lakefs-server / _lakefs_cache）一个规格。"
+        "**注意 PUBLIC 意味着谁都能删这条登记**（组里那条 pai 策略对 PUBLIC 无条件放行）",
     )
     cd.add_argument("--description", default="", help="这份数据是什么，给后来的人看")
     cd.add_argument("--allowed", default="identity/dataset-buckets.json", help="允许登记的桶白名单")
@@ -709,12 +722,15 @@ def _hygiene(args) -> int:
         print(f"资产快照读不了，本次不看数据集：{exc}", file=sys.stderr)
 
     _reg = _registered_buckets(args)
+    _dirs = hygiene.load_cpfs_dirs(args.cpfs_dirs)
     report = hygiene.build(
         snap,
         roster,
         statuses=statuses,
         datasets=datasets,
         buckets=cloud_buckets,
+        cpfs_dirs=_dirs[0],
+        dirs_captured_at=_dirs[1],
         registered=_reg[0],
         registered_notes=_reg[1],
         services=_load_service_names(args.services),
@@ -793,9 +809,16 @@ def _custom_dataset(args) -> int:
         uri = provision_tree.cpfs_uri(spec.mount, spec.prefix)
         info = provision_tree.cpfs_import(spec.fs_id, spec.region, spec.mount, spec.prefix)
 
+    if not args.shared and not spec.owner_login:
+        print("个人目录必须给 --owner；公共目录用 --shared", file=sys.stderr)
+        return 2
+    if args.shared and spec.owner_login:
+        print("--shared 和 --owner 只能给一个：公共目录不归任何人", file=sys.stderr)
+        return 2
+
     print(f"数据集 {spec.name}")
     print(f"  路径   {uri}")
-    print(f"  属主   {spec.owner_login}")
+    print(f"  属主   {spec.owner_login or '主账号（公共目录，PUBLIC —— 谁都能删这条登记）'}")
     print(f"  空间   {spec.region}/{spec.workspace}")
     if not args.apply:
         print("\n参数没问题。真要建加 --apply。")
@@ -803,7 +826,19 @@ def _custom_dataset(args) -> int:
 
     creds = aliyun.Credentials.from_env(args.profile)
     user_id = ""
-    if spec.owner_login:
+    accessibility = assets_mod.DATASET_ACCESS
+    if args.shared:
+        # 公共目录归**主账号**，不归任何 RAM 用户 —— 现网那批公共数据集就是这个形状
+        # （owner 在台账里显示为空，因为那个 UserId 在 RAM 用户表里查不到）。
+        # 可见性跟着用 PUBLIC，否则控制台里新旧两批会长成两种东西
+        user_id = str(
+            aliyun.call(*aliyun.STS, "GetCallerIdentity", creds=creds).get("AccountId") or ""
+        )
+        accessibility = "PUBLIC"
+        if not user_id:
+            print("取不到主账号 ID，不建", file=sys.stderr)
+            return 2
+    elif spec.owner_login:
         found = {
             str(u.get("UserName") or ""): str(u.get("UserId") or "")
             for u in aliyun.paginate(
@@ -823,8 +858,9 @@ def _custom_dataset(args) -> int:
             uri=uri,
             source=spec.source,
             import_info=info,
+            accessibility=accessibility,
             user_id=user_id,
-            labels=[{"Key": "kind", "Value": "custom"}],
+            labels=[{"Key": "kind", "Value": "shared" if args.shared else "custom"}],
         )
     except DeliveryError as exc:
         print(f"建不了：{str(exc).splitlines()[0]}", file=sys.stderr)

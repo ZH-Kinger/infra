@@ -561,7 +561,17 @@ class StrayBucketTests(unittest.TestCase):
         这一类是「没人管的数据」，归在前半段。"""
         kinds = [k for k, _, _, _ in hygiene.Report().sections()]
         self.assertEqual(
-            kinds, ["left", "unknown", "orphan", "abandoned", "stray_bucket", "rotate", "unused"]
+            kinds,
+            [
+                "left",
+                "unknown",
+                "orphan",
+                "abandoned",
+                "stray_bucket",
+                "stray_dir",
+                "rotate",
+                "unused",
+            ],
         )
 
     def test_the_view_carries_it_to_the_panel(self):
