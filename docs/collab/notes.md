@@ -61,3 +61,16 @@
 未做，记账：
 · MED-3 桶清单只覆盖第一个阿里云 profile。成员账号（executor-policy.aliyun-collector-members.json 里配了 3 个）目前未启用，启用时必须同时把桶清单改成按账号收 {"account": uid, "buckets": [...]} 并给 Finding 填上 account，否则成员账号里的野桶永远不出现、也不留 skipped。
 · LOW-5 cri-/oss-pai- 过滤吞掉的条数不出现在任何地方。线上那条真线索 h2r-dlc-<uid>-cn-shanghai 说明这份前缀表是经验值、会演进，应当让过滤可审计（section note 后追一句「另有 N 个云产品自建桶未列出」）。缺的是展示通道，Report/sections 要加字段，故未顺手做。
+
+[2026-09-20 DEV] 管理员收权（面板上直接撤策略/用户组）落地。新增 src/delivery/revoke.py（纯逻辑，四条拒绝）、provision.attached()（两家云，实时读云上）、POST /api/admin/access/revoke（默认预演，apply 才动且理由必填）、人员页「收权」一节、review.log 留痕。
+tester 报了 1 个阻塞 bug + 3 个缺口 + 2 个 nit，全部已修：
+· 阻塞：server.py 用了 session.union_id，_WebSession 只有 .user —— apply 每次必崩，而且是**云上已经撤完之后**才崩，管理员会以为没撤成再点一次，且 review.log 一行都没有。dry-run 完全看不出来。
+· 缺口①：火山 attached() 没按 PolicyScope 过滤。项目范围的策略 DetachUserPolicy 撤不掉，而 detach_policy 撤前先 has_policy（只认 Global）→ 查不到就 return → 面板记 done、界面说「已撤掉」、云上一动没动。
+· 缺口②：granted_by_panel 的到期判据是 expires <= 0（「有没有填到期时间」），不是 expires <= now（「过没过期」），真实数据里恒假 —— 回收失败留下的残留被当成「面板发的」永远撤不掉。
+· 缺口③：_all_tickets() 读失败返回 []，等于「面板一条都没发过」= 什么都不拒。一个坏掉的 tickets.json 就能让台账保护静默消失。改成返回 None、调用方 503 拒绝整次。
+· nit：两家云 attached() 对「返回缺键/null」都改成抛，不再静默当空（静默会让页面显示「这个人什么都没挂」，而他可能挂着超管）；502 分支补脱敏。
+未做，记账：
+· 组带来的管理员权限不参与 last_admin 判断（_admin_holders 只看 user.policies）。火山 wuji-opration 组就是发超管的，那个组的成员算不进 holders。
+· 前端 revokeBox 没有测试：app.js 零 export 且 import 即 boot()，要测得先把它挪进可导入位置。
+
+[2026-09-20 DEV] 其他：AK 台账加「自己去控制台换」引导（platforms.key_console，面板不代办 —— 代办要经手 secret，与 sealed 的前提冲突）；「没采到密钥」提示原来写死阿里云动作名 ram:ListAccessKeys，而报出来的可能是火山账号，已按平台说。火山采集身份缺 iam:ListAccessKeys（实测 AccessDenied），45 个火山用户的 AK 台账全空 —— 体检的「AK 该换/没人用」两类对火山是瞎的，等加权限。

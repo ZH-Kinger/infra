@@ -1,0 +1,63 @@
+{
+  "_what": "每个人一条：开发桶里**自己那个目录**可读可写可删，其余一律只读。策略名 wuji-algo-<登录名>。",
+
+  "_scope": [
+    "只管『用自己的 AK 操作 OSS』这一条路（ossutil / SDK / 脚本）。",
+    "**管不到 DSW/DLC 里跑的代码** —— 那里用的是 PAI 服务角色",
+    "（AliyunPAIDSWDefaultRolePolicy 的 oss:DeleteObject 是 Resource:* 且无 Condition），",
+    "和这个人身上挂什么策略无关。而人日常干活就在 DSW 里。",
+    "所以这条策略的价值是：挡住『从笔记本跑个脚本，手一滑删到别人桶』。别当成隔离做完了。"
+  ],
+
+  "_why_three_statements": [
+    "① 对象级的增删改查要写在对象 ARN 上（<桶>/<组>/<人>/*）。",
+    "② ListObjects 是**桶级**请求，ARN 只能是桶本身，范围靠 oss:Prefix 条件收。",
+    "   前缀要给三个：自己目录下的全部、自己目录这一层、以及组这一层 ——",
+    "   少了后两个，控制台里从桶根一层层点进去会在半路报错，人会以为没权限。",
+    "③ GetBucketInfo 这类桶信息动作**必须单独成一条、不带 Condition**：",
+    "   桶级请求本来就不带 prefix，混进带 oss:Prefix 的语句里会被条件卡死 ——",
+    "   线上『拿了凭证访问不了桶』就是这个坑。"
+  ],
+
+  "_what_is_not_here": [
+    "**其余桶的只读不在这条策略里**，由组上的 AliyunOSSReadOnlyAccess 提供。",
+    "两件事分开写：这条只负责『自己目录的写和删』，改它不会动到别人对公共数据的读。"
+  ],
+
+  "_placeholders": {
+    "<桶>": "wuji-algo-dev-hz 或 wuji-algo-dev-sing（两个桶各一条语句，或各生成一条策略）",
+    "<组>": "顶层目录名，如 algo / imitation / pretrain",
+    "<人>": "RAM 登录名"
+  },
+
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "oss:GetObject",
+        "oss:PutObject",
+        "oss:DeleteObject",
+        "oss:AbortMultipartUpload",
+        "oss:ListParts",
+        "oss:RestoreObject"
+      ],
+      "Resource": ["acs:oss:*:*:<桶>/<组>/<人>/*"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["oss:ListObjects", "oss:GetBucketMultipartUploads"],
+      "Resource": ["acs:oss:*:*:<桶>"],
+      "Condition": {
+        "StringLike": {
+          "oss:Prefix": ["<组>/<人>/*", "<组>/<人>/", "<组>/", ""]
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["oss:GetBucketInfo", "oss:GetBucketStat", "oss:GetBucketAcl"],
+      "Resource": ["acs:oss:*:*:<桶>"]
+    }
+  ]
+}

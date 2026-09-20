@@ -1,0 +1,51 @@
+{
+  "_what": "禁止删除 PAI 资源。挂给**直挂 AliyunPAIFullAccess 的那几个号**，策略名建议 wuji-deny-pai-delete。",
+
+  "_who": [
+    "现网持有 AliyunPAIFullAccess（即 paidataset:* / paidsw:* / paiworkspace:* 全权）的只有四个：",
+    "  heguanqi    贺贯齐    —— 另有 AdministratorAccess，Deny 一样压得住（Deny 优先于 Allow）",
+    "  wangyizhou  王翌舟",
+    "  zhangwentao 张文韬",
+    "  wuji-ci     CI公共用户 —— **挂之前先确认流水线里没有删数据集/删实例的步骤**，否则 CI 会红",
+    "wuji_Algorithm 组里的另外 48 人不在此列：组里一条 paidataset: 都没有，他们用 PAI 走的是",
+    "工作空间角色（PAI.AlgoDeveloper 等）那条代理鉴权路径，RAM 层面本来就删不了。"
+  ],
+
+  "_why_no_condition": [
+    "**不带 Condition，Resource 写 \"*\"**。PAI 文档说工作空间代理鉴权时会注入",
+    "pai:Accessibility / pai:EntityAccessType，但 RAM 授权信息表里这些动作的「条件关键字」是「无」。",
+    "带条件的 Deny 一旦条件键没被传入就不命中 —— 那正是「以为禁了其实没禁」。"
+  ],
+
+  "_why_account_scope": [
+    "**必须按整个云账号授权，不能挂在资源组上**：账号级 Allow 一旦命中就结束判定，",
+    "资源组级的 Deny 根本不会被评估。"
+  ],
+
+  "_why_wildcard": [
+    "用 Delete* 而不是逐条列动作：官方的「授权信息表」和「角色权限附录」互有缺漏",
+    "（PaiDataset:DeleteDatasetJob、paidesigner:DeleteTemplate、paiflow:DeletePipeline* 只在附录里），",
+    "手工枚举必漏一两个，而漏掉的那个正好是别人会用的那个。"
+  ],
+
+  "_optional": {
+    "_note": "下面这些没放进 Statement，按需自己加。各自的副作用先看清楚。",
+    "paidsw:Delete*": "会连带禁掉「取消闲置关机策略」之类的操作，DSW 实例也删不掉了（要靠别人代删）",
+    "paidlc:Delete*": "DLC 任务删不掉，失败任务会越积越多",
+    "paimodel:Delete*": "模型删不掉",
+    "paiexperiment:Delete*": "实验删不掉",
+    "paicodesource:Delete*": "代码源配置删不掉",
+    "paiworkspace:Delete*": "**慎用**：会禁掉移除工作空间成员，管理员从此改不动成员"
+  },
+
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Deny",
+      "Action": [
+        "paidataset:Delete*"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
