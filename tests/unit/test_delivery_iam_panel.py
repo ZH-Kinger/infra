@@ -23,6 +23,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from delivery import cli, iam_sync
+from delivery.errors import DeliveryError
 from delivery.feishu import FeishuUser
 from delivery.registry import PlatformRegistry
 from delivery.server import COOKIE_NAME, Backend, Store, _WebSession, make_handler
@@ -127,6 +128,9 @@ class PanelTests(unittest.TestCase):
         (self.id_dir / "people.json").write_text(
             json.dumps(data, ensure_ascii=False), encoding="utf-8"
         )
+
+    def iam_paths(self):
+        return self.backend.iam_paths()
 
     def live(self):
         return _Live(self.backend)
@@ -969,6 +973,231 @@ class PanelTests(unittest.TestCase):
             self.fail("exclusive() 退出后没放锁")
         finally:
             os.close(fd)
+
+    def test_reconcile_is_dispatched_and_a_missing_token_is_a_409_not_a_500(self):
+        """对账按钮那条路。
+
+        没配 token 时必须回「去配 token」这类可读的 409，**不能是 500** ——
+        500 只说「服务端出错了」，管理员会去翻日志找一个其实自己就能解决的问题。
+        """
+        import os
+        from unittest import mock
+
+        from delivery import iam_api
+
+        with self.live() as live:
+            sid = self.login(live)
+            with mock.patch.dict(os.environ, {}, clear=True):
+                status, data = self.api(live, sid, {"op": "reconcile"}, method="POST")
+            self.assertEqual(status, 409, f"应是可读的冲突：{data}")
+            self.assertIn(iam_api.ENV_TOKEN, data.get("error", ""))
+
+    def test_reclaim_never_deletes_when_the_list_could_not_be_read(self):
+        """读不到清单就什么都别做。**基于残缺的清单去删，比不删危险得多。**"""
+        import os
+        from unittest import mock
+
+        from delivery import iam_api, iam_sync
+
+        deleted = []
+
+        def broken(method, url, headers, payload):
+            if method == "DELETE":
+                deleted.append(url)
+                return 200, {}
+            return 502, {"error": "upstream_error", "detail": "busy"}
+
+        env = {iam_api.ENV_TOKEN: "t", iam_api.ENV_BASE: "https://iam.example.com/x"}
+        with self.live() as live:
+            self.login(live)
+            paths = self.iam_paths()
+            with (
+                mock.patch.dict(os.environ, env, clear=True),
+                self.assertRaises(DeliveryError) as caught,
+            ):
+                iam_sync.reclaim_iam(paths, apply=True, transport=broken)
+        self.assertEqual(deleted, [], "列表读不到却还是发了删除")
+        self.assertIn("不动手", str(caught.exception))
+
+    def test_a_dry_run_reclaim_deletes_nothing(self):
+        import os
+        from unittest import mock
+
+        from delivery import iam_api, iam_sync
+
+        sent = []
+
+        def send(method, url, headers, payload):
+            sent.append(method)
+            if method == "GET":
+                return 200, {
+                    "users": [
+                        {
+                            "union_id": "on_gone",
+                            "username": "A9",
+                            "name": "走了",
+                            "is_active": False,
+                            "value": "gone@x",
+                        }
+                    ]
+                }
+            return 200, {}
+
+        env = {iam_api.ENV_TOKEN: "t", iam_api.ENV_BASE: "https://iam.example.com/x"}
+        with self.live() as live:
+            self.login(live)
+            paths = self.iam_paths()
+            with mock.patch.dict(os.environ, env, clear=True):
+                report = iam_sync.reclaim_iam(paths, apply=False, transport=send)
+        self.assertNotIn("DELETE", sent)
+        self.assertTrue(all(r.get("dry_run") for r in report["done"]))
+
+    def test_an_empty_roster_can_never_mean_everyone_left(self):
+        """`reclaim_plan` 判「可以删」的依据是「名册里没有这个人」。
+
+        名册一旦读残（刷新挂了、文件被截断），这条对**每个人**都成立 ——
+        于是所有在 IAM 里标记离职的人会被一起删掉。这是整个机制最危险的失败模式。
+        """
+        import os
+        from unittest import mock
+
+        from delivery import iam_api, iam_sync
+
+        self.write_people({"schema": "wuji-people@1", "people": []})
+        env = {iam_api.ENV_TOKEN: "t", iam_api.ENV_BASE: "https://iam.example.com/x"}
+        with self.live() as live:
+            self.login(live)
+            paths = self.iam_paths()
+            with (
+                mock.patch.dict(os.environ, env, clear=True),
+                self.assertRaises(DeliveryError) as caught,
+            ):
+                iam_sync.reclaim_iam(paths, apply=True, transport=lambda *a: (200, {}))
+        self.assertIn("union_id", str(caught.exception))
+
+    def test_too_many_at_once_is_refused_before_anything_is_deleted(self):
+        """平时一轮就一两个。十个以上必然是上游出了事 —— 而且必须**删之前**拦住。"""
+        import os
+        from unittest import mock
+
+        from delivery import iam_api, iam_sync
+
+        deleted = []
+        many = [
+            {
+                "union_id": f"on_gone{i}",
+                "username": f"A{i}",
+                "name": "走了",
+                "is_active": False,
+                "value": f"g{i}@x",
+            }
+            for i in range(iam_sync.RECLAIM_MAX + 1)
+        ]
+
+        def send(method, url, headers, payload):
+            if method == "DELETE":
+                deleted.append(url)
+                return 200, {}
+            return 200, {"users": many}
+
+        env = {iam_api.ENV_TOKEN: "t", iam_api.ENV_BASE: "https://iam.example.com/x"}
+        with self.live() as live:
+            self.login(live)
+            paths = self.iam_paths()
+            with mock.patch.dict(os.environ, env, clear=True), self.assertRaises(DeliveryError):
+                iam_sync.reclaim_iam(paths, apply=True, transport=send)
+        self.assertEqual(deleted, [], "超量闸门在删过之后才触发，等于没有")
+
+    def test_confirming_a_departure_never_trusts_the_request(self):
+        """按钮说「这个人离职了」，服务端**必须自己再读一次 IAM 核对**。
+
+        不核的话，一个构造出来的请求就能删掉任何一个**在职**的人的登录名 ——
+        而他要到下次登录才发现。
+        """
+        import os
+        from unittest import mock
+
+        from delivery import iam_api, iam_sync
+
+        deleted = []
+
+        def send(method, url, headers, payload):
+            if method == "DELETE":
+                deleted.append(url)
+                return 200, {}
+            # IAM 说这个人**在职**
+            return 200, {
+                "users": [
+                    {
+                        "union_id": "on_P",
+                        "username": "A1",
+                        "name": "彼得",
+                        "is_active": True,
+                        "value": "peter@x",
+                    }
+                ]
+            }
+
+        env = {iam_api.ENV_TOKEN: "t", iam_api.ENV_BASE: "https://iam.example.com/x"}
+        with self.live() as live:
+            self.login(live)
+            with (
+                mock.patch.dict(os.environ, env, clear=True),
+                self.assertRaises(DeliveryError) as caught,
+            ):
+                iam_sync.confirm_reclaim(
+                    self.iam_paths(), "on_P", "aliyun-main", actor="admin", transport=send
+                )
+        self.assertEqual(deleted, [], "IAM 说在职却还是删了")
+        self.assertIn("在职", str(caught.exception))
+
+    def test_confirming_a_real_departure_deletes_and_logs_who_did_it(self):
+        """自动回收记的是 `auto:`，人点的记管理员 —— 两者必须分得出来。"""
+        import os
+        from unittest import mock
+
+        from delivery import iam_api, iam_sync
+
+        logged = []
+
+        def send(method, url, headers, payload):
+            if method == "DELETE":
+                return 200, {"previous": "gone@x"}
+            return 200, {
+                "users": [
+                    {
+                        "union_id": "on_G",
+                        "username": "A9",
+                        "name": "走了",
+                        "is_active": False,
+                        "value": "gone@x",
+                    }
+                ]
+            }
+
+        env = {iam_api.ENV_TOKEN: "t", iam_api.ENV_BASE: "https://iam.example.com/x"}
+        with self.live() as live:
+            self.login(live)
+            with mock.patch.dict(os.environ, env, clear=True):
+                row = iam_sync.confirm_reclaim(
+                    self.iam_paths(),
+                    "on_G",
+                    "aliyun-main",
+                    actor="admin",
+                    transport=send,
+                    log=lambda rows: logged.extend(rows),
+                )
+        self.assertEqual(row["previous"], "gone@x")
+        self.assertEqual(logged[0]["why"], "管理员确认离职")
+
+    def test_an_unknown_op_still_names_every_valid_one(self):
+        """加了新 op 之后错误文案也得跟着变，否则它会指着一份过时的清单。"""
+        with self.live() as live:
+            sid = self.login(live)
+            status, data = self.api(live, sid, {"op": "nope"}, method="POST")
+            self.assertEqual(status, 400)
+            for op in ("export", "confirm", "discard", "reconcile"):
+                self.assertIn(op, data.get("error", ""))
 
 
 class ServeIamOutTests(unittest.TestCase):

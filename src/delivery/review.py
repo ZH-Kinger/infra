@@ -461,6 +461,72 @@ def log_revoke(paths, *, actor, platform, account, user, done, failed, reason) -
         print(f"[revoke] 留痕写不进去：{type(exc).__name__}: {exc}", file=sys.stderr)
 
 
+def _safe_append(path, fields) -> None:
+    """记日志失败不该让**已经做完的事**变成失败。
+
+    回收那条路上，DELETE 已经打出去、属性已经没了；这时候日志写不进去就回 500 的话，
+    管理员会以为没删、再点一次，而第二次会报「这个人本来就没有登录名」。
+    所以这里吞掉异常、只往 stderr 打一行 —— 和 `log_revoke` 同一套。
+    """
+    try:
+        _append_log(path, fields)
+    except OSError as exc:
+        print(f"[review] 写日志失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+
+
+def log_event(paths: ReviewPaths, fields) -> None:
+    """往 review.log 里记一行任意事件。给「提醒了谁」这类没有专门函数的事用。
+
+    **和权限变更、离职回收同一份日志。** 分成几份的话，「这个人身上发生过什么」
+    就得跨文件拼 —— 而那正是出事时最要紧的那个问题。
+    """
+    paths.log.parent.mkdir(parents=True, exist_ok=True)
+    _safe_append(paths.log, dict(fields or {}))
+
+
+def log_iam_reclaim(paths: ReviewPaths, rows, *, actor: str, held=()) -> None:
+    """把离职回收记进 review.log。**删完就记，不是删之前**。
+
+    为什么非要落一行
+    ────────────────
+    这件事是定时任务自动做的，没有申请单、没有审批、没有人点过任何按钮。
+    不记的话它只存在于 journal 里 —— 而 journal 会滚掉，也没人会去翻。
+    半年后有人问「我的云登录名怎么没了」，这一行是唯一能回答的东西。
+
+    `previous` 是删之前的值，**回滚只能靠它**：接口删完就再也问不到旧值了。
+    """
+    paths.log.parent.mkdir(parents=True, exist_ok=True)
+    for r in rows:
+        _safe_append(
+            paths.log,
+            {
+                "op": "iam_reclaim",
+                "actor": actor,
+                "app": r.get("app", ""),
+                "union_id": r.get("union_id", ""),
+                "username": r.get("username", ""),
+                "name": r.get("name", ""),
+                "previous": r.get("previous", "") or r.get("value", ""),
+                "why": r.get("why", ""),
+            },
+        )
+    for r in held:
+        # 扣住没删的也记一行
+        _safe_append(
+            paths.log,
+            {
+                "op": "iam_reclaim_held",
+                "actor": actor,
+                "app": r.get("app", ""),
+                "union_id": r.get("union_id", ""),
+                "username": r.get("username", ""),
+                "name": r.get("name", ""),
+                "value": r.get("value", ""),
+                "why": r.get("why", ""),
+            },
+        )
+
+
 def add_link(paths: ReviewPaths, email: str, account: str, *, actor: str) -> None:
     """开账号申请执行成功后：把新账号人工对应给申请人。名册在下一次刷新时生效。
 

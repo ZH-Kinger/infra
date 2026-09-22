@@ -27,8 +27,10 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 
+from . import catalog as catalog_mod
 from .errors import DeliveryError
 from .session import load_session
 
@@ -220,6 +222,61 @@ def add_parsers(commands) -> None:
         help="权限策略目录（按策略申请的单子开通前核对）",
     )
     sweep.add_argument("--policy-rules", default="identity/policy-rules.json")
+    sweep.add_argument(
+        "--iam-attributes",
+        default="identity/iam-attributes.json",
+        help="建号后把登录名写进公司 IAM 的哪个应用。**不配的话人建出来登不进去**",
+    )
+
+    # 搬运单独一条命令、单独一个定时器（5 分钟）。不并进 sweep 的理由：
+    # sweep 一分钟一轮干的都是轻活，而一趟迁移动辄几小时 —— 一分钟查一次进度
+    # 不会让它更快，只是把云 API 调用量乘以 5
+    mv = rsub.add_parser("moves", help="定时任务：提交审批通过的数据迁移、推进在途任务")
+    mv.add_argument("--tickets", default="identity/tickets.json")
+    mv.add_argument(
+        "--sources", default="", help="第三方数据源登记表（默认 identity/transfer-sources.json）"
+    )
+    mv.add_argument("--dry-run", action="store_true", help="只列出该动哪些单子，不提交也不推进")
+    mv.add_argument("--admins", default="identity/admins.json", help="搬运卡住时私聊谁")
+    mv.add_argument(
+        "--retry",
+        metavar="申请单号",
+        default="",
+        help="把失败的搬运放回队列重新提交（失败卡上写着「决定重试还是关掉」，这就是重试）",
+    )
+
+    rg = rsub.add_parser("regions", help="地域登记表：列出来，或者真去云上探一遍")
+    rg.add_argument("--templates", default="identity/request-templates.json")
+    rg.add_argument(
+        "--check",
+        action="store_true",
+        help="真去云上探：工作空间列不列得到成员、开发桶在不在。"
+        "**格式错在加载时就报了，这条查的是「配的东西存不存在」**",
+    )
+
+    bf = rsub.add_parser(
+        "backfill", help="给已有账号补上某个地域的工作空间成员 + 个人目录 + 数据集"
+    )
+    bf.add_argument("--templates", default="identity/request-templates.json")
+    bf.add_argument("--tickets", default="identity/tickets.json")
+    bf.add_argument("--region", required=True, metavar="KEY", help="地域登记表里的 key，例如 hz")
+    bf.add_argument(
+        "--who",
+        default="",
+        help="逗号分隔的登录名。不给就是「面板建过的所有账号」—— "
+        "那正是加了新地域之后需要补的那批人",
+    )
+    bf.add_argument("--apply", action="store_true", help="真做（默认只列出会做什么）")
+
+    bk = rsub.add_parser("buckets", help="定时任务：从两朵云重新生成「数据迁移」能选哪些桶")
+    bk.add_argument("--templates", default="identity/request-templates.json")
+    bk.add_argument("--apply", action="store_true", help="真写模板（默认只看会变成什么样）")
+    mv.add_argument(
+        "--confirm",
+        metavar="申请单号",
+        default="",
+        help="放行一张因为体积太大停在「等确认」的搬运单（看清楚体积再确认）",
+    )
 
     policies = commands.add_parser("policies", help="权限策略目录（服务端采集）")
     psub = policies.add_subparsers(dest="policies_command", required=True)
@@ -377,6 +434,14 @@ def dispatch(args: argparse.Namespace):
     if args.command == "request":
         return _request(args)
     if args.command == "requests":
+        if getattr(args, "requests_command", "") == "moves":
+            return _moves(args)
+        if getattr(args, "requests_command", "") == "buckets":
+            return _buckets(args)
+        if getattr(args, "requests_command", "") == "regions":
+            return _regions(args)
+        if getattr(args, "requests_command", "") == "backfill":
+            return _backfill(args)
         return _sweep(args)
     if args.command == "approval":
         return _widgets(args)
@@ -462,7 +527,201 @@ def _request(args) -> int:
     raise DeliveryError(f"未知子命令 {cmd}")
 
 
+def _buckets(args) -> int:
+    """从云上重新生成迁移可选的桶清单。
+
+    **手工维护的清单第二天就是错的**：有人删了桶申请页还让人选，提交后在搬运那步才炸；
+    有人建了桶申请页里没有，他只能来问一句为什么。两种都不会有人报 bug。
+    """
+    from . import transfer_catalog as tc
+    from .cli import _require_identity_dir
+    from .clouds import aliyun
+
+    _require_identity_dir(Path(args.templates).resolve())
+    # 两朵云都用采集身份（panel-collector），不是开通身份：
+    # 列桶是盘点，盘点本来就是采集的活；让开通身份也能枚举整个账号，
+    # 等于白白把它的爆炸半径放大一圈。
+    rows, dropped, problems, counts = tc.live(
+        aliyun_creds=aliyun.Credentials.from_env(),
+        volcano_creds=tc.tos_creds(),
+    )
+    for line in problems:
+        print(f"  ✗ {line}", file=sys.stderr)
+    if problems:
+        # **一朵云没拉到就整个不写。**
+        # 写的话，那朵云的桶会从白名单里被悄悄删光 —— 表现是申请页上突然少了一半选项，
+        # 提交已有的路径被拒「不在可申请的范围里」，而日志里只有一行列桶失败。
+        # 清单宁可旧一天，不能少一半。
+        print("这次不动模板（有一朵云没拉到，写进去会把它的桶从白名单里删光）", file=sys.stderr)
+        return 1
+    data = tc.load(args.templates)
+    try:
+        added, removed = tc.apply_to(data, rows)
+    except (KeyError, ValueError) as exc:
+        print(f"  ✗ {exc}", file=sys.stderr)
+        return 1
+    print(tc.summary(added, removed, dropped, len(rows), counts))
+    for name, why in dropped:
+        print(f"    排除 {name}：{why}")
+    if not args.apply:
+        print("（只是看看，没写。要写加 --apply）")
+        return 0
+    if not (added or removed):
+        # 没变化就别写。跑得勤（分钟级）的时候，每轮都重写会让这个文件的 mtime
+        # 永远是「刚刚」—— 而那正是排查「清单什么时候变的」唯一能用的线索
+        return 0
+    tc.save(args.templates, data)
+    print(f"已写入 {args.templates}")
+    return 0
+
+
+def pending_moves(store) -> list:
+    from . import mover
+
+    return mover.pending(store)
+
+
+def _move_retry(store, want: str) -> int:
+    """把一张失败的搬运单放回队列。
+
+    **失败卡上写的是「决定重试还是关掉这张单」，所以重试必须真的存在。**
+    在这之前 `moves.retry()` 一个生产调用方都没有 —— 人照着卡片去找重试，
+    找不到，只能关单重提一张新的、重走一遍飞书审批。
+    """
+    from . import moves as moves_mod
+    from .tickets import FULFILLING
+
+    row = next((x for x in pending_moves(store) if x.get("id") == want), None)
+    if row is None:
+        print(f"没有这张搬运单：{want}")
+        return 1
+    payload = row.get("payload") or {}
+    print(f"{want}  {payload.get('source', '')} → {payload.get('dest', '')}")
+    print(f"    上次失败：{row.get('move_error') or '（没记下原因）'}")
+    try:
+        fields = moves_mod.retry(row)
+    except moves_mod.MoveError as exc:
+        print(f"  ✗ {exc}", file=sys.stderr)
+        return 1
+    store.update(
+        want,
+        actor="admin-cli",
+        expect=[FULFILLING],
+        event="move_retried",
+        note="管理员重试搬运",
+        fields=fields,
+    )
+    print(f"已放回队列（第 {fields['move_attempt']} 次），下一轮定时任务会重新提交")
+    return 0
+
+
+def _moves(args) -> int:
+    """推进数据迁移。**只碰迁移单**，别的单子一个都不动。
+
+    退出码：0 = 这一轮没出问题；1 = 有单子出错（错误已经写进单子，也打在日志里）。
+    """
+    from . import mover
+    from .cli import _require_identity_dir
+    from .tickets import TicketStore
+
+    _require_identity_dir(Path(args.tickets).resolve())
+    config = mover.Config.from_env()
+    if getattr(args, "sources", ""):
+        config = replace(config, sources_path=args.sources)
+    store = TicketStore(args.tickets)
+
+    if getattr(args, "retry", "") and getattr(args, "dry_run", False):
+        print("--dry-run 和 --retry 不能一起给：前者说别改，后者要改", file=sys.stderr)
+        return 2
+    if getattr(args, "retry", "") and getattr(args, "confirm", ""):
+        print("--retry 和 --confirm 不能一起给", file=sys.stderr)
+        return 2
+    if getattr(args, "retry", ""):
+        return _move_retry(store, args.retry)
+    if getattr(args, "confirm", "") and getattr(args, "dry_run", False):
+        # **两个都给时不能照放行。** `--dry-run` 的全部含义就是「这次别改任何东西」，
+        # 而放行的那一条会真写盘 —— 用 dry-run 来确认自己没写错单号的人，
+        # 恰好会被这条坑到：他以为在预览，实际已经把一个几十 TB 的搬运放行了
+        print("--dry-run 和 --confirm 不能一起给：前者说别改，后者要改", file=sys.stderr)
+        return 2
+    if getattr(args, "confirm", ""):
+        from . import mover as mover_mod
+        from .tickets import FULFILLING
+
+        want = args.confirm
+        row = next((x for x in mover.pending(store) if x.get("id") == want), None)
+        if row is None:
+            print(f"没有待搬运的申请单 {want}")
+            return 1
+        if str(row.get("move_stage") or "") != mover_mod.STAGE_REVIEW:
+            print(f"{want} 现在是「{row.get('move_stage') or '还没开始'}」，不需要确认")
+            return 1
+        payload = row.get("payload") or {}
+        print(f"{want}  {payload.get('source', '')} → {payload.get('dest', '')}")
+        print(f"    {row.get('move_error') or ''}")
+        store.update(
+            want,
+            actor="admin-cli",
+            expect=[FULFILLING],
+            event="move_reviewed",
+            note="管理员确认体积，放行搬运",
+            fields={"move_reviewed": True, "move_stage": "", "move_error": ""},
+        )
+        print("已放行，下一轮定时任务会提交")
+        return 0
+
+    if getattr(args, "dry_run", False):
+        rows = mover.pending(store)
+        if not rows:
+            print("没有待搬运的申请单")
+            return 0
+        for ticket in rows:
+            stage = str(ticket.get("move_stage") or "（还没开始）")
+            payload = ticket.get("payload") or {}
+            print(
+                f"{ticket['id']}  {stage}  {payload.get('source', '')} → {payload.get('dest', '')}"
+            )
+            if ticket.get("move_error"):
+                print(f"    {ticket['move_error']}")
+        return 0
+
+    problems = mover.sweep(store, config=config, announce=_move_announce(args))
+    return 1 if problems else 0
+
+
+def _move_announce(args):
+    """搬运卡到人这一步时私聊管理员。配不齐就返回 None（一行日志说清楚，不静默）。
+
+    **发私聊不发群**：这是要人去做的事，发群等于发给没有人。
+    收件人用 union_id —— 名册里只有它。
+    """
+    from . import notify as notify_mod
+    from . import roles as roles_mod
+
+    app_id = os.environ.get("DELIVERY_FEISHU_APP_ID", "")
+    secret = os.environ.get("DELIVERY_FEISHU_APP_SECRET", "")
+    base = os.environ.get("DELIVERY_BASE_URL", "")
+    if not (app_id and secret):
+        print("（没配飞书应用凭证，搬运卡住时不会有飞书提醒）")
+        return None
+    admins = roles_mod.load_admins(getattr(args, "admins", None)).union_ids
+    if not admins:
+        print("（管理员名单里没有 union_id，搬运卡住时不会有飞书提醒）")
+        return None
+    from .server import _tenant_token_cache
+
+    notifier = notify_mod.FeishuNotifier(_tenant_token_cache(app_id, secret), base)
+
+    def announce(stage: str, ticket: dict) -> None:
+        card = notify_mod.move_card(ticket, stage, base_url=base)
+        for line in notify_mod.notify_admins(notifier, admins, card):
+            print(f"  ✗ {line}", file=sys.stderr)
+
+    return announce
+
+
 def _sweep(args) -> int:
+    from . import iam_sync
     from . import notify as notify_mod
     from . import people as people_mod
     from . import policies as policies_mod
@@ -518,6 +777,10 @@ def _sweep(args) -> int:
         # sweep 是无人值守的那条路，这里回落没人会看见。
         issuer=lambda platform, account: executor_from_env(platform, account, issuer=True),
         add_manual_link=link,
+        # **必须传。** 不传的话建号后「把登录名写进公司 IAM」这一步会被静默跳过，
+        # 而 SSO 正是靠那个属性把云账号和企业身份对上 —— 号建出来了，人登不进去，
+        # 单子还是绿的。线上第一个账号就是这么出的事
+        write_iam=iam_sync.writer(getattr(args, "iam_attributes", "")),
         policy_snapshot=lambda: policies_mod.load(policies_path),
         policy_rules=lambda: policies_mod.load_rules(rules_path),
         notify=notify,
@@ -1345,3 +1608,178 @@ def _widgets(args) -> int:
             file=sys.stderr,
         )
     return 0
+
+
+def _regions(args) -> int:
+    """地域登记表：列出来，或者真去云上探一遍。
+
+    **格式上能查的在加载时就查完了**（地域写法、挂载点是不是域名、桶名合不合法）——
+    那些错误在服务起来的那一刻就会报。这条命令查的是另一类：**配的东西存不存在**。
+    工作空间 ID 写错、桶还没建，格式上都挑不出毛病，只有真去问一次云才知道。
+
+    不查的话这两种错要等到有人建号那一刻才暴露，而那时它表现成一句
+    「他还进不去 DSW/DLC」—— 指不到是登记表写错了。
+    """
+    from . import workspaces as ws_mod
+    from .cli import _require_identity_dir
+
+    path = ws_mod.beside(args.templates)
+    _require_identity_dir(Path(path).resolve())
+    reg = ws_mod.load(path)
+    if not reg:
+        print(f"{path} 里一个地域都没有")
+        return 0
+    cat = catalog_mod.load(args.templates, reg)
+    used = {}
+    for tpl in cat.templates:
+        for ws in tpl.workspaces:
+            used.setdefault(ws["key"], []).append(tpl.id)
+
+    rc = 0
+    for key in reg.all_keys():
+        ws = reg.get(key)
+        who = "、".join(used.get(key, [])) or "**没有任何模板用它**"
+        print(f"{key}（{ws['label']}）工作空间 {ws['id']} · {ws['region']}")
+        print(f"  角色   {'、'.join(ws['roles'])}")
+        print(f"  CPFS   {ws.get('mount') or '—'}")
+        prefix = ws.get("bucket_prefix") or ""
+        print(f"  OSS    {ws.get('bucket') or '—'}{'/' + prefix if prefix else ''}")
+        print(f"  用它的 {who}")
+        if args.check:
+            rc |= _probe_region(ws, _account_for(cat))
+    return rc
+
+
+def _account_for(cat) -> str:
+    """工作空间属于哪个云账号 —— **由模板说了算，登记表里没有这一项**。
+
+    登记表只说「这个地域长什么样」；「用谁的身份去操作它」是模板的事
+    （同一个地域理论上可以被两个账号的模板各自引用）。
+    """
+    for tpl in cat.templates:
+        if tpl.workspaces and tpl.platform == "aliyun":
+            return tpl.account
+    return ""
+
+
+def _probe_region(ws: dict, account: str) -> int:
+    """真去云上探一条：工作空间列不列得到成员、开发桶在不在。"""
+    from .clouds import aliyun, oss
+    from .provision import executor_from_env
+
+    bad = 0
+    try:
+        ex = executor_from_env("aliyun", account)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ✗ 拿不到执行身份：{str(exc)[:160]}")
+        return 1
+    try:
+        aliyun.call_roa(
+            f"aiworkspace.{ws['region']}.aliyuncs.com",
+            "2021-02-04",
+            f"/api/v1/workspaces/{ws['id']}/members",
+            {"PageSize": "1"},
+            method="GET",
+            creds=ex._creds,
+            transport=ex._transport,
+        )
+        print("  ✓ 工作空间在，列得到成员")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ✗ 工作空间 {ws['id']} 探不到：{str(exc)[:160]}")
+        bad = 1
+    if ws.get("bucket"):
+        try:
+            oss.call(
+                "GET",
+                ws["bucket"],
+                "",
+                region=ws["bucket_region"],
+                query={"max-keys": "1"},
+                creds=ex._creds,
+                transport=ex._transport,
+            )
+            print(f"  ✓ 开发桶 {ws['bucket']} 在")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ✗ 开发桶 {ws['bucket']}（{ws['bucket_region']}）探不到：{str(exc)[:160]}")
+            bad = 1
+    return bad
+
+
+def _backfill(args) -> int:
+    """给已有账号补上某个地域的工作空间成员 + 个人目录 + 数据集。
+
+    **为什么必须有这条命令。** 加一个地域之后，新建的号会自动进去，
+    而**之前建的号一个都不会** —— 没有这条命令的话，补齐要么靠人记得去控制台点，
+    要么靠临时脚本（真发生过，而下次加地域时没人会记得有那么个脚本）。
+
+    每一步都幂等，重复跑安全。默认只列出会做什么。
+    """
+    from . import workspaces as ws_mod
+    from .cli import _require_identity_dir
+    from .provision import executor_from_env
+    from .tickets import TicketStore
+
+    _require_identity_dir(Path(args.templates).resolve())
+    reg = ws_mod.load(ws_mod.beside(args.templates))
+    try:
+        ws = reg.get(args.region)
+    except ws_mod.WorkspaceError as exc:
+        print(f"  ✗ {exc}", file=sys.stderr)
+        return 1
+    cat = catalog_mod.load(args.templates, reg)
+    tpl = next(
+        (t for t in cat.templates if any(w["key"] == args.region for w in t.workspaces)), None
+    )
+    if tpl is None:
+        print(f"  ✗ 没有任何模板用 {args.region}，不知道该用哪个云账号", file=sys.stderr)
+        return 1
+
+    if args.who:
+        names = [w.strip() for w in args.who.split(",") if w.strip()]
+    else:
+        # 面板建过的账号 —— 那正是加了新地域之后需要补的那批人
+        store = TicketStore(args.tickets)
+        names = sorted(
+            {
+                str((t.get("payload") or {}).get("username") or "")
+                for t in store.all()
+                if t.get("kind") == catalog_mod.KIND_ACCOUNT
+                and t.get("user_created")
+                and (t.get("template") or {}).get("platform") == tpl.platform
+                # **同一个云账号才算。** 只按平台挑的话另一个阿里主账号的号也会被选进来，
+                # 然后拿这个账号的身份去给它加成员 —— 要么失败，要么加错地方（审计 M-4）
+                and str((t.get("template") or {}).get("account") or "") == tpl.account
+            }
+            - {""}
+        )
+    if not names:
+        print("没有要补的账号")
+        return 0
+    print(f"{args.region}（{ws['label']}）工作空间 {ws['id']} · {ws['region']}")
+    print(f"要补 {len(names)} 个：{'、'.join(names)}")
+    if not args.apply:
+        print("（只是看看，没做。确认名单后用 --who 点名再加 --apply）")
+        return 0
+    if not args.who:
+        # **真做的时候必须点名。** 自动圈出来的名单里可能有已经离职、撤过权限的人，
+        # 而这一步会把他们重新加进工作空间、各建一条数据集 —— 那是一次没经过审批的扩权。
+        # 列一遍、人看过、再点名，这一步成本很低（审计 M-4）
+        print("  ✗ --apply 要配 --who 点名（上面是候选名单，确认过的再列进去）", file=sys.stderr)
+        return 2
+
+    # **和建号走同一个函数。** 各写一份的话，补齐建出来的数据集迟早和面板建的
+    # 长成两种东西（名字、URI 形状），而那种差别要到有人挂载时才发现
+    from .flows import provision_workspace
+
+    # **补齐不写申请单。** 那张单子早就结了，往一张 done 的单子上追加事件
+    # 会让「这张单当时做了什么」变成假的 —— 补齐是管理员的动作，不是那张单的一部分
+    ex = executor_from_env(tpl.platform, tpl.account)
+    bad = 0
+    for name in names:
+        done, problems = provision_workspace(ex, ws, name)
+        for line in done:
+            print(f"  ✓ {name}：{line}")
+        for line in problems:
+            print(f"  ✗ {name}：{line}")
+        bad |= 1 if problems else 0
+    return bad

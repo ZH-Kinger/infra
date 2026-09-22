@@ -1,0 +1,83 @@
+{
+  "_what": "每个桶是什么、能不能删、谁负责。体检和资产页读它，**因为清单只给名字，而名字会骗人**。",
+
+  "_why": [
+    "两个真实例子，都是靠人问一句才发现的：",
+    "  data-infra-emr-log-hgh —— 名字像 EMR 日志，实际是杭州 EMR 集群的依赖桶，",
+    "    同时装着团队的编译缓存（droid_backends / pytorch3d 的预编译 wheel）和模型权重。",
+    "    10.9GiB，当天还在写。光看名字会被当成可清理的日志桶。",
+    "  wuji-test-data —— 名字像测试数据，实际 39.7GiB 训练检查点 + 编译产物，20 分钟前还在写。",
+    "体检那一栏的建议之所以写「**确认用途后**登记」而不是「删掉」，就是因为这个。"
+  ],
+
+  "_fields": {
+    "kind": "见 _kinds。决定备份强度、版本保留天数、谁能写",
+    "purpose": "一句人话。写给三个月后第一次看到这个桶的人",
+    "deletable": "no / ask / yes —— **默认 ask**。写 yes 要说清楚凭什么",
+    "owner": "出了事找谁。留空表示还没认领，那本身就是个待办",
+    "note": "补充，比如「和 X 桶成对，同一批内容按地域各放一份」"
+  },
+
+  "_kinds": {
+    "dev": "用户开发空间。桶/组/人，个人负责",
+    "ingest": "数据外采（供应商交付）。只进不改，**拿不回来**，版本保留要长",
+    "public": "开源数据集。全员只读，丢了能重下",
+    "pipeline": "数据工厂 / 格式转换产出。能重算，代价是机时",
+    "transfer": "跨平台同步中转。数据在别处也有，可以激进清理",
+    "label": "标注数据。**人工产出，丢了用钱和时间都换不回来** —— 比原始数据还该保",
+    "checkpoint": "模型权重 / 训练检查点。大、贵、可重算",
+    "artifact": "编译产物、依赖缓存。重建代价是机时不是数据",
+    "backup": "备份",
+    "scratch": "临时暂存。该自动清",
+    "infra": "云产品自己要的桶（EMR 日志、DLC 输出）。归产品管，别动"
+  },
+
+  "buckets": {
+    "wuji-algo-dev-hz": {
+      "kind": "dev",
+      "purpose": "算法组个人开发空间（杭州）。桶/组/人",
+      "deletable": "no",
+      "owner": ""
+    },
+    "wuji-algo-dev-sing": {
+      "kind": "dev",
+      "purpose": "算法组个人开发空间（新加坡）。桶/组/人",
+      "deletable": "no",
+      "owner": ""
+    },
+    "wuji-bucket-hangzhou": {
+      "kind": "ingest",
+      "purpose": "供应商交付数据 + 开源数据集",
+      "deletable": "no",
+      "owner": "",
+      "note": "45 个顶层目录，其中相当一部分是员工登录名（caomaosong / chenxinyi …）。待确认：那是「按接收人分的供应商交付」，还是个人数据混进来了 —— 两种情况的处置完全不同"
+    },
+    "wuji-data-tran": {
+      "kind": "transfer",
+      "purpose": "跨平台传输中转",
+      "deletable": "no",
+      "owner": "",
+      "note": "同时是 PFS 直传链的 CPFS 中转 staging（bot 的 PFS_STAGING_MAP）。搬运进行中时别动"
+    },
+    "data-infra-emr-log-hgh": {
+      "kind": "infra",
+      "purpose": "杭州 EMR 集群要的 OSS 桶；同时被当成团队编译缓存（compiled/ wheels/ thirdparty/）和模型存放处",
+      "deletable": "no",
+      "owner": "",
+      "note": "**名字说谎**：不是日志桶。和 wuji-test-data 内容高度重合（同一批 compiled/ model/ thirdparty/），疑似按地域各放一份"
+    },
+    "wuji-test-data": {
+      "kind": "checkpoint",
+      "purpose": "训练检查点（gmt-ckpt/）、代码包（ant/）、编译产物",
+      "deletable": "no",
+      "owner": "",
+      "note": "**名字说谎**：不是测试数据，39.7GiB 且在活跃写入"
+    },
+    "wuji-sing": {
+      "kind": "transfer",
+      "purpose": "SSH 迁移链段 1 的落点、段 2 的源（bot 的 SGP_OSS_BUCKET），21TB",
+      "deletable": "no",
+      "owner": ""
+    }
+  }
+}

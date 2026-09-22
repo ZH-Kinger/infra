@@ -74,3 +74,18 @@ tester 报了 1 个阻塞 bug + 3 个缺口 + 2 个 nit，全部已修：
 · 前端 revokeBox 没有测试：app.js 零 export 且 import 即 boot()，要测得先把它挪进可导入位置。
 
 [2026-09-20 DEV] 其他：AK 台账加「自己去控制台换」引导（platforms.key_console，面板不代办 —— 代办要经手 secret，与 sealed 的前提冲突）；「没采到密钥」提示原来写死阿里云动作名 ram:ListAccessKeys，而报出来的可能是火山账号，已按平台说。火山采集身份缺 iam:ListAccessKeys（实测 AccessDenied），45 个火山用户的 AK 台账全空 —— 体检的「AK 该换/没人用」两类对火山是瞎的，等加权限。
+
+[2026-09-22] [AUDITOR] infra 面板复审：闸门不通过——新 High 4 条（dataflow 被 _locate 挡死 / CPFS 目录未转相对路径 / 重签凭证废掉云上已登记 key / 整桶闸填 "/" 可绕过），B1/H1/H2/H3 已确认修复。
+
+[2026-09-22 DEV] 上面 4 条 High 已修，另修 M-1～M-4、L-1，已送第三轮复审。
+· CPFS 数据流动真机：绑定的 OSS 前缀在 SourceStoragePath，不在 SourceStorage；任务目录必须相对绑定根。DryRun=true 会回一个 task-… 号，但不会真的建任务（按 DataFlowIds 列任务核过）。bot 的 start_task 不分方向，只有沉降那条真机验过。
+· vePFS DescribeDataFlowTasks：DataFlowTaskIds 要传字符串，并且必须带分页（真机报 InvalidParameter 后改的）。IAM 动作名已由报错确认：vepfs:DescribeDataFlowTasks / DescribeFileSystems。
+· 在面板机上用 root 跑写 identity/ 的脚本，会把 tickets.json 改成 root 属主，面板挂了 100 分钟。写操作一律 sudo -u delivery。
+
+[2026-09-22] [AUDITOR] infra 面板二次复审：闸门通过。H-A/B/C/D、M-1~M-4、L-1 确认修复；遗留 Low：dms.find_task 翻页上限返回 None 可致 H-C 复现、复用分支未记钥匙名、reclaim 事件刷屏、Import 方向仅 DryRun 验证。
+
+[2026-09-22 DEV] 面板切到 https://cloud.wuji-tech.com（Let's Encrypt，certbot.timer 续期 + deploy hook reload nginx）。按 IP 访问保留自签证书，因为已发出的取件链接写的是 IP。DELIVERY_BASE_URL 已改，飞书应用 cli_aa2d10ccd0b9dbb7 的重定向 URL 已加新地址。
+
+[2026-09-22] [AUDITOR] infra 面板三审（R1-R4）：闸门通过。遗留两处小瑕疵——move_cred_left 存的是原始错误文本，文本每次不同时仍会每轮写一次；关单确认文案没区分同云和数据流动的情况；首单真实预热要用小目录盯着跑完。
+
+[2026-09-22 DEV] 两处小瑕疵已修：move_cred_left 落盘前经 mover._stable 抹掉 RequestId/UUID；关单文案区分跨云（钥匙撤、任务失败）与同云/数据流动（云上任务照常跑完）。

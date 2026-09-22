@@ -7,10 +7,27 @@ name = "lakefs-cpfs-dataset-sink"
 version = "0.1.0"
 description = "Materialize immutable lakeFS dataset releases onto CPFS for Alibaba Cloud PAI"
 requires-python = ">=3.9"
-# 面板长期是零运行时依赖。加这一个是因为没有替代品：访问凭证要能被使用方反复查看，
-# 就必须存下来；存下来就必须加密（否则 tickets.json 泄漏等于凭证泄漏）；
-# 而标准库里没有 AES，AEAD 自己搓必错。见 src/delivery/sealed.py。
-dependencies = ["cryptography>=41"]
+# 面板长期是零运行时依赖。下面几个都是「没有替代品」才加的，加之前都验证过没有别的路。
+#
+#   cryptography —— 访问凭证要能被使用方反复查看，就必须存下来；存下来就必须加密
+#     （否则 tickets.json 泄漏等于凭证泄漏）；而标准库里没有 AES，AEAD 自己搓必错。
+#     见 src/delivery/sealed.py。
+#
+#   alibabacloud-* / volcengine-* —— 数据迁移。**试过不加**：面板自己的 ACS 1.0 签名
+#     对迁移服务无效，实测「正确签名」和「故意签坏的签名」回的是同一个
+#     `Anonymous access is forbidden` —— 它根本没读那个 Authorization 头。
+#     盲猜签名方式的代价是把 21TB 搬到错的地方，不值。
+#     这几个 SDK 在 bot 那边真机跑过（TOS→OSS 已验、OSS→OSS 跨 region 179MB 已验、
+#     火山 TOS→TOS task 553276 已验），搬过来用的是同一套调用。
+dependencies = [
+  "cryptography>=41",
+  "alibabacloud-hcs-mgw20240626>=1.0.8",
+  "alibabacloud-tea-openapi>=0.4",
+  "volcengine-python-sdk>=1.0",
+  # 火山 TOS 的桶清单。迁移能选哪些桶是定时从两朵云拉的，不手工维护 ——
+  # 手工那份第二天就是错的（删了的还在选、新建的选不到），而两种都没人会报 bug
+  "tos>=2.7",
+]
 
 [project.optional-dependencies]
 lakefs = ["lakefs>=0.7"]

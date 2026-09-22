@@ -100,6 +100,41 @@ def _write_private_json(path: Path, data: dict) -> None:
 # ── 名册 → 属性表的行 ──────────────────────────────────────────────────────
 
 
+def writer(spec_path):
+    """建号后把登录名写进公司 IAM 的 `cloud_accounts`，返回写入前的旧值。
+
+    **这一步不成，人就登不进去** —— SSO 靠这个属性把云账号和企业身份对上。
+
+    抽出来共用，是因为它原先只写在 `server.py` 里：面板进程带着 `--iam-attributes`
+    所以有它，而**定时任务构造 `Flows` 时压根没传**，于是审批一通过、sweep 顺手执行，
+    这一步被静默跳过。线上第一个账号就是这么建出来一个登不进去的号的。
+    两处各写一份的结局就是这样 —— 只有一处被想起来。
+
+    没配 spec 路径返回 None，由 `Flows._write_iam_attr` 记成「他登不进去」。
+    """
+    if not spec_path:
+        return None
+
+    def write(union_id: str, platform: str, account: str, username: str) -> str:
+        from . import iam_api
+
+        scope = f"{platform}/{account}"
+        spec = load_specs(spec_path).get(scope)
+        if spec is None:
+            raise DeliveryError(f"{spec_path} 里没有 {scope}，不知道这个云账号对应哪个 IAM 应用")
+        _, suffix = spec
+        # 后缀从配置取，**不在这里拼域名**：阿里云的完整 NameID 是
+        # `<名>@<UID>.onaliyun.com`，而哪个账号用哪个域名（有的是别名、有的是辅助域名）
+        # 只有那份配置知道。在这里再写一遍，两处迟早不一致，
+        # 而不一致的表现是「SSO 登录报找不到用户」，查起来一点线索都没有
+        got = iam_api.put_value(
+            union_id, iam_api.app_of(scope), f"{username}{suffix}", cfg=iam_api.Config.from_env()
+        )
+        return str(got.get("previous") or "")
+
+    return write
+
+
 def load_specs(attributes: str, *, warn: Optional[Callable[[str], None]] = None) -> dict:
     """读云账号 → IAM 属性名的配置，返回 {scope: (应用标识, NameID 后缀)}。"""
     attr_file = Path(attributes)
@@ -455,6 +490,374 @@ def adopt(src: Path, full: list, sent_dir: Path, *, stamp: Optional[str] = None)
 
 
 # ── 串行闸 ─────────────────────────────────────────────────────────────────
+
+
+#: 一轮最多自动回收几个人。超过就整轮拒绝，要人确认。
+#: **不是怕删得慢，是怕名册出问题**：`reclaim_plan` 判「可以删」的依据是「名册里没有这个人」，
+#: 所以名册一旦读残（刷新挂了、文件被截断），所有在 IAM 里标记离职的人会一起变成「可以删」。
+#: 平时一轮就一两个，十个以上必然是上游出了事。
+RECLAIM_MAX = 10
+
+
+def reclaim_iam(
+    paths: SyncPaths,
+    *,
+    apply: bool = False,
+    force: bool = False,
+    transport=None,
+    log: Optional[Callable] = None,
+    announce: Optional[Callable] = None,
+) -> dict:
+    """离职回收：把已离职的人的 cloud_accounts 属性删掉。面板和 CLI 共用。
+
+    **只删属性，不碰云上账号。** 删属性可逆（PUT 回去），禁用/删除 RAM 用户不可逆，
+    那一步永远报给人做。
+
+    **先算完整个计划再动手。** 边算边删的话，超量闸门要等删过之后才触发 —— 那时候
+    该拦的已经删掉了。
+    """
+    from . import iam_api
+
+    cfg = iam_api.Config.from_env()
+    full, _ = full_state(paths)
+    roster_uids = {str(r.get("feishu_union_id") or "") for r in full if r.get("feishu_union_id")}
+    if not roster_uids:
+        # 名册一个 union_id 都没有 = 读残了。这时候「名册里没有他」对**每个人**都成立
+        raise DeliveryError(
+            "名册里一个 union_id 都没有，不能据此判断谁离职了。先确认 people.json 和刷新任务正常。"
+        )
+    scopes = sorted({str(r.get("app") or "") for r in full if r.get("app")})
+
+    # ① 先把整个计划算出来
+    plan, held, failed = [], [], []
+    for scope in scopes:
+        try:
+            app = iam_api.app_of(scope)
+            theirs = iam_api.list_by_app(app, cfg=cfg, transport=transport)
+        except iam_api.IamApiError as exc:
+            # 读不到就什么都别做。**基于残缺的清单去删，比不删危险得多**
+            failed.append({"app": scope, "error": cfg.scrub(str(exc).splitlines()[0])})
+            continue
+        for r in iam_api.reclaim_plan(theirs, app=app, roster_uids=roster_uids):
+            row = {
+                "app": r.app,
+                "union_id": r.union_id,
+                "username": r.username,
+                "name": r.name,
+                "value": r.value,
+                "why": r.why,
+                "stale_roster": r.stale_roster,
+            }
+            # 以 Authentik 为准 → 都回收。`held` 现在只在拿不到判断依据时才用
+            (plan if r.sure else held).append(row)
+
+    # ② 有任何一个平台读不到，就**整轮不动手**：少读一个平台，
+    #    那个平台上真该回收的人这轮漏掉是小事，怕的是据此做出的判断本身不完整
+    if failed and apply:
+        raise DeliveryError(
+            "有平台的清单没读到（" + "；".join(f.get("error", "") for f in failed)[:160] + "），"
+            "这一轮不回收。读不全的时候不动手。"
+        )
+    if apply and not force and len(plan) > RECLAIM_MAX:
+        raise DeliveryError(
+            f"这一轮要回收 {len(plan)} 个人的属性，超过 {RECLAIM_MAX} 个。"
+            "平时一轮就一两个 —— 这么多通常意味着名册出了问题，不是真有这么多人离职。"
+            "核对无误后加 --force。"
+        )
+
+    # ③ 闸门都过了才动手
+    done = []
+    for row in plan:
+        if not apply:
+            done.append({**row, "previous": "", "dry_run": True})
+            continue
+        try:
+            got = iam_api.delete_value(row["union_id"], row["app"], cfg=cfg, transport=transport)
+            done.append({**row, "previous": str(got.get("previous") or "")})
+        except iam_api.IamApiError as exc:
+            failed.append({**row, "error": cfg.scrub(str(exc).splitlines()[0])})
+    report = {
+        "done": done,
+        "held": held,
+        "failed": failed,
+        "applied": bool(apply),
+        "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    if apply and (done or held):
+        # 落审计、发通知。**任一处失败都不该让已经做完的回收变成「没发生过」** ——
+        # 所以两个都吞掉异常，只把问题记进 failed
+        for fn, what in ((log, "审计日志"), (announce, "飞书通知")):
+            if fn is None:
+                continue
+            try:
+                fn(report)
+            except Exception as exc:  # noqa: BLE001
+                failed.append({"app": "", "error": f"{what}失败：{type(exc).__name__}: {exc}"})
+    return report
+
+
+def confirm_reclaim(
+    paths: SyncPaths, union_id: str, app: str, *, actor: str, transport=None, log=None
+) -> dict:
+    """管理员确认某人确实离职 → 删掉他那条 cloud_accounts 属性。
+
+    **管理员这一下就是第二个信号。** 自动回收要求「IT 的 IAM 说离职」+「名册里也没有」
+    两条都成立；这里用人的确认顶替第二条 —— 名册是从飞书通讯录自动生成的，
+    手工在里面标离职下次刷新就被冲掉，所以没法靠改名册来表达这个判断。
+
+    **但第一条不能省。** 服务端**重新读一次 IAM**，确认这个人现在确实是 `is_active=false`
+    才删 —— 不能只凭请求里带的 union_id 就动手。否则一个构造出来的请求
+    就能删掉任何一个**在职**的人的登录名，而他要到下次登录才发现。
+    """
+    from . import iam_api
+
+    cfg = iam_api.Config.from_env()
+    uid = str(union_id or "").strip()
+    if not uid:
+        raise DeliveryError("要回收谁？缺 union_id")
+    try:
+        name = iam_api.app_of(str(app or ""))
+    except iam_api.IamApiError as exc:
+        raise DeliveryError(str(exc)) from exc
+
+    # 现读现判，不信请求里说的
+    hit = next(
+        (
+            u
+            for u in iam_api.list_by_app(name, cfg=cfg, transport=transport)
+            if str(u.get("union_id") or "") == uid
+        ),
+        None,
+    )
+    if hit is None:
+        raise DeliveryError(f"IAM 里没有这个人（{name}），没有可回收的属性")
+    # 同 reclaim_plan：值是 null 时「不知道」必须当「在职」，不能当离职放行
+    if hit.get("is_active") is not False:
+        raise DeliveryError(
+            f"{hit.get('username') or uid} 在 IAM 里还是**在职**状态，不能按离职回收。"
+            "IT 那边先把人标成离职，这里才能收。"
+        )
+    if not str(hit.get("value") or ""):
+        raise DeliveryError("这个人在这个平台本来就没有登录名，没什么可收的")
+
+    got = iam_api.delete_value(uid, name, cfg=cfg, transport=transport)
+    row = {
+        "app": name,
+        "union_id": uid,
+        "username": str(hit.get("username") or ""),
+        "name": str(hit.get("name") or ""),
+        "value": str(hit.get("value") or ""),
+        "previous": str(got.get("previous") or ""),
+        "why": "管理员确认离职",
+    }
+    if log is not None:
+        log([row])
+    return row
+
+
+#: 对账结果缓存。**存在的理由是「别让人去点」** —— 对账要出去打 IT 的接口、几秒钟，
+#: 做成按钮就意味着没人点，待办永远躺在那儿没人看见。缓存下来，页面一打开就显示。
+RECONCILE_CACHE = "iam-reconcile.json"
+#: 「稍后处理」的记录。键是 `<app>/<union_id>`
+SNOOZE_FILE = "iam-snooze.json"
+
+
+def _side_file(paths: SyncPaths, name: str) -> Path:
+    return Path(paths.people).resolve().parent / name
+
+
+def load_snooze(paths: SyncPaths, *, now: Optional[float] = None) -> dict:
+    """还在「稍后处理」期内的条目。过期的自动不算数，不用清理。"""
+    at = time.time() if now is None else now
+    try:
+        data = json.loads(_side_file(paths, SNOOZE_FILE).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        k: v for k, v in data.items() if isinstance(v, dict) and float(v.get("until") or 0) > at
+    }
+
+
+REMIND_FILE = "iam-remind.json"
+
+
+def claim_remind(
+    paths: SyncPaths, signature: str, *, hours: float, now: Optional[float] = None
+) -> bool:
+    """这批人该不该现在提醒。该提醒就记下时间并返回 True。
+
+    **读不到状态时照常提醒**（返回 True）。多提醒一次的代价是一条消息，
+    漏提醒的代价是一个离职的人的云账号一直挂着没人知道 —— 这两边不对称。
+    """
+    at = time.time() if now is None else now
+    path = _side_file(paths, REMIND_FILE)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        last = float((data.get(signature) or {}).get("at") or 0)
+    except Exception:  # noqa: BLE001 — 见 docstring
+        data, last = {}, 0.0
+    if last and at - last < max(0.0, hours) * 3600:
+        return False
+    data[signature] = {"at": at}
+    # 只留最近 50 条：签名随人员变动而变，不清理的话这个文件会一直长
+    if len(data) > 50:
+        data = dict(sorted(data.items(), key=lambda kv: -float(kv[1].get("at") or 0))[:50])
+    with contextlib.suppress(OSError):
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        path.chmod(0o600)
+    return True
+
+
+def snooze(paths: SyncPaths, union_id: str, app: str, *, hours: float, actor: str) -> dict:
+    """稍后处理：`hours` 小时内不再提醒这一条。
+
+    **不是「忽略」。** 到点它会自己回到待办里 —— 忽略需要一个理由和一次复核，
+    而「现在没空」不需要。两者混成一个按钮的话，人会拿忽略当稍后用。
+    """
+    key = f"{str(app or '').strip()}/{str(union_id or '').strip()}"
+    if key == "/" or not union_id or not app:
+        raise DeliveryError("缺 union_id 或 app")
+    if not 0 < hours <= 24 * 7:
+        raise DeliveryError("稍后处理最长一周")
+    now = time.time()
+    path = _side_file(paths, SNOOZE_FILE)
+    data = {}
+    try:
+        got = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(got, dict):
+            data = got
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    data[key] = {"until": now + hours * 3600, "by": actor, "at": now, "hours": hours}
+    _write_private_json(path, data)
+    return {"key": key, "until": data[key]["until"], "hours": hours}
+
+
+def cached_reconcile(paths: SyncPaths) -> Optional[dict]:
+    """上次对账的结果。**读不到就返回 None，不返回空报告** ——
+    「还没对过账」和「对过了，没问题」必须分得开。"""
+    try:
+        data = json.loads(_side_file(paths, RECONCILE_CACHE).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _cloud_users(paths: SyncPaths, scope: str):
+    """某个云账号上**现在还存在**的子账号登录名。拿不到返回 None（那一类就整类不判）。
+
+    读的是权限快照（`identity/inventory.json`），每 20 分钟由 refresh 重采。
+    所以「有人刚在控制台删了号」最多 20 分钟后才报出来 —— 这个延迟可以接受，
+    而把「快照读不到」当成「账号都没了」不可以。
+
+    **采集失败的账号一律返回 None。** 快照里那个账号会是 0 个用户，
+    照着判的话它下面每一个人都会被报成「账号已删」 —— 一次凭证过期就能刷出
+    几十条假线索，而假线索会让这一栏从此没人看。`incomplete` 记的就是这件事。
+    """
+    from . import inventory
+
+    want = str(scope or "")
+    try:
+        snap = inventory.load(getattr(paths, "inventory", None) or "identity/inventory.json")
+    except Exception:  # noqa: BLE001 — 快照缺失/写坏都只是「这次不判这一类」
+        return None
+    if any(str(x or "").startswith(f"{want}：") for x in (snap.incomplete or ())):
+        return None
+    platform, _, account = want.partition("/")
+    names = {
+        u.name for u in snap.users if u.platform == platform and u.account == account and u.name
+    }
+    return names or None
+
+
+def reconcile_report(paths: SyncPaths, *, transport=None) -> dict:
+    """IAM 侧实际 vs 名册。面板和 CLI 共用 —— 规则只写一份，和这个模块其余部分一样。
+
+    **只读**：一次调用不写任何文件、不改基线、不下发任何东西。
+
+    返回里 `blind` 和 `drift` 是两件事，不能合并：`drift` 是两边都看得到但对不上，
+    `blind` 是我们这边**根本没法比**（没有 union_id，接口只认它）。
+    把后者混进「对不上 0 条」，读的人会以为两边一致，而实际上有人压根没进过比对。
+    """
+    from . import iam_api
+
+    cfg = iam_api.Config.from_env()
+    full, _ = full_state(paths)
+    scopes = sorted({str(r.get("app") or "") for r in full if r.get("app")})
+    apps, total = [], 0
+    for scope in scopes:
+        entry = {
+            "scope": scope,
+            "app": "",
+            "theirs": 0,
+            "compared": 0,
+            "drift": [],
+            "blind": [],
+            "error": "",
+        }
+        try:
+            app = iam_api.app_of(scope)
+            entry["app"] = app
+            theirs = iam_api.list_by_app(app, cfg=cfg, transport=transport)
+        except iam_api.IamApiError as exc:
+            # 一个平台读不到不该让整页失败，但**必须显示出来** ——
+            # 静默跳过等于把「没读到」渲染成「这个平台没问题」
+            entry["error"] = cfg.scrub(str(exc).splitlines()[0])
+            apps.append(entry)
+            continue
+        ours = [r for r in full if r.get("app") == scope]
+        # 云侧快照喂进去才判得出「属性指向的账号已经没了」。
+        # **拿不到就传 None**，那一类整类跳过 —— 拿不到快照却照判，
+        # 等于把全公司报成「账号已删」
+        drift = iam_api.reconcile(theirs, ours, app=app, cloud_users=_cloud_users(paths, scope))
+        blind = iam_api.uncomparable(ours)
+        entry["theirs"] = len(theirs)
+        entry["compared"] = len([r for r in ours if r.get("action") == "set"]) - len(blind)
+        entry["drift"] = [
+            # **`app` 必须带上**：前端的「确认离职」「稍后处理」两个按钮都要它，
+            # 少了它请求体里就是 undefined（被 JSON.stringify 丢掉），两个按钮 100% 失败，
+            # 而弹窗上还会显示「删掉他在 undefined 的登录名」
+            {
+                "kind": d.kind,
+                "app": d.app,
+                "union_id": d.union_id,
+                "username": d.username,
+                "name": d.name,
+                "theirs": d.theirs,
+                "ours": d.ours,
+            }
+            for d in drift
+        ]
+        entry["blind"] = [
+            {
+                "name": str(r.get("name") or ""),
+                "email": str(r.get("email") or ""),
+                "value": str(r.get("value") or ""),
+            }
+            for r in blind
+        ]
+        total += len(drift) + len(blind)
+        apps.append(entry)
+    held = load_snooze(paths)
+    pending = sum(
+        1
+        for e in apps
+        for d in e["drift"]
+        if d["kind"] == "inactive" and f"{e['app']}/{d['union_id']}" not in held
+    )
+    report = {
+        "apps": apps,
+        "total": total,
+        "pending": pending,
+        "snoozed": len(held),
+        "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    with contextlib.suppress(DeliveryError, OSError):
+        # 缓存失败不该让对账本身失败 —— 结果已经算出来了，页面照样显示
+        _write_private_json(_side_file(paths, RECONCILE_CACHE), report)
+    return report
 
 
 @contextlib.contextmanager

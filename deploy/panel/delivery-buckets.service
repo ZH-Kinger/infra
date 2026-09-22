@@ -1,0 +1,35 @@
+# 云权限面板：重新生成「数据迁移」能选哪些桶（由 delivery-buckets.timer 触发）
+#
+# 为什么要有这个：清单同时是白名单，flows._validate_transfer 拿它挡提交。
+# 手工维护的话，删掉的桶申请页还让人选（提交后在搬运那步才炸），
+# 新建的桶选不到（人只能来问一句为什么）—— 两种都不会有人报 bug。
+[Unit]
+Description=Cloud panel: refresh which buckets data migration can pick
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=delivery
+WorkingDirectory=/opt/infra
+# 用采集身份（panel-collector）：列全账号的桶是采集的活，开通身份不该有这个能力
+EnvironmentFile=/etc/delivery/refresh.env
+Environment=PYTHONPATH=/opt/infra/src:/opt/infra/vendor
+ExecStart=/usr/bin/python3 -m delivery.cli requests buckets \
+  --templates identity/request-templates.json --apply
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/infra/identity
+TimeoutStartSec=5min
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+LockPersonality=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native

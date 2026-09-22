@@ -17,7 +17,7 @@ from unittest import mock
 
 from delivery import inventory
 from delivery import people as people_mod
-from delivery.alerts import AlertError, send_feishu, sign
+from delivery.alerts import AlertError, send_feishu, send_feishu_card, sign
 from delivery.refresh import RefreshReport, brief, diff_snapshots, next_baseline, run
 
 HOOK = "https://open.feishu.cn/open-apis/bot/v2/hook/0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
@@ -361,6 +361,59 @@ class AlertTests(unittest.TestCase):
         for data in ({}, {"code": 19021, "msg": "sign"}, [1], {"StatusCode": 1}, {"code": False}):
             with self.assertRaises(AlertError, msg=data):
                 send_feishu("t", webhook=HOOK, secret="s", post=lambda u, p, d=data: d)
+
+
+class AlertCardTests(unittest.TestCase):
+    """卡片通道。**和文本那条共用签名、地址校验、成功码判定** —— 那三样都踩过坑。"""
+
+    def test_a_card_goes_out_as_interactive_with_a_top_level_card_field(self):
+        """自定义机器人的卡片放顶层 `card`，不是 `content` —— 放错了飞书只回一个泛泛的错。"""
+        seen = {}
+
+        def post(url, payload):
+            seen.update(payload)
+            return {"code": 0}
+
+        send_feishu_card(
+            {"header": {}}, webhook=HOOK, secret="s", post=post, clock=lambda: 1700000000
+        )
+        self.assertEqual(seen["msg_type"], "interactive")
+        self.assertEqual(seen["card"], {"header": {}})
+        self.assertNotIn("content", seen)
+
+    def test_it_is_signed_exactly_like_the_text_path(self):
+        seen = {}
+        send_feishu_card(
+            {"a": 1},
+            webhook=HOOK,
+            secret="sec",
+            post=lambda u, p: seen.update(p) or {"code": 0},
+            clock=lambda: 1700000000,
+        )
+        self.assertEqual(seen["sign"], sign(1700000000, "sec"))
+
+    def test_a_bad_webhook_is_refused_on_the_card_path_too(self):
+        with self.assertRaises(AlertError):
+            send_feishu_card(
+                {"a": 1},
+                webhook="https://evil.example.com/hook/x",
+                secret="s",
+                post=lambda u, p: {"code": 0},
+            )
+
+    def test_a_missing_secret_is_refused_on_the_card_path_too(self):
+        """机器人必须开签名校验。少了它，谁拿到地址谁就能往群里发东西。"""
+        with self.assertRaises(AlertError):
+            send_feishu_card({"a": 1}, webhook=HOOK, secret="", post=lambda u, p: {"code": 0})
+
+    def test_an_empty_card_is_refused_instead_of_being_sent(self):
+        with self.assertRaises(AlertError):
+            send_feishu_card({}, webhook=HOOK, secret="s", post=lambda u, p: {"code": 0})
+
+    def test_a_missing_success_code_is_still_a_failure_on_the_card_path(self):
+        """空对象、缺字段都不能当成发出去了。"""
+        with self.assertRaises(AlertError):
+            send_feishu_card({"a": 1}, webhook=HOOK, secret="s", post=lambda u, p: {})
 
 
 class CliRefreshTests(unittest.TestCase):

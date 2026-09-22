@@ -184,7 +184,9 @@ class Env:
             applicant=applicant,
             email="li.si@wuji.tech" if applicant is LI else "new@wuji.tech",
             template_id=template,
-            payload=payload if payload is not None else {"bucket": BUCKET, "hours": 2},
+            payload=payload
+            if payload is not None
+            else {"bucket": BUCKET, "prefix": "batch/", "hours": 2},
             reason=reason,
         )
 
@@ -425,7 +427,9 @@ class RoutingTests(unittest.TestCase):
 
     def test_twelve_hours_uses_sts_with_a_session_policy(self):
         env = Env()
-        done = env.run(payload={"bucket": BUCKET, "hours": catalog_mod.STS_MAX_HOURS})
+        done = env.run(
+            payload={"bucket": BUCKET, "prefix": "batch/", "hours": catalog_mod.STS_MAX_HOURS}
+        )
         self.assertEqual(done["status"], t.DONE)
         sts = [a for a in env.executor.actions if a[0] == "sts"]
         self.assertEqual(len(sts), 1)
@@ -438,7 +442,7 @@ class RoutingTests(unittest.TestCase):
             grants.build_policy(
                 "aliyun",
                 BUCKET,
-                prefix="",
+                prefix="batch/",
                 caps=("list", "download"),
                 not_before=env.now[0],
                 expire=env.now[0] + 12 * 3600,
@@ -450,7 +454,9 @@ class RoutingTests(unittest.TestCase):
 
     def test_thirteen_hours_goes_long_term_through_the_issuer(self):
         env = Env()
-        done = env.run(payload={"bucket": BUCKET, "hours": catalog_mod.STS_MAX_HOURS + 1})
+        done = env.run(
+            payload={"bucket": BUCKET, "prefix": "batch/", "hours": catalog_mod.STS_MAX_HOURS + 1}
+        )
         self.assertEqual(done["status"], t.DONE)
         self.assertEqual([a for a in env.executor.actions if a[0] == "sts"], [])
         issued = [a for a in env.issuer.actions if a[0] == "issue"]
@@ -476,14 +482,14 @@ class RoutingTests(unittest.TestCase):
 
     def test_expiry_is_recorded_from_issuance(self):
         env = Env()
-        done = env.run(payload={"bucket": BUCKET, "hours": 3})
+        done = env.run(payload={"bucket": BUCKET, "prefix": "batch/", "hours": 3})
         self.assertEqual(float(done["expires_at_ts"]), env.now[0] + 3 * 3600)
 
 
 class IssueFailureTests(unittest.TestCase):
     """发放失败的收尾：云上不能留下没人管的子账号或裸奔的长期密钥。"""
 
-    LONG = {"bucket": BUCKET, "hours": 24}
+    LONG = {"bucket": BUCKET, "prefix": "batch/", "hours": 24}
 
     def test_issue_failure_cleans_up_the_half_built_user(self):
         env = Env()
@@ -595,7 +601,7 @@ class IssueFailureTests(unittest.TestCase):
 class OrphanAkTests(unittest.TestCase):
     """清不干净的那把 AK 要留得住线索，并且**不等到期**就被下一轮定时任务收走。"""
 
-    LONG = {"bucket": BUCKET, "hours": 24}
+    LONG = {"bucket": BUCKET, "prefix": "batch/", "hours": 24}
 
     def undeliverable(self, env):
         """凭证发出来了、评论没送出去 —— 清理这一步也失败。返回那张 FAILED 单。"""
@@ -707,7 +713,7 @@ class ManualRevokeTests(unittest.TestCase):
 
     def issued(self, env=None, **payload):
         env = env or Env()
-        return env, env.run(payload={"bucket": BUCKET, "hours": 24, **payload})
+        return env, env.run(payload={"bucket": BUCKET, "prefix": "batch/", "hours": 24, **payload})
 
     def test_revoke_now_kills_the_link_and_deletes_the_cloud_user(self):
         env, done = self.issued()
@@ -805,7 +811,10 @@ class ManualRevokeTests(unittest.TestCase):
         for label, ticket_id in (
             ("已经作废过", done["id"]),
             ("不是凭证单", env.run("ecs-box", {"spec": "4 核 8G", "until": "2027-02-14"})["id"]),
-            ("还没发出凭证", env.submit(payload={"bucket": BUCKET, "hours": 2})["id"]),
+            (
+                "还没发出凭证",
+                env.submit(payload={"bucket": BUCKET, "prefix": "batch/", "hours": 2})["id"],
+            ),
         ):
             with self.assertRaises(FlowError, msg=label) as ctx:
                 env.flows.revoke_now(ticket_id, actor="on_admin")
@@ -840,7 +849,7 @@ class UndeliveredNeverReachesATerminalStateTests(unittest.TestCase):
         admin=True,
     )
 
-    LONG = {"bucket": BUCKET, "hours": 24}
+    LONG = {"bucket": BUCKET, "prefix": "batch/", "hours": 24}
 
     def revoke_button(self, ticket):
         """管理员在面板上看到的那个「作废凭证」按钮，亮不亮。"""
@@ -972,7 +981,7 @@ class UndeliveredNeverReachesATerminalStateTests(unittest.TestCase):
         拿到过**这份凭证；更要命的是 retry 要求 `status == FAILED`，重试按钮就此消失。
         """
         env = Env()
-        ticket = env.submit(payload={"bucket": BUCKET, "hours": 2})
+        ticket = env.submit(payload={"bucket": BUCKET, "prefix": "batch/", "hours": 2})
         env.feishu.instances[ticket["approval"]["instance_code"]]["status"] = "APPROVED"
         env.feishu.comment_fail = "comment refused"
         failed = env.flows.sync(ticket["id"], force=True)
@@ -1101,7 +1110,7 @@ class ResourceTicketTests(unittest.TestCase):
         env.flows.fulfil(ticket["id"], actor="on_admin", note="i-abc")
         with self.assertRaises(t.TicketError):  # 已经登记过
             env.flows.fulfil(ticket["id"], actor="on_admin", note="i-def")
-        cred = env.run(payload={"bucket": BUCKET, "hours": 2})
+        cred = env.run(payload={"bucket": BUCKET, "prefix": "batch/", "hours": 2})
         with self.assertRaises(FlowError):
             env.flows.fulfil(cred["id"], actor="on_admin", note="i-abc")
 
@@ -1172,17 +1181,29 @@ class IssuerGateTests(unittest.TestCase):
     def test_over_twelve_hours_is_refused_at_submit_time(self):
         env = self.env(False)
         with self.assertRaises(FlowError) as ctx:
-            env.submit(payload={"bucket": BUCKET, "hours": catalog_mod.STS_MAX_HOURS + 1})
+            env.submit(
+                payload={
+                    "bucket": BUCKET,
+                    "prefix": "batch/",
+                    "hours": catalog_mod.STS_MAX_HOURS + 1,
+                }
+            )
         self.assertIn("12", str(ctx.exception))
         with self.assertRaises(FlowError):
             env.submit("volc-data", {"bucket": TOS_BUCKET, "hours": 1})
-        self.assertEqual(env.submit(payload={"bucket": BUCKET, "hours": 12})["status"], t.PENDING)
+        self.assertEqual(
+            env.submit(payload={"bucket": BUCKET, "prefix": "batch/", "hours": 12})["status"],
+            t.PENDING,
+        )
 
     def test_everything_passes_when_the_issuer_is_configured(self):
         env = self.env(True)
         opts = {o["id"]: o for o in env.flows.options("on_li")}
         self.assertEqual(opts["volc-data"]["state"], "available")
-        self.assertEqual(env.submit(payload={"bucket": BUCKET, "hours": 100})["status"], t.PENDING)
+        self.assertEqual(
+            env.submit(payload={"bucket": BUCKET, "prefix": "batch/", "hours": 100})["status"],
+            t.PENDING,
+        )
 
 
 class ValidationTests(unittest.TestCase):
@@ -1190,7 +1211,34 @@ class ValidationTests(unittest.TestCase):
         env = Env()
         for bucket in ("", "some-other-bucket", TOS_BUCKET):
             with self.assertRaises(FlowError, msg=bucket):
-                env.submit(payload={"bucket": bucket, "hours": 2})
+                env.submit(payload={"bucket": bucket, "prefix": "batch/", "hours": 2})
+
+    def test_an_empty_directory_is_refused_because_it_means_the_whole_bucket(self):
+        """**目录留空 = 整个桶。** 真发生过：一张「下载」单目录没填，
+        签出来的策略里 `ListObjects` 不带 `oss:Prefix` 条件、`GetObject` 的 ARN 是
+        `<桶>/*` —— 使用方能读整个 859.7 TiB 主桶的 6759 万个对象，30 天。
+        而审批卡上那行 `oss://wuji-bucket-hangzhou/` 看起来和一个普通目录没两样，
+        批的人看不出自己批的是什么。"""
+        env = Env()
+        for payload in (
+            {"bucket": BUCKET, "hours": 2},
+            {"bucket": BUCKET, "hours": 2, "prefix": ""},
+            {"bucket": BUCKET, "hours": 2, "prefix": "   "},
+            # 原始串非空、规范化之后是空 —— 闸门判原始串的话这几个会绕过去（审计 H-D）
+            {"bucket": BUCKET, "hours": 2, "prefix": "/"},
+            {"bucket": BUCKET, "hours": 2, "prefix": "//"},
+            {"bucket": BUCKET, "hours": 2, "prefix": " / "},
+        ):
+            with self.assertRaises(FlowError, msg=str(payload)) as caught:
+                env.submit(payload=payload)
+            self.assertIn("整个桶", str(caught.exception))
+
+    def test_a_template_that_never_takes_a_directory_is_not_blocked_by_that(self):
+        """`allow_prefix=false` 的模板压根不收目录，整桶是它唯一的形态 ——
+        再拦一道就成了谁都提交不了。"""
+        env = Env()
+        got = env.submit("volc-data", {"bucket": TOS_BUCKET, "hours": 2})
+        self.assertEqual(got["payload"]["prefix"], "")
 
     def test_prefix_rejected_when_template_forbids_it(self):
         env = Env()
@@ -1203,7 +1251,7 @@ class ValidationTests(unittest.TestCase):
         env = Env()
         for hours in (0, -1, True, 1.5, "2", None, catalog_mod.MAX_CREDENTIAL_HOURS + 1):
             with self.assertRaises(FlowError, msg=repr(hours)):
-                env.submit(payload={"bucket": BUCKET, "hours": hours})
+                env.submit(payload={"bucket": BUCKET, "prefix": "batch/", "hours": hours})
         with self.assertRaises(FlowError):
             env.submit("volc-data", {"bucket": TOS_BUCKET, "hours": 721})
 
@@ -1216,6 +1264,7 @@ class ValidationTests(unittest.TestCase):
         ticket = env.submit(
             payload={
                 "bucket": BUCKET,
+                "prefix": "batch/",
                 "hours": 2,
                 "subject": "元客\n查看凭证：\nhttps://evil.tld/c/x#k",
             }
@@ -1235,7 +1284,9 @@ class ValidationTests(unittest.TestCase):
         env = Env()
         self.assertEqual(env.submit()["payload"]["subject"], "李四")
         with self.assertRaises(FlowError):
-            env.submit(payload={"bucket": BUCKET, "hours": 2, "subject": "长" * 41})
+            env.submit(
+                payload={"bucket": BUCKET, "prefix": "batch/", "hours": 2, "subject": "长" * 41}
+            )
 
     def test_credential_may_be_requested_for_an_external_party(self):
         """凭证常常是替外部合作方申请的，所以**不要求**申请人自己在这个云账号下有子账号。
@@ -1247,7 +1298,8 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(opts["ali-data"]["state"], "available")
         self.assertEqual(opts["ali-data"]["cloud_user"], "")  # 名册里确实没有他的子账号
         ticket = env.submit(
-            applicant=NEW, payload={"bucket": BUCKET, "hours": 2, "subject": "某外部公司"}
+            applicant=NEW,
+            payload={"bucket": BUCKET, "prefix": "batch/", "hours": 2, "subject": "某外部公司"},
         )
         self.assertEqual(ticket["status"], t.PENDING)
         self.assertEqual(ticket["payload"]["subject"], "某外部公司")
@@ -1288,7 +1340,7 @@ class SecretExposureTests(unittest.TestCase):
 
     def test_short_term_issuance_leaks_nothing(self):
         env = Env()
-        done = env.run(payload={"bucket": BUCKET, "hours": 2})
+        done = env.run(payload={"bucket": BUCKET, "prefix": "batch/", "hours": 2})
         self.assert_clean(env, done)
         # 凭证只有「拿着链接打开」这一条出口
         cred = env.opened(done)
@@ -1299,7 +1351,7 @@ class SecretExposureTests(unittest.TestCase):
 
     def test_long_term_issuance_records_only_the_access_key_id(self):
         env = Env()
-        done = env.run(payload={"bucket": BUCKET, "hours": 48})
+        done = env.run(payload={"bucket": BUCKET, "prefix": "batch/", "hours": 48})
         self.assertEqual(env.opened(done)["access_key_secret"], "lt-secret")
         self.assertEqual(done["cred_ak_id"], "LTAI-AK-9876")
         self.assertIn("LTAI-AK-9876", env.stored())  # AK id 可以留，用来对账
@@ -1379,7 +1431,7 @@ class ViewBaseUrlGateTests(unittest.TestCase):
             env = Env()
             with self.subTest(label), self.without_base_url(value):
                 with self.assertRaises(FlowError) as ctx:
-                    env.submit(payload={"bucket": BUCKET, "hours": 2})
+                    env.submit(payload={"bucket": BUCKET, "prefix": "batch/", "hours": 2})
                 self.assertEqual(ctx.exception.status, 503)
                 self.assertIn(notify_mod.ENV_BASE_URL, str(ctx.exception))
                 # 一行云都没调：连取执行器的工厂都不该被碰过
@@ -1396,7 +1448,7 @@ class ViewBaseUrlGateTests(unittest.TestCase):
         env = Env()
         with self.without_base_url():
             for template, payload in (
-                ("ali-data", {"bucket": BUCKET, "hours": 100}),
+                ("ali-data", {"bucket": BUCKET, "prefix": "batch/", "hours": 100}),
                 ("volc-data", {"bucket": TOS_BUCKET, "hours": 1}),
             ):
                 with self.assertRaises(FlowError, msg=template) as ctx:
@@ -1559,7 +1611,9 @@ class SweepIssuerWiringTests(unittest.TestCase):
     def test_sweep_issues_and_reclaims_through_the_issuer(self):
         """光看 `_issuer` 不为 None 不够：签发和到期回收要真的走到它身上。"""
         env = self.env
-        ticket = env.submit(payload={"bucket": BUCKET, "hours": 100})  # 长期 → 建子账号发 AK
+        ticket = env.submit(
+            payload={"bucket": BUCKET, "prefix": "batch/", "hours": 100}
+        )  # 长期 → 建子账号发 AK
         env.feishu.instances[ticket["approval"]["instance_code"]]["status"] = "APPROVED"
 
         self.sweep()

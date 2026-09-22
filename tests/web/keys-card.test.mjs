@@ -102,7 +102,7 @@ test("卡上必须标出快照时间", () => {
   assert.match(card.textContent, /权限快照/);
 });
 
-// 「最近使用」这一列是三态：**这朵云查不到** / 确实从来没用过 / N 天前。
+// 「最近使用」这一列是三态：**这朵云查不到**（填 `—`）/ 确实从来没用过 / N 天前。
 // 前两者混成一个的话，火山那 44 把 AK 会全部写成「从来没用过」—— 那不是事实，
 // 是我们看不到；而 44 条同时出现的假线索足以让这一栏从此没人看。
 // 后端已经分出 last_used_known 了（单测钉着），最后一米在这里。
@@ -119,10 +119,13 @@ test("火山那把：写「这朵云查不到」，绝不能写「从来没用�
     keys: [key({ id: "AKLT0001", last_used_known: false, never_used: false, idle_days: null })],
     uncollected: [],
   });
-  assert.match(card.textContent, /这朵云查不到/);
+  // 用户定的规矩：**查不到就填 `—`**。所以这里锁的不是某句文案，
+  // 而是「它绝不能变成一句断言」—— 写成「从来没用过」或「不详」都是在替
+  // 一朵不提供这个数据的云编事实，而那正是让人去停掉一把在跑的密钥的理由
   assert.doesNotMatch(card.textContent, /从来没用过/, "「查不到」被渲染成了「没用过」");
-  // 也不能退化成「不详」—— 那句看起来像数据缺了一点，而这是这朵云根本不提供
-  assert.doesNotMatch(card.textContent, /不详/);
+  assert.doesNotMatch(card.textContent, /不详/, "「这朵云不提供」被渲染成了「数据缺了一点」");
+  const cell = [...card.walk()].find((n) => n.getAttribute && n.getAttribute("title"));
+  assert.match(cell.getAttribute("title"), /不是「没用过」/, "鼠标悬停要能看到为什么是 —");
 });
 
 test("阿里那把确实没用过时，照旧直说", () => {
@@ -158,8 +161,8 @@ test("两朵云混在一张表里：逐行判断，不整列一刀切", () => {
   });
   const byId = (id) => rows(card).find((t) => t.includes(id));
   assert.match(byId("LTAI0001"), /从来没用过/);
-  assert.match(byId("AKLT0001"), /这朵云查不到/);
   assert.doesNotMatch(byId("AKLT0001"), /从来没用过/);
+  assert.doesNotMatch(byId("AKLT0001"), /不详/);
   assert.match(byId("LTAI0002"), /3 天前/);
 });
 

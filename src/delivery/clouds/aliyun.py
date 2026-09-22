@@ -35,6 +35,13 @@ STS = ("sts.aliyuncs.com", "2015-04-01")
 #: 授在资源组上的查不到（2026-09-15 主账号实测 6 条）。
 RESOURCE_MANAGER = ("resourcemanager.aliyuncs.com", "2020-03-31")
 
+
+def ecs(region: str) -> tuple:
+    """ECS 的地域化 endpoint。**必须按地域打** —— 打错地域的表现不是报错，
+    是「查不到这台机器」，而那和「机器没建成」长得一样。"""
+    return (f"ecs.{region}.aliyuncs.com", "2014-05-26")
+
+
 _TIMEOUT = 25
 
 #: 鉴权类错误的识别片段。见 identity/collect.py 里同样的取舍：
@@ -43,7 +50,12 @@ _DENIED = (
     "nopermission",
     "forbidden.ram",
     "accessdenied",
-    "has no permission",
+    # **不是 "has no permission"**：PAI 的工作空间 RBAC 回的是
+    #   `100700008 No permission: denied by RAM and AIWorkspace Rbac PaiDataset:ListDatasets`
+    # 没有 "has"，所以原来那条匹配不上 —— 而且它的 HTTP 状态码是 **404 不是 403**，
+    # 于是「没权限看这个工作空间」会被当成普通错误、在地区层记进 skipped，
+    # 和「这个地区没开通」长得一模一样。台账因此会少掉一整个工作空间而看起来是完整的。
+    "no permission",
     "not authorized",
     "invalidaccesskeyid",
     "signaturedoesnotmatch",
@@ -211,15 +223,33 @@ def call_roa(
     而真正发出去的 URL 要编码，两边写法不同是对的。
     """
     send = transport or _http_roa
+    raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode() if body else b""
+    url, headers, query = _roa_sign(
+        endpoint,
+        version,
+        path,
+        query,
+        method,
+        raw,
+        "application/json; charset=utf-8" if raw else "",
+        creds,
+    )
+    status, reply = send(url, headers, method, raw)
+    return _roa_result(status, reply, path)
+
+
+def _roa_sign(
+    endpoint, version, path, query, method, raw, ctype, creds, accept="application/json"
+) -> tuple:
+    """ROA（ACS 1.0）的签名。**JSON 和 XML 两条路共用这一份** ——
+    待签名串少一行就是 SignatureDoesNotMatch，而错误信息不会说是哪一行对不上，
+    所以这段绝不能有第二份。"""
     query = {str(k): str(v) for k, v in (query or {}).items() if v is not None}
     stamp = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime())
-    # 有正文时，Content-MD5 和 Content-Type 都要进签名串（GET 那两行是空的）。
-    # 少一个就是 SignatureDoesNotMatch，而错误信息不会说是哪一行对不上
-    raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode() if body else b""
+    # 有正文时，Content-MD5 和 Content-Type 都要进签名串（GET 那两行是空的）
     md5 = base64.b64encode(hashlib.md5(raw).digest()).decode() if raw else ""  # noqa: S324
-    ctype = "application/json; charset=utf-8" if raw else ""
     headers = {
-        "accept": "application/json",
+        "accept": accept,
         "date": stamp,
         "host": endpoint,
         "x-acs-signature-nonce": uuid.uuid4().hex,
@@ -243,10 +273,13 @@ def call_roa(
     url = f"https://{endpoint}{path}"
     if query:
         url += "?" + urllib.parse.urlencode(query)
-    # **method 一律显式传下去。** 之前这里在没有正文时调 `send(url, headers)`，
-    # 而那个默认是 GET —— 于是签名按 DELETE 算、请求按 GET 发，回 SignatureDoesNotMatch，
-    # 而错误信息只会说签名不对，不会说是方法不一致
-    status, reply = send(url, headers, method, raw)
+    return url, headers, query
+
+
+def _roa_result(status, reply, path):
+    """**method 一律显式传下去。** 之前调用处在没有正文时调 `send(url, headers)`，
+    而那个默认是 GET —— 于是签名按 DELETE 算、请求按 GET 发，回 SignatureDoesNotMatch，
+    而错误信息只会说签名不对，不会说是方法不一致。"""
     if status in (200, 201):
         return reply
     code = str(reply.get("Code") or "")

@@ -51,9 +51,11 @@ from typing import Callable, Optional
 
 from . import access as access_mod
 from . import alerts, iam_sync, inventory
+from . import approval_hook as hook_mod
 from . import assets as assets_mod
 from . import health as health_mod
 from . import notify as notify_mod
+from . import nudge as nudge_mod
 from . import people as people_mod
 from . import policies as policies_mod
 from . import review as review_mod
@@ -645,6 +647,7 @@ _STATIC = {
     "/health.js": ("health.js", "text/javascript; charset=utf-8"),
     "/hygiene.js": ("hygiene.js", "text/javascript; charset=utf-8"),
     "/iam.js": ("iam.js", "text/javascript; charset=utf-8"),
+    "/storage.js": ("storage.js", "text/javascript; charset=utf-8"),
 }
 #: 页面只加载同源资源。前端不拼 innerHTML，这条 CSP 是第二道闸。
 _CSP = (
@@ -656,6 +659,9 @@ _ADMIN_REVIEW = "/api/admin/review"
 _ADMIN_ASSET_OWNER = "/api/admin/assets/owner"
 _ADMIN_REVOKE = "/api/admin/access/revoke"
 _ADMIN_POLICY_RULES = "/api/admin/policies/rules"
+#: 飞书审批回调。**免登录**（飞书不带用户身份），鉴权靠 Verification Token
+_FEISHU_HOOK = "/feishu/approval"
+_ADMIN_NUDGE = "/api/admin/nudge"
 _ADMIN_IAM = "/api/admin/iam-attributes"
 _ADMIN_IAM_FILE = "/api/admin/iam-attributes/file"
 
@@ -722,6 +728,10 @@ class Backend:
         notify: Optional[Callable[[str, dict], None]] = None,
     ):
         self._notify = notify
+        #: 给人发提醒用的飞书应用机器人。和申请状态通知是同一个凭证，**不另配**
+        self._user_notifier = None
+        self._approval_hook = None
+        self.base_url = notify_mod.safe_base_url(os.environ.get("DELIVERY_BASE_URL", ""))
         self.services_path = services_path
         self.dataset_buckets_path = dataset_buckets_path
         # 0 = 用 hygiene 的默认值。面板和命令行必须能配成同一套阈值
@@ -929,6 +939,12 @@ class Backend:
                 executor=self._executor,
                 issuer=self._issuer,
                 add_manual_link=link,
+                # 没配 token 时它内部 Config.from_env() 会抛错，
+                # 被 _write_iam_attr 接住记成「他登不进去」—— 不影响建号本身。
+                # **实现共用 iam_sync.writer**：原先这段闭包只写在这儿，
+                # 定时任务那边构造 Flows 时没传，于是审批通过后 sweep 执行建号，
+                # 写属性这一步被静默跳过 —— 线上第一个账号就是这么登不进去的
+                write_iam=iam_sync.writer(self.iam_spec_path),
                 current_groups=self.current_groups,
                 policy_snapshot=self.policies,
                 policy_rules=self.policy_rules,
@@ -948,6 +964,58 @@ class Backend:
         if user is None:
             return None
         return {g.name for g in snap.groups_of(user)} | set(user.groups)
+
+    def approval_hook(self):
+        """飞书审批回调的校验器。token 从环境变量读，**没配就一律拒绝**。"""
+        if self._approval_hook is None:
+            codes = []
+            with contextlib.suppress(Exception):
+                config = ApprovalConfig.load(self.approval_path)
+                codes = [config.approval_code] if config is not None else []
+            self._approval_hook = hook_mod.Hook(
+                verify_token=os.environ.get(hook_mod.ENV_VERIFY_TOKEN, ""),
+                codes=codes,
+            )
+        return self._approval_hook
+
+    def user_notifier(self):
+        """私聊某个人用的飞书机器人。没配凭证返回 None —— 调用方据此回 503，
+        **不静默跳过**：以为提醒发出去了、其实没发，比报错糟得多。"""
+        if self._feishu_token is None or not self.base_url:
+            return None
+        if self._user_notifier is None:
+            self._user_notifier = notify_mod.FeishuNotifier(self._feishu_token, self.base_url)
+        return self._user_notifier
+
+    def admin_todo(self, user) -> dict:
+        """管理员的待办数。**读缓存，不打外部接口** —— 这个方法在每次拿会话时都会跑。
+
+        `iam_pending` 是「已离职但云登录名还挂着、且没被稍后处理」的人数。
+        读不到缓存返回 0 而不是报错：待办数拿不到不该让整个面板登不进去。
+        """
+        if self.role(user) != ROLE_ADMIN:
+            return {}
+        paths = self.iam_paths()
+        if paths is None:
+            return {}
+        try:
+            cached = iam_sync.cached_reconcile(paths)
+        except Exception:  # noqa: BLE001 — 待办数不该让会话失败
+            return {}
+        if not cached:
+            return {}
+        held = set()
+        try:
+            held = set(iam_sync.load_snooze(paths))
+        except Exception:  # noqa: BLE001
+            held = set()
+        pending = sum(
+            1
+            for e in (cached.get("apps") or [])
+            for d in (e.get("drift") or [])
+            if d.get("kind") == "inactive" and f"{e.get('app')}/{d.get('union_id')}" not in held
+        )
+        return {"iam_pending": pending, "checked_at": str(cached.get("checked_at") or "")}
 
     def iam_paths(self) -> Optional[iam_sync.SyncPaths]:
         """属性表同步要写名册所在目录：路径没配（或过不了写盘守卫）就不开这个功能。"""
@@ -1237,6 +1305,9 @@ def make_handler(
                         "role": backend.role(user),
                         "login_url": proxy.login_url if proxy is not None else "/auth/login",
                         "logout_url": proxy.logout_url if proxy is not None else "/auth/logout",
+                        # 待办数跟着会话走：**每一页都看得见**。
+                        # 埋在某个二级页里的待办，等于没有待办
+                        "todo": backend.admin_todo(user),
                     },
                 )
             if path == "/api/me":
@@ -1645,7 +1716,8 @@ def make_handler(
 
             写的是员工属性表（全员邮箱与云用户名），路径守卫、格式规则和 CLI 完全同一套。
             """
-            if self._require(admin=True) is None:
+            who = self._require(admin=True)
+            if who is None:
                 return None
             paths = backend.iam_paths()
             if paths is None:
@@ -1655,7 +1727,16 @@ def make_handler(
                 # 预览不写任何文件，这个参数只是把被拦下的 remove 行也算出来给人看。
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                 allow = (query.get("allow_mass_remove") or [""])[0] == "1"
-                return self._iam_result(lambda: iam_sync.preview(paths, allow_mass_remove=allow))
+
+                def _preview():
+                    out = iam_sync.preview(paths, allow_mass_remove=allow)
+                    # 上次对账的结果直接给出去 —— 对账要打外部接口、几秒钟，
+                    # 做成「点一下才有」就意味着没人点
+                    out["reconcile"] = iam_sync.cached_reconcile(paths)
+                    out["snoozed"] = sorted(iam_sync.load_snooze(paths))
+                    return out
+
+                return self._iam_result(_preview)
             refused = self._same_origin_json()
             if refused:
                 return self._json(403, {"error": refused})
@@ -1672,7 +1753,136 @@ def make_handler(
             if op == "discard":
                 name = str(body.get("name") or "")
                 return self._iam_result(lambda: iam_sync.discard(paths, name))
-            return self._json(400, {"error": "op 只能是 export、confirm 或 discard"})
+            if op == "reconcile":
+                # 只读：不写文件、不改基线、不下发。出去打 IT 的接口，所以可能慢
+                return self._iam_result(lambda: iam_sync.reconcile_report(paths))
+            if op == "snooze":
+                # 稍后处理。**不是忽略** —— 到点它自己回到待办里
+                return self._iam_result(
+                    lambda: iam_sync.snooze(
+                        paths,
+                        str(body.get("union_id") or ""),
+                        str(body.get("app") or ""),
+                        hours=float(body.get("hours") or 3),
+                        actor=who.user.union_id,
+                    )
+                )
+            if op == "reclaim":
+                # 管理员确认某人离职 → 删他的 cloud_accounts 属性。
+                # **服务端重新读一次 IAM 核对**，不信请求里说的「他离职了」
+                rp = backend.review_paths()
+
+                def _log(rows):
+                    if rp is not None:
+                        review_mod.log_iam_reclaim(rp, rows, actor=f"admin:{who.user.union_id}")
+
+                return self._iam_result(
+                    lambda: iam_sync.confirm_reclaim(
+                        paths,
+                        str(body.get("union_id") or ""),
+                        str(body.get("app") or ""),
+                        actor=who.user.union_id,
+                        log=_log,
+                    )
+                )
+            return self._json(
+                400,
+                {"error": "op 只能是 export、confirm、discard、reconcile、reclaim 或 snooze"},
+            )
+
+        def _feishu_approval(self):
+            """飞书审批回调。审批人一点同意，这里立刻把对应的单子同步一次。
+
+            **免登录**：飞书不带用户身份，鉴权靠 Verification Token（飞书后台配的那个）。
+            没配 token 就拒绝一切事件 —— 一个没有鉴权的公网 POST 入口，
+            谁都能拿它触发同步。
+
+            **不做任何开通动作。** 它调的是 `flows.sync`，和定时任务同一条路，
+            只是提前触发。两条执行路径迟早会不一致，而不一致那天没人知道跑的是哪条。
+            """
+            body, sent = self._json_body(allow_empty=True)
+            if body is None:
+                return sent
+            hook = backend.approval_hook()
+            # challenge 在验 token 之前：还没配 token 时也要能过地址校验
+            got = hook.challenge(body)
+            if got is not None:
+                return self._json(200, {"challenge": got})
+            if not hook.configured:
+                print(
+                    f"[feishu-hook] 未配置 {hook_mod.ENV_VERIFY_TOKEN}，拒绝事件", file=sys.stderr
+                )
+                return self._json(403, {"error": "未配置回调校验"})
+            if not hook.check_token(body):
+                return self._json(403, {"error": "校验失败"})
+            if not hook.mine(body):
+                # 别人的审批（请假、报销……）。回 200 丢掉 —— 回非 200 飞书会一直重投
+                return self._json(200, {"ok": True, "synced": 0})
+            instance = hook.instance_of(body)
+            if not instance or not hook.claim(instance):
+                # 认不出实例号、或者刚处理过（飞书会重投）—— 都回 200，
+                # 回非 200 飞书会一直重发
+                return self._json(200, {"ok": True, "synced": 0})
+            flows = backend.flows()
+            if flows is None:
+                return self._json(200, {"ok": True, "synced": 0})
+            try:
+                done = flows.sync_by_instance(instance)
+            except Exception as exc:  # noqa: BLE001 — 回调出错不能让飞书一直重投
+                print(f"[feishu-hook] 同步失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+                return self._json(200, {"ok": True, "synced": 0})
+            return self._json(200, {"ok": True, "synced": len(done)})
+
+        def _nudge(self):
+            """管理员提醒某个人处理一件事（该换密钥、密钥没人用……）。
+
+            **面板 + 飞书双发。** 面板上那个标记只对「已经打开了那一页的人」有用，
+            而密钥页平时没有任何理由打开 —— 所以光有标记等于没通知。
+            """
+            who = self._require(admin=True)
+            if who is None:
+                return None
+            refused = self._same_origin_json()
+            if refused:
+                return self._json(403, {"error": refused})
+            body, sent = self._json_body(allow_empty=True)
+            if body is None:
+                return sent
+            if not backend.people_path:
+                return self._json(404, {"error": "服务端没有配置名册路径"})
+            notifier = backend.user_notifier()
+            if notifier is None:
+                return self._json(
+                    503,
+                    {"error": "没有配置飞书应用凭证，发不了提醒"},
+                )
+            rp = backend.review_paths()
+
+            def _log(row):
+                if rp is not None:
+                    review_mod.log_event(rp, row)
+
+            try:
+                out = nudge_mod.send(
+                    notifier,
+                    people_path=backend.people_path,
+                    union_id=str(body.get("union_id") or ""),
+                    topic=str(body.get("topic") or ""),
+                    subject=str(body.get("subject") or ""),
+                    why=str(body.get("why") or ""),
+                    detail=str(body.get("detail") or ""),
+                    ref=str(body.get("ref") or ""),
+                    base_url=backend.base_url,
+                    actor=f"admin:{who.user.union_id}",
+                    log=_log,
+                    force=body.get("force") is True,
+                )
+            except DeliveryError as exc:
+                return self._json(409, {"error": str(exc).splitlines()[0]})
+            except Exception as exc:  # noqa: BLE001 — 不把堆栈回给浏览器
+                print(f"[nudge] {type(exc).__name__}: {exc}", file=sys.stderr)
+                return self._json(502, {"error": "提醒没发出去，请查看服务端日志"})
+            return self._json(200, out)
 
         def _iam_result(self, run):
             try:
@@ -2080,6 +2290,8 @@ def make_handler(
 
         def do_POST(self):  # noqa: N802
             path = urllib.parse.urlsplit(self.path).path
+            if path == _FEISHU_HOOK:
+                return self._feishu_approval()
             if path == "/api/pickup":
                 return self._pickup()
             if path == _ADMIN_POLICY_RULES:
@@ -2090,6 +2302,8 @@ def make_handler(
                 return self._revoke_access()
             if path == _ADMIN_REVIEW:
                 return self._review()
+            if path.rstrip("/") == _ADMIN_NUDGE:
+                return self._nudge()
             if path.rstrip("/") == _ADMIN_IAM:
                 return self._iam_attributes("POST")
             if path == _ADMIN_IAM_FILE:

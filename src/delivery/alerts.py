@@ -58,20 +58,53 @@ def send_feishu(
     post: Callable[[str, dict], dict] = _post,
     clock: Callable[[], float] = time.time,
 ) -> None:
+    _check(webhook, secret)
+    if len(text) > _MAX_TEXT:
+        text = text[:_MAX_TEXT] + "\n…（已截断，详情见面板）"
+    _deliver(
+        {"msg_type": "text", "content": {"text": text}},
+        webhook=webhook,
+        secret=secret,
+        post=post,
+        clock=clock,
+    )
+
+
+def send_feishu_card(
+    card: dict,
+    *,
+    webhook: str,
+    secret: str,
+    post: Callable[[str, dict], dict] = _post,
+    clock: Callable[[], float] = time.time,
+) -> None:
+    """发一张交互卡片。自定义机器人的卡片放**顶层 `card` 字段**，不是 `content`。
+
+    和 `send_feishu` 共用签名、地址校验、成功码判定 —— 那三样都踩过坑，只该有一份。
+    """
+    _check(webhook, secret)
+    if not isinstance(card, dict) or not card:
+        raise AlertError("卡片必须是非空对象")
+    _deliver(
+        {"msg_type": "interactive", "card": card},
+        webhook=webhook,
+        secret=secret,
+        post=post,
+        clock=clock,
+    )
+
+
+def _check(webhook: str, secret: str) -> None:
     prefix = next((x for x in _ALLOWED_PREFIXES if webhook.startswith(x)), "")
     if not prefix or not _HOOK_ID.fullmatch(webhook[len(prefix) :]):
         raise AlertError(f"{ENV_WEBHOOK} 必须是飞书自定义机器人地址（{_ALLOWED_PREFIXES[0]}…）")
     if not secret:
         raise AlertError(f"要设置 {ENV_SECRET}：机器人必须开启签名校验")
-    if len(text) > _MAX_TEXT:
-        text = text[:_MAX_TEXT] + "\n…（已截断，详情见面板）"
+
+
+def _deliver(body: dict, *, webhook: str, secret: str, post, clock) -> None:
     ts = int(clock())
-    payload = {
-        "timestamp": str(ts),
-        "sign": sign(ts, secret),
-        "msg_type": "text",
-        "content": {"text": text},
-    }
+    payload = {"timestamp": str(ts), "sign": sign(ts, secret), **body}
     try:
         data = post(webhook, payload)
     except Exception as exc:  # noqa: BLE001

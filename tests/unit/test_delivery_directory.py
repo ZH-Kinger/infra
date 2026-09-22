@@ -37,10 +37,25 @@ def user(uid, name, email="", employee_no="", resigned=False, personal=""):
 class FeishuFake:
     """children: 部门列表页；users: {dept_id: [页1, 页2, ...]}，每页是 user 列表。"""
 
-    def __init__(self, departments_pages, users_pages, errors=None):
+    def __init__(
+        self,
+        departments_pages,
+        users_pages,
+        errors=None,
+        scope_departments=("0",),
+        scope_users=(),
+        batch_users=(),
+        scope_pages=None,
+    ):
         self.departments_pages = departments_pages
         self.users_pages = users_pages
         self.errors = errors or {}
+        #: 应用的通讯录可见范围。**默认就是根部门** —— 全员可见的应用飞书就是这么回的，
+        #: 所以原有用例的语义不变
+        self.scope_departments = list(scope_departments)
+        self.scope_users = list(scope_users)
+        self.batch_users = list(batch_users)
+        self.scope_pages = scope_pages
         self.calls = []
 
     def _page(self, pages, page_token):
@@ -57,10 +72,40 @@ class FeishuFake:
         parts = urllib.parse.urlsplit(url)
         q = dict(urllib.parse.parse_qsl(parts.query))
         self.calls.append((parts.path, q))
+        if parts.path.endswith("/contact/v3/scopes"):
+            if "scopes" in self.errors:
+                return self.errors["scopes"]
+            # scopes 分页：三张表合计不超过 page_size，这里按「一页一个部门」模拟
+            if self.scope_pages is None:
+                return {
+                    "code": 0,
+                    "data": {
+                        "department_ids": self.scope_departments,
+                        "user_ids": self.scope_users,
+                        "has_more": False,
+                    },
+                }
+            idx = int(q.get("page_token") or 0)
+            page = self.scope_pages[idx]
+            more = idx + 1 < len(self.scope_pages)
+            data = {**page, "has_more": more}
+            if more:
+                data["page_token"] = str(idx + 1)
+            return {"code": 0, "data": data}
+        if parts.path.endswith("/contact/v3/users/batch"):
+            want = set(urllib.parse.parse_qs(parts.query).get("user_ids") or [])
+            return {
+                "code": 0,
+                "data": {"items": [u for u in self.batch_users if u.get("union_id") in want]},
+            }
         assert q["page_size"] == "50"
-        if parts.path.endswith("/contact/v3/departments/0/children"):
-            if "children" in self.errors:
-                return self.errors["children"]
+        if parts.path.endswith("/children"):
+            # errors 里可以按 `children:<部门>` 精确指定哪个部门的子部门查询要失败，
+            # `children` 则是全部 —— 「根部门没权限但受限部门可以」正是要测的那种情况
+            dept = parts.path.rsplit("/", 2)[-2]
+            for key in (f"children:{dept}", "children"):
+                if key in self.errors:
+                    return self.errors[key]
             return self._page(self.departments_pages, q.get("page_token"))
         if parts.path.endswith("/contact/v3/users/find_by_department"):
             assert q["user_id_type"] == "union_id"
@@ -98,6 +143,99 @@ class FromFeishuTests(unittest.TestCase):
         self.assertEqual(child_tokens, [None, "1"])
         a_tokens = [q.get("page_token") for p, q in fake.calls if q.get("department_id") == "od-a"]
         self.assertEqual(a_tokens, [None, "1"])
+
+    def test_a_scoped_app_walks_its_own_departments_not_the_root(self):
+        """应用设了通讯录可见范围时，`/departments/0/children` 会回 40004。
+
+        真机踩过：那一声失败让整次刷新回退成「沿用上一份名册」，日志只印一行
+        「沿用上一份名册的 union_id N 人」—— 看起来像正常状态。两个新入职的人
+        因此一直没有 union_id，既发不进公司 IAM 也对不了账，而没有任何地方显示这件事。
+        """
+        fake = FeishuFake(
+            [[]],
+            {"od-scope": [[user("on_1", "张三", "zs@wuji.tech")]]},
+            errors={"children:0": {"code": 40004, "msg": "no dept authority"}},
+            scope_departments=("od-scope",),
+        )
+        # 不该去碰根部门
+        got = self.run_fake(fake)
+        self.assertEqual([e.union_id for e in got], ["on_1"])
+        self.assertNotIn(
+            "/contact/v3/departments/0/children",
+            [p for p, _ in fake.calls],
+        )
+
+    def test_people_authorised_directly_are_not_left_out(self):
+        """直接授权到个人的不在任何可见部门里，部门遍历碰不到他们。
+        漏了就是名册少人 —— 而少的那个人表现为「没有 union_id」，和权限没配长得一样。"""
+        fake = FeishuFake(
+            [[]],
+            {"od-a": [[user("on_1", "张三", "zs@wuji.tech")]]},
+            scope_departments=("od-a",),
+            scope_users=("on_solo",),
+            batch_users=[user("on_solo", "独行侠", "solo@wuji.tech", "E9")],
+        )
+        got = {e.union_id: e.name for e in self.run_fake(fake)}
+        self.assertEqual(got, {"on_1": "张三", "on_solo": "独行侠"})
+
+    def test_the_visible_scope_is_paged_through(self):
+        """这个接口会分页，而且三张表合计不超过 page_size。
+
+        只取一页的话，范围配得多一点就静默丢人 —— 而丢掉的人表现为
+        「名册里没有 union_id」，和「权限没配」长得一模一样。
+        """
+        fake = FeishuFake(
+            [[]],
+            {
+                "od-a": [[user("on_1", "甲", "a@wuji.tech")]],
+                "od-b": [[user("on_2", "乙", "b@wuji.tech")]],
+            },
+            scope_pages=[
+                {"department_ids": ["od-a"], "user_ids": []},
+                {"department_ids": ["od-b"], "user_ids": ["on_solo"]},
+            ],
+            batch_users=[user("on_solo", "丙", "c@wuji.tech")],
+        )
+        got = {e.union_id for e in self.run_fake(fake)}
+        self.assertEqual(got, {"on_1", "on_2", "on_solo"})
+
+    def test_has_more_without_a_page_token_aborts(self):
+        """翻不下去了就抛错，不能拿半份可见范围当全部。"""
+        fake = FeishuFake(
+            [[]],
+            {},
+            scope_pages=[
+                {"department_ids": ["od-a"], "user_ids": []},
+            ],
+        )
+        fake.scope_pages = [{"department_ids": ["od-a"], "user_ids": [], "_no_token": True}]
+        orig = fake.__call__
+
+        def broken(url, token):
+            out = orig(url, token)
+            if "scopes" in url:
+                out["data"]["has_more"] = True
+                out["data"].pop("page_token", None)
+            return out
+
+        fake.__call__ = broken
+        with self.assertRaises(FeishuError):
+            from_feishu("", "", get=broken, token=TOKEN)
+
+    def test_an_empty_scope_is_an_error_not_an_empty_company(self):
+        fake = FeishuFake([[]], {}, scope_departments=(), scope_users=())
+        with self.assertRaises(FeishuError):
+            self.run_fake(fake)
+
+    def test_a_resigned_person_authorised_directly_is_still_skipped(self):
+        fake = FeishuFake(
+            [[]],
+            {},
+            scope_departments=("od-a",),
+            scope_users=("on_gone",),
+            batch_users=[user("on_gone", "走了", "g@wuji.tech", resigned=True)],
+        )
+        self.assertEqual(self.run_fake(fake), [])
 
     def test_root_department_always_scanned(self):
         fake = FeishuFake([[]], {"0": [[user("on_1", "张三", "zs@wuji.tech")]]})

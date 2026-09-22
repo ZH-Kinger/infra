@@ -131,6 +131,16 @@ function renderTopbar(space = "user") {
   switcher.textContent = space === "admin" ? "回到员工视图" : "管理后台";
   switcher.setAttribute("href", space === "admin" ? "#me" : "#admin/requests");
   document.getElementById("logout").setAttribute("href", safePath(s.logout_url, "/auth/logout"));
+  // 待办数标在导航上。**埋在二级页里的待办等于没有待办** ——
+  // 对账那件事以前要点进「IAM 属性表」再点一次按钮才看得见，于是没人看
+  const n = ((s.todo || {}).iam_pending) || 0;
+  for (const tab of document.querySelectorAll('.tab[data-tab="admin-iam"]')) {
+    const old = tab.querySelector(".tab-badge");
+    if (old) old.remove();
+    if (n > 0) {
+      tab.append(h("span", { class: "tab-badge", title: `${n} 人已离职但云登录名还挂着` }, String(n)));
+    }
+  }
 }
 
 function markTab(name) {
@@ -275,13 +285,27 @@ function renderLogin() {
   const url = safePath(state.loginUrl, "/");
   const known = url !== "/";
   const viaIam = url.startsWith("/oauth2/");
+  // 登录页是这个平台给人的第一印象，也是**唯一一个未登录的人看得到的页面**。
+  // 它该说清楚三件事：这是什么、你能在这儿做什么、怎么进来 —— 而不只是一个按钮。
+  const can = [
+    ["账号与权限", "你在阿里云、火山引擎上有哪些子账号，各自什么权限"],
+    ["申请开通", "权限、访问凭证、数据目录、资源，走飞书审批"],
+    ["密钥台账", "每把建了多久、最近用过没有"],
+  ];
   mount(
-    h(
-      "div",
-      { class: "card login" },
-      h("h1", {}, "云权限面板"),
-      h("p", {}, `查看你在阿里云、火山引擎上的账号和权限。${!known ? "" : viaIam ? "用公司 IAM 登录。" : "用飞书账号登录。"}`),
-      h("a", { class: "btn", href: url }, !known ? "重新登录" : viaIam ? "用公司 IAM 登录" : "用飞书登录"),
+    h("div", { class: "login-wrap" },
+      h("div", { class: "login-mark", "aria-hidden": "true" }, "☁"),
+      h("h1", { class: "login-title" }, "云账号平台"),
+      h("p", { class: "login-sub" }, "一个地方看清你在各朵云上的账号、权限和密钥"),
+      h("a", { class: "btn login-go", href: url },
+        !known ? "重新登录" : viaIam ? "用公司 IAM 登录" : "用飞书登录"),
+      h("p", { class: "login-note" },
+        !known ? "会话已过期，重新登录一次。"
+          : viaIam ? "用公司 IAM 账号登录，和其他内部系统同一个身份。"
+            : "用飞书扫码或账号登录。"),
+      h("ul", { class: "login-can" }, can.map(([t, d]) =>
+        h("li", {}, h("b", {}, t), h("span", {}, d)))),
+      h("p", { class: "login-foot" }, "登录后只看得到与你相关的账号。"),
     ),
   );
 }

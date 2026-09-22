@@ -44,6 +44,9 @@ class Finding:
     why: str
     owner: str = ""
     detail: str = ""
+    #: 属主的 union_id。**给「提醒本人」用的** —— `owner` 是「姓名 邮箱」那串给人看的文本，
+    #: 按它去找人得反查，而名字会重、邮箱会变，union_id 不会
+    owner_uid: str = ""
 
     @property
     def scope(self) -> str:
@@ -413,6 +416,10 @@ def _owner_of(person) -> str:
     return f"{person.name} {person.email}".strip()
 
 
+def _owner_uid(person) -> str:
+    return str(getattr(person, "union_id", "") or "") if person is not None else ""
+
+
 def _abandoned(datasets: Optional[Iterable]) -> list:
     """属主的 RAM 号已经删了、东西还留着的那些。
 
@@ -528,6 +535,7 @@ def build(
         key = (user.platform, user.account, user.name)
         person = by_account.get(key)
         owner = _owner_of(person)
+        owner_uid = _owner_uid(person)
 
         if person is None and _is_service(user.name, known_services):
             # 服务号不进无主清单，但下面的 AK 检查照常 —— 服务号的 AK 才最容易被忘掉
@@ -579,6 +587,7 @@ def build(
                     account=user.account,
                     subject=user.name,
                     owner=owner,
+                    owner_uid=owner_uid,
                     why=f"AK {k.id[:8]}… 建于 {k.created[:10] or '未知'}",
                     detail=f"最近用过：{k.last_used[:10] or '从没用过'}",
                 )
@@ -591,6 +600,7 @@ def build(
                     account=user.account,
                     subject=user.name,
                     owner=owner,
+                    owner_uid=owner_uid,
                     why=f"AK {k.id[:8]}… "
                     + ("从来没用过" if not k.last_used_ts else f"最后一次用是 {k.last_used[:10]}"),
                     detail=f"建于 {k.created[:10] or '未知'}",
@@ -653,6 +663,9 @@ def view(report: Report) -> dict:
                         "subject": f.subject,
                         "scope": f.scope,
                         "owner": f.owner,
+                        # 「提醒本人」要靠它找人。**不能用 owner 那串「姓名 邮箱」反查** ——
+                        # 名字会重、邮箱会变，union_id 不会
+                        "owner_uid": f.owner_uid,
                         "why": f.why,
                         "detail": f.detail,
                     }

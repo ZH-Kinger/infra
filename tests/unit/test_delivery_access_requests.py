@@ -19,6 +19,7 @@ from delivery import people as people_mod
 from delivery import tickets as t
 from delivery.approval import Applicant, ApprovalConfig, ApprovalError, FeishuApproval
 from delivery.clouds import aliyun
+from delivery.errors import DeliveryError
 from delivery.flows import FlowError, Flows
 from delivery.provision import (
     AliyunExecutor,
@@ -33,7 +34,7 @@ ACC = "1000000000000001"
 BUCKET = "wuji-train-data"
 REGION = "cn-hangzhou"
 #: 凭证申请的标准 payload：桶必须在模板白名单里，时长决定走 STS 还是长期
-CRED = {"bucket": BUCKET, "hours": 2}
+CRED = {"bucket": BUCKET, "prefix": "batch/", "hours": 2}
 TEMPLATES = {
     "schema": catalog_mod.SCHEMA,
     "templates": [
@@ -182,9 +183,36 @@ class FakeExecutor:
         self._maybe_fail()
         self.actions.append(("remove", user, group))
 
-    def create_user(self, user, display):
+    def add_workspace_member(self, *, region, workspace, user, roles):
+        if getattr(self, "member_fail", None):
+            raise self.member_fail
+        self.actions.append(("member", workspace, user, tuple(roles)))
+        return f"{workspace}-uid-{user}"
+
+    def user_id(self, user):
+        return f"uid-{user}"
+
+    def enable_console(self, user):
+        if getattr(self, "console_fail", None):
+            raise self.console_fail
+        self.actions.append(("console", user))
+        return True
+
+    def create_dataset(self, *, region, workspace, name, uri, source, user, labels=None):
+        if getattr(self, "dataset_fail", None):
+            raise self.dataset_fail
+        self.actions.append(("dataset", workspace, name, uri, source))
+        return f"d-{workspace}-{name}"
+
+    def make_dir(self, bucket, prefix, region):
+        self.actions.append(("dir", bucket, prefix, region))
+        return f"{bucket}/{prefix}/"
+
+    def create_user(self, user, display, *, email="", phone=""):
         self._maybe_fail()
-        self.actions.append(("create", user, display))
+        # 安全邮箱/手机一并记下来：不记的话「建号时有没有写上」这件事零覆盖，
+        # 而漏写的表现是控制台上那两栏空着，没人会去看
+        self.actions.append(("create", user, display, email, phone))
 
     def reset_password(self, user):
         self.actions.append(("password", user))
@@ -265,6 +293,9 @@ class Harness:
         #: 凭证发放身份。不设时沿用开通身份（和 server.Backend 注入自定义 executor 时一致）
         self.issuer = None
         self.links = []
+        #: 写公司 IAM 属性的假替身。`iam_fail` 非空时抛错，用来验「写不进去也不判整单失败」
+        self.iam_writes = []
+        self.iam_fail = ""
         self.now = [1_800_000_000.0]
         self.store = t.TicketStore(str(self.dir / "tickets.json"), clock=lambda: self.now[0])
         self.approval = FeishuApproval(CONFIG, lambda: "tenant-token", transport=self.feishu)
@@ -278,8 +309,15 @@ class Harness:
             add_manual_link=lambda email, account, ticket: self.links.append(
                 (email, account, ticket)
             ),
+            write_iam=self._write_iam,
             clock=lambda: self.now[0],
         )
+
+    def _write_iam(self, union_id, platform, account, username):
+        if self.iam_fail:
+            raise DeliveryError(self.iam_fail)
+        self.iam_writes.append((union_id, platform, account, username))
+        return ""
 
     def submit(
         self, applicant=LI, template="oss-read", payload=None, reason="项目需要读取训练数据"
@@ -669,7 +707,15 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(done["status"], t.DONE)
         self.assertEqual(
             self.h.executor.actions,
-            [("create", "xinren", "新人"), ("add", "xinren", "grp-default")],
+            # 安全邮箱在建号那一刻就写上 —— 之后要补得管理员一个个去控制台点。
+            # 手机号现在传空串：飞书应用没有读手机号的权限，通讯录返回的 mobile 是 None
+            # **建号那一刻就开控制台登录** —— 原先只有「领初始密码」那条路会开它，
+            # 而企业 SSO 开了之后领密码是死路，号建出来了人却进不去
+            [
+                ("create", "xinren", "新人", "new@wuji.tech", ""),
+                ("add", "xinren", "grp-default"),
+                ("console", "xinren"),
+            ],
         )
         self.assertEqual(self.h.links, [("new@wuji.tech", f"aliyun/{ACC}/xinren", ticket["id"])])
         _, pw = self.h.flows.claim_password(ticket["id"], union_id="on_new")
@@ -1665,6 +1711,24 @@ class ReauditRegressionTests(unittest.TestCase):
         h.executor = MemberExecutor()
         return h
 
+    def _with_workspace(self, h, *spaces, template="new-user"):
+        """给模板配上工作空间。**改的是目录快照，不是文件** —— 每个用例一份，互不影响。
+
+        收的是**解析好的**配置（和 `workspaces.json` 查出来的形状一样），
+        不是地域 key —— 这些用例测的是「配上之后做了什么」，不是登记表怎么解析的。
+        """
+        from dataclasses import replace
+
+        from delivery import catalog as catalog_mod
+
+        rows = [
+            replace(tpl, workspaces=tuple(dict(w) for w in spaces)) if tpl.id == template else tpl
+            for tpl in h.flows._catalog().templates
+        ]
+        patched = catalog_mod.Catalog(templates=tuple(rows))
+        h.flows._catalog = lambda: patched
+        return patched
+
     def test_closed_partial_grant_is_not_preexisting_for_next_ticket(self):
         h = self.harness(TWO_GROUPS)
         h.executor.fail_on = ("add", "grp-b")
@@ -1685,6 +1749,307 @@ class ReauditRegressionTests(unittest.TestCase):
         ticket = h.submit(applicant=applicant, template="new-user", payload={"username": username})
         h.approve(ticket)
         return h.flows.sync(ticket["id"], force=True)
+
+    # ── 建号之后把登录名写进公司 IAM ───────────────────────────────────────
+    #
+    # 这一步不成，**人就登不进去** —— SSO 断言的 NameID 取自那个属性。
+    # 但云上账号这时已经建好了，所以它的失败处置和「对应不到申请人」是同一类：
+    # 记下来、写进结果文案，不把整张单判失败。
+
+    def test_a_new_account_is_written_into_company_iam(self):
+        h = self.harness()
+        done = self.account_done(h)
+        self.assertTrue(done["iam_written"])
+        self.assertEqual(h.iam_writes, [("on_new", "aliyun", "1000000000000001", "xinren")])
+        self.assertIn("可以用企业账号登录", done["result"])
+
+    def test_a_failed_iam_write_does_not_fail_the_whole_ticket(self):
+        """账号确实建好了。判失败会让管理员以为什么都没发生，跑去手工再建一个。"""
+        h = self.harness()
+        h.iam_fail = "IAM 暂时不可用"
+        done = self.account_done(h)
+        self.assertEqual(done["status"], t.DONE)
+        self.assertTrue(done["user_created"])
+        self.assertFalse(done.get("iam_written"))
+
+    def test_a_failed_iam_write_says_outright_that_he_cannot_log_in(self):
+        """结果里只写「已新建子账号 X」而不提这件事，申请人会以为可以用了。"""
+        h = self.harness()
+        h.iam_fail = "IAM 暂时不可用"
+        done = self.account_done(h)
+        self.assertIn("登不进去", done["result"])
+        self.assertIn("IAM 暂时不可用", done["result"])
+        events = [e.get("event") for e in done.get("events", [])]
+        self.assertIn("iam_write_needed", events)
+
+    def test_an_applicant_without_a_union_id_is_refused_early_not_retried_forever(self):
+        """接口只认 union_id。没有就是发不出去，不是「等会儿再试」。"""
+        h = self.harness()
+        ticket = h.submit(applicant=NEW, template="new-user", payload={"username": "xinren"})
+        h.approve(ticket)
+        path = h.dir / "tickets.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for row in data["tickets"]:
+            if row["id"] == ticket["id"]:
+                row["applicant"]["union_id"] = ""
+        path.write_text(json.dumps(data), encoding="utf-8")
+        done = h.flows.sync(ticket["id"], force=True)
+        self.assertIn("没有 union_id", done["result"])
+        self.assertEqual(h.iam_writes, [])
+
+    def test_a_retry_does_not_write_the_attribute_twice(self):
+        h = self.harness()
+        done = self.account_done(h)
+        h.flows.sync(done["id"], force=True)
+        self.assertEqual(len(h.iam_writes), 1)
+
+    def test_without_the_api_wired_up_the_account_is_still_created(self):
+        """没接上写入回调时，建号本身照常 —— 号确实存在这件事必须被记下来，
+        否则管理员看到失败会以为什么都没发生，跑去手工再建一个。"""
+        h = self.harness()
+        h.flows._write_iam = None
+        done = self.account_done(h)
+        self.assertEqual(done["status"], t.DONE)
+        self.assertTrue(done["user_created"])
+
+    def test_without_the_api_wired_up_it_says_he_cannot_log_in(self):
+        """**这条原先断言的是相反的**：没接上时结果文案里不准出现「登不进去」，
+        理由是「退回导 CSV 给 IT 的老路」。但 CSV 是批量导出、要 IT 手动处理，
+        那期间人照样登不进去 —— 那句话是真的，压掉它就等于骗申请人。
+
+        线上第一个账号正是这么出的事：定时任务构造 Flows 时漏传了这个回调，
+        建号成功、单子干干净净进 done、文案只有「已新建子账号 X」，
+        而那个人根本登不进去，直到他自己来问。"""
+        h = self.harness()
+        h.flows._write_iam = None
+        done = self.account_done(h)
+        self.assertIn("登不进去", done["result"])
+        events = [e.get("event") for e in done.get("events") or []]
+        self.assertIn("iam_write_needed", events, "没接上要留下痕迹，不能只在文案里")
+
+    def test_a_new_account_is_put_into_the_workspace_and_gets_a_dataset(self):
+        """**建号只建账号等于没建完**：工作空间是 PAI 的围墙，数据集、DSW、DLC
+        全是它的下级资源，不在里面的人一个都看不到。原先这三步要管理员手工做。"""
+        h = self.harness()
+        ws = {
+            "id": "640957",
+            "region": "cn-hangzhou",
+            "roles": ["PAI.AlgoDeveloper"],
+            "mount": "cpfs-x.cn-hangzhou.cpfs.aliyuncs.com",
+        }
+        self._with_workspace(h, ws)
+        done = self.account_done(h)
+        acts = [a for a in h.executor.actions if a[0] in ("member", "dataset", "dir")]
+        self.assertIn(
+            ("member", "640957", done["payload"]["username"]),
+            [(a[0], a[1], a[2]) for a in acts if a[0] == "member"],
+        )
+        self.assertTrue(done.get("workspace_done"))
+        self.assertIn("工作空间", done["result"])
+
+    def test_both_a_cpfs_and_an_oss_dataset_are_created(self):
+        """两条都要：数据集是挂载入口，少一条人就少一个能挂的地方。
+        形状照现网 —— CPFS 叫 `<登录名>`、扁平；OSS 叫 `<登录名>-oss`、带组这一层，
+        而且 URI 是「桶.域名」形式不是 `oss://桶/路径`（写错了新老会长成两种东西）。"""
+        h = self.harness()
+        self._with_workspace(
+            h,
+            {
+                "id": "640957",
+                "region": "cn-hangzhou",
+                "roles": ["PAI.AlgoDeveloper"],
+                "mount": "cpfs-x.cn-hangzhou.cpfs.aliyuncs.com",
+                "bucket": "wuji-algo-dev-hz",
+                "bucket_region": "cn-hangzhou",
+                "bucket_prefix": "general",
+            },
+        )
+        done = self.account_done(h)
+        made = {a[2]: a[3] for a in h.executor.actions if a[0] == "dataset"}
+        self.assertEqual(sorted(made), ["xinren", "xinren-oss"])
+        self.assertEqual(made["xinren"], "bmcpfs://cpfs-x.cn-hangzhou.cpfs.aliyuncs.com/xinren/")
+        self.assertEqual(
+            made["xinren-oss"],
+            "oss://wuji-algo-dev-hz.oss-cn-hangzhou.aliyuncs.com/general/xinren/",
+        )
+        # OSS 那边要真开一个占位目录；CPFS 不用（挂载时自动建）
+        self.assertIn(
+            ("dir", "wuji-algo-dev-hz", "general/xinren", "cn-hangzhou"), h.executor.actions
+        )
+        self.assertTrue(done.get("workspace_done"))
+
+    def test_console_login_is_enabled_at_creation_not_at_password_claim(self):
+        """SSO 开了之后领密码是死路（密码登录全局失效）。只在领密码那一刻开登录配置的话，
+        号建出来了却没有登录配置 —— 人拿着企业账号也进不去。火山还多一个 LoginAllowed 开关。"""
+        h = self.harness()
+        done = self.account_done(h)
+        self.assertIn(("console", done["payload"]["username"]), h.executor.actions)
+        self.assertIn("已开控制台登录", done["result"])
+
+    def test_a_console_failure_does_not_lose_the_account(self):
+        h = self.harness()
+        h.executor.console_fail = RuntimeError("云上拒了")
+        done = self.account_done(h)
+        self.assertEqual(done["status"], t.DONE)
+        self.assertTrue(done["user_created"])
+        self.assertIn("控制台登录没开成", done["result"])
+
+    def test_joining_another_workspace_also_creates_the_datasets_there(self):
+        """**只加成员不建数据集等于白加** —— 数据集是工作空间的下级资源，
+        人进去了、自己的数据却看不到，他会以为权限没给全。
+        建号和「加入别的空间」走同一个方法，就不会出现一处记得建、另一处忘了。"""
+        from dataclasses import replace
+
+        from delivery import catalog as catalog_mod
+
+        h = self.harness()
+        cat = h.flows._catalog()
+        ws = {
+            "id": "284761",
+            "region": "ap-southeast-1",
+            "roles": ["PAI.AlgoDeveloper"],
+            "mount": "cpfs-sg.ap-southeast-1.cpfs.aliyuncs.com",
+            "bucket": "wuji-algo-dev-sing",
+            "bucket_region": "ap-southeast-1",
+        }
+        rows = [
+            replace(t, workspaces=(dict(ws),)) if t.kind == "permission" else t
+            for t in cat.templates
+        ]
+        patched = catalog_mod.Catalog(templates=tuple(rows))
+        h.flows._catalog = lambda: patched
+
+        ticket = h.submit(payload={"cloud_user": "lisi", "days": 7})
+        h.approve(ticket)
+        done = h.flows.sync(ticket["id"], force=True)
+        self.assertEqual(done["status"], t.DONE)
+        made = {a[2] for a in h.executor.actions if a[0] == "dataset"}
+        self.assertEqual(made, {"lisi", "lisi-oss"}, "两条都要，少一条就少一个挂载入口")
+        self.assertIn(
+            ("member", "284761", "lisi"),
+            [(a[0], a[1], a[2]) for a in h.executor.actions if a[0] == "member"],
+        )
+
+    def test_a_workspace_failure_does_not_lose_the_account(self):
+        """账号已经建好了，那件事必须被记下来 —— 否则管理员看到失败会以为
+        什么都没发生，跑去手工再建一个。"""
+        h = self.harness()
+        self._with_workspace(
+            h,
+            {"id": "640957", "region": "cn-hangzhou", "roles": ["PAI.AlgoDeveloper"], "mount": "m"},
+        )
+        h.executor.member_fail = RuntimeError("PAI 挂了")
+        done = self.account_done(h)
+        self.assertEqual(done["status"], t.DONE)
+        self.assertTrue(done["user_created"])
+        self.assertFalse(done.get("workspace_done"))
+        self.assertIn("进不去 DSW", done["result"])
+
+    def test_a_template_without_workspace_behaves_exactly_as_before(self):
+        """这一块是加法：没配 workspace 的模板一字不变。"""
+        h = self.harness()
+        done = self.account_done(h)
+        self.assertNotIn("工作空间", done["result"])
+        self.assertEqual([a for a in h.executor.actions if a[0] == "member"], [])
+
+    def test_the_login_address_is_commented_on_the_approval(self):
+        """飞书私聊会被后面的消息淹掉；审批实例是这次开号的权威记录 ——
+        半年后问「这号当初谁批的、怎么登」，翻审批单就够了。"""
+        h = self.harness()
+        done = self.account_done(h)
+        said = "\n".join(h.feishu.texts(done["approval"]["instance_code"]))
+        self.assertIn("登录名", said)
+        self.assertIn(done["payload"]["username"], said)
+        self.assertTrue(done.get("login_commented"))
+
+    def test_a_failed_comment_does_not_fail_the_provisioning(self):
+        """号已经建好了。把整张单打成失败只会让管理员以为什么都没发生、
+        跑去手工再建一个。"""
+        h = self.harness()
+
+        h.feishu.comment_fail = RuntimeError("飞书挂了")
+        done = self.account_done(h)
+        self.assertEqual(done["status"], t.DONE)
+        self.assertTrue(done["user_created"])
+        self.assertFalse(done.get("login_commented"))
+        self.assertIn("login_comment_failed", [e.get("event") for e in done.get("events") or []])
+
+    def test_a_ticket_with_no_iam_attribute_can_be_pushed_by_an_admin(self):
+        """建号成功但属性没写成时单子是 DONE、没有重试按钮 —— 不给这个入口的话，
+        补一个人得走全量 iam-push，而那条路会连带触发「整体消失」的删除闸门。"""
+        h = self.harness()
+        h.flows._write_iam = None
+        done = self.account_done(h)
+        self.assertNotIn("iam_written", done)
+
+        h.flows._write_iam = h._write_iam  # 现在接上了
+        after = h.flows.push_iam(done["id"], actor="admin")
+        self.assertTrue(after["iam_written"])
+        self.assertEqual(after["status"], t.DONE, "补写属性不该改变单子状态")
+        self.assertEqual(len(h.iam_writes), 1)
+
+    def test_pushing_twice_is_refused(self):
+        h = self.harness()
+        done = self.account_done(h)  # 这一轮已经写进去了
+        with self.assertRaises(FlowError):
+            h.flows.push_iam(done["id"], actor="admin")
+
+    def test_pushing_a_ticket_that_created_nothing_is_refused(self):
+        """没建出号就没有登录名可写。放行的话会往 IAM 里写一个不存在的账号。"""
+        h = self.harness()
+        h.flows._write_iam = None
+        done = self.account_done(h)
+        path = h.dir / "tickets.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for row in data["tickets"]:
+            row.pop("user_created", None)
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        h.flows._write_iam = h._write_iam
+        with self.assertRaises(FlowError):
+            h.flows.push_iam(done["id"], actor="admin")
+
+    def test_a_push_that_still_fails_says_so_instead_of_looking_fine(self):
+        """按钮点了就好了、其实还没写成 —— 那比没有按钮更糟。"""
+        h = self.harness()
+        h.flows._write_iam = None
+        done = self.account_done(h)
+
+        def boom(*_a, **_k):
+            raise RuntimeError("IT 接口挂了")
+
+        h.flows._write_iam = boom
+        with self.assertRaises(FlowError):
+            h.flows.push_iam(done["id"], actor="admin")
+        self.assertFalse(h.flows.store.get(done["id"]).get("iam_written"))
+
+    def test_a_sso_account_does_not_offer_a_password_to_claim(self):
+        """开了用户 SSO 的账号，RAM 密码登录就失效了（阿里云那个是全局开关，不是并行）。
+        还让人领密码的话，他领到一串登不进去的东西，只会以为是账号没建好。"""
+        import os
+
+        from delivery import platforms
+
+        h = self.harness()
+        done = self.account_done(h)
+        scope = f"{done['template']['platform']}/{done['template']['account']}"
+        self.addCleanup(os.environ.pop, platforms.ENV_SSO, None)
+        os.environ[platforms.ENV_SSO] = scope
+        with self.assertRaises(FlowError) as caught:
+            h.flows.claim_password(done["id"], union_id=done["applicant"]["union_id"])
+        self.assertIn("企业账号", str(caught.exception))
+
+    def test_a_password_account_still_offers_one(self):
+        """反向锁：别为了堵 SSO 把没开 SSO 的账号也一起堵了。"""
+        import os
+
+        from delivery import platforms
+
+        h = self.harness()
+        done = self.account_done(h)
+        self.addCleanup(os.environ.pop, platforms.ENV_SSO, None)
+        os.environ[platforms.ENV_SSO] = "volcano/9999999999"
+        _, pw = h.flows.claim_password(done["id"], union_id=done["applicant"]["union_id"])
+        self.assertTrue(pw)
 
     def test_username_created_by_platform_is_never_reused(self):
         h = self.harness()

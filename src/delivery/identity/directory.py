@@ -56,6 +56,50 @@ def _get(url: str, token: str) -> dict:
         raise FeishuError(f"连不上飞书：{exc.reason}") from exc
 
 
+def _scopes(token: str, get: Getter) -> tuple:
+    """应用的通讯录可见范围，翻页取全。返回 `(部门, 直接授权的人)`。
+
+    **这个接口会分页，而且三张表（部门/人/用户组）合计不超过 page_size。**
+    只取一页的话，范围配得多一点就会静默丢人 —— 丢掉的那个人表现为「名册里没有 union_id」，
+    和「权限没配」长得一模一样。这正是这次要修的那个坑，别在这里原地复发一次。
+    """
+    depts: list = []
+    users: list = []
+    page_token = ""
+    for _ in range(200):
+        query = {
+            "department_id_type": "open_department_id",
+            "user_id_type": "union_id",
+            "page_size": 100,
+        }
+        if page_token:
+            query["page_token"] = page_token
+        data = _one("/contact/v3/scopes", query, token, get)
+        depts += [str(d or "") for d in (data.get("department_ids") or []) if d]
+        users += [str(u or "") for u in (data.get("user_ids") or []) if u]
+        if not data.get("has_more"):
+            return list(dict.fromkeys(depts)), list(dict.fromkeys(users))
+        page_token = str(data.get("page_token") or "")
+        if not page_token:
+            raise FeishuError(
+                "/contact/v3/scopes 返回 has_more 但没有 page_token，可见范围不完整，已中断"
+            )
+    raise FeishuError("/contact/v3/scopes 翻页超过 200 页，已中断")
+
+
+def _one(path: str, params: dict, token: str, get: Getter) -> dict:
+    """取一页，返回 `data`。和 `_pages` 共用同一套错误处理 ——
+    **失败一律抛错，绝不返回空字典**：把「问不到」渲染成「什么都没有」是这个模块最贵的错。"""
+    body = get(f"{API}{path}?{urllib.parse.urlencode(params)}", token)
+    if body.get("code") != 0:
+        raise FeishuError(
+            f"{path} 失败：code={body.get('code')} msg={body.get('msg')}。"
+            "常见原因：应用的通讯录权限范围没配，或缺 contact 相关权限。"
+            "这不是「没有人」——已中断。"
+        )
+    return body.get("data") or {}
+
+
 def _pages(path: str, params: dict, token: str, get: Getter) -> list:
     items, page_token = [], ""
     for _ in range(500):
@@ -89,15 +133,34 @@ def from_feishu(
 ) -> list:
     get = get or _get
     token = token or tenant_token(app_id, app_secret)
-    departments = ["0"] + [
-        str(d.get("open_department_id") or "")
-        for d in _pages(
-            "/contact/v3/departments/0/children",
-            {"fetch_child": "true", "department_id_type": "open_department_id"},
-            token,
-            get,
+    # **先问飞书「我能看到哪些部门」，不要从根部门 0 开始爬。**
+    #
+    # 应用设了通讯录可见范围之后，`/departments/0/children` 会回
+    # `40004 no dept authority` —— 而那一声失败会让整次刷新回退成「沿用上一份名册」，
+    # 日志上只印一行「沿用上一份名册的 union_id N 人」，看起来像正常状态。
+    # 真机实测：这个回退持续了很久，新入职的两个人（张子超、练秋酉）因此一直没有 union_id，
+    # 既发不进公司 IAM 也对不了账，而没有任何地方显示这件事正在发生。
+    #
+    # `/contact/v3/scopes` 返回的就是「这个应用被授权看到的部门和人」。
+    # 全员可见的应用它会回根部门，范围受限的应用回那几个部门 —— **两种情况同一套代码**。
+    roots, direct = _scopes(token, get)
+    if not roots and not direct:
+        raise FeishuError(
+            "/contact/v3/scopes 返回的可见范围是空的。这不是「公司没有人」——"
+            "应用的通讯录可见范围没配，或者缺 contact 权限。已中断。"
         )
-    ]
+    departments = list(roots)
+    for root in roots:
+        departments += [
+            str(d.get("open_department_id") or "")
+            for d in _pages(
+                f"/contact/v3/departments/{root}/children",
+                {"fetch_child": "true", "department_id_type": "open_department_id"},
+                token,
+                get,
+            )
+        ]
+    departments = list(dict.fromkeys(d for d in departments if d))
     seen: dict = {}
     for i, dept in enumerate(d for d in departments if d):
         if progress:
@@ -125,6 +188,28 @@ def from_feishu(
                 enterprise_email=str(u.get("enterprise_email") or u.get("email") or ""),
                 employee_no=str(u.get("employee_no") or ""),
             )
+    # 直接授权到个人的：他们不在任何可见部门里，上面那一圈遍历不到。
+    # **漏了就是名册少人**，而少的那个人表现为「没有 union_id」—— 和权限没配长得一样
+    missing = [u for u in direct if u not in seen]
+    for batch in (missing[i : i + 50] for i in range(0, len(missing), 50)):
+        data = _one(
+            "/contact/v3/users/batch",
+            [("user_ids", x) for x in batch] + [("user_id_type", "union_id")],
+            token,
+            get,
+        )
+        for u in data.get("items") or []:
+            status = u.get("status") or {}
+            if status.get("is_resigned"):
+                continue
+            uid = str(u.get("union_id") or "")
+            if uid and uid not in seen:
+                seen[uid] = DirectoryEntry(
+                    union_id=uid,
+                    name=str(u.get("name") or ""),
+                    enterprise_email=str(u.get("enterprise_email") or u.get("email") or ""),
+                    employee_no=str(u.get("employee_no") or ""),
+                )
     return list(seen.values())
 
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=Remind admins about unreclaimed cloud logins
+
+[Timer]
+# 每天上午一次。**频率靠 --every-hours 去重，不靠定时器压**：
+# 定时器跑得勤一点没关系（新离职的人当天就能被发现），
+# 同一批人 24 小时内只发一条 —— 天天重复的提醒等于没有提醒
+OnCalendar=*-*-* 10:00:00
+OnCalendar=*-*-* 16:00:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

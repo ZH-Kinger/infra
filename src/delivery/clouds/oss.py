@@ -52,6 +52,16 @@ _SUBRESOURCES = frozenset(
         # 清单末尾带「等」字、没列全，以 oss2 SDK 的 `_subresource_key_set` 为准
         "continuation-token",
         "sequential",
+        # 版本控制与生命周期：查/改都靠它们做子资源，漏了照样是 SignatureDoesNotMatch
+        "versioning",
+        "versions",
+        "versionId",
+        # 桶信息/标签：查「这桶是谁的、什么时候建的」要用
+        "bucketInfo",
+        # 访问日志配置。漏了它查 ?logging 回的是 SignatureDoesNotMatch，
+        # 很容易被读成「没权限」——实际是签名串少了这个子资源
+        "logging",
+        "stat",
     }
 )
 #: 响应 XML 的长度上限。1000 个 key 的列举响应通常在几百 KB 以内
@@ -115,6 +125,28 @@ def _error(status: int, raw: bytes, where: str) -> OssError:
     return OssError(f"{where} 失败 HTTP {status}（{code}）：{brief}", code=code)
 
 
+def _where(region: str) -> str:
+    """地域归一成主机名要的那种写法。**两套写法都收。**
+
+    模板和引擎里存的是裸地域（`cn-hangzhou`），而 `ListBuckets` 回的是带前缀的
+    （`oss-cn-hangzhou`）—— 主机名只认后者。不归一的话两个方向各有一种错法，
+    而且都不好认：
+
+      · 裸地域拼出 `<桶>.cn-hangzhou.aliyuncs.com` —— **这个域名不存在**，
+        表现是 `[Errno -2] Name or service not known`。建号时开个人目录就栽在这，
+        而它一失败，`_provision_workspace` 的 `problems` 非空，**数据集会被一起跳过**，
+        人拿到的结果是「他还进不去 DSW/DLC」，看不出根因只是少了三个字母。
+      · 带前缀的再加一次就是 `oss-oss-cn-hangzhou`，同样解析不了。
+
+    空地域直接抛：拼出来的 `<桶>..aliyuncs.com` 也只会换来一个 DNS 错误，
+    而那个错误指不到「调用方没给地域」。
+    """
+    got = str(region or "").strip()
+    if not got:
+        raise OssError("没给地域，拼不出 OSS 的主机名")
+    return got if got.startswith("oss-") else f"oss-{got}"
+
+
 def call(
     method: str,
     bucket: str,
@@ -146,7 +178,8 @@ def call(
     # `bucket` 留空 = 服务级请求（ListBuckets）：主机名不带桶名，签名串里的
     # CanonicalizedResource 是光秃秃的 `/`。拼成 `.oss-cn-hangzhou.aliyuncs.com`
     # 或者 `//` 都只会换来 SignatureDoesNotMatch，而那个报错不会告诉你差在哪
-    host = f"{region}.aliyuncs.com" if service else f"{bucket}.{region}.aliyuncs.com"
+    where = _where(region)
+    host = f"{where}.aliyuncs.com" if service else f"{bucket}.{where}.aliyuncs.com"
     stamp = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime())
     md5 = base64.b64encode(hashlib.md5(body).digest()).decode() if body else ""  # noqa: S324
 

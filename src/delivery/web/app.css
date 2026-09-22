@@ -1,5 +1,7 @@
 :root{
   color-scheme:light dark;
+  /* 卡片内容到卡片边框的左右留白。表格外侧列也用它对齐 —— 见下面 th,td 那段 */
+  --gutter:1.25rem;
   --ground:#f5f5f7; --surface:#fff; --surface-2:#f5f5f7;
   --ink:#1d1d1f; --ink-2:#6e6e73; --ink-3:#86868b;
   --hair:rgba(0,0,0,.10); --hair-strong:rgba(0,0,0,.16);
@@ -49,8 +51,26 @@
 html{scrollbar-gutter:stable}
 *{box-sizing:border-box}
 [hidden]{display:none!important}
+
+/* ── 排版：字号、字重、行距、字距是**一组**，不是各调各的 ─────────────────
+   两条规矩，都来自「字距和行距随字号变」：
+     · 字距随字号**反向**走 —— 字越大越要收紧（大字母之间看起来更散），
+       正文近 0，小号大写标签要**放开**一点才认得出
+     · 行距也随字号反向 —— 标题紧、正文松、密集表格再紧一档
+   所以下面每一档都把四个值写在一起。只改字号不改另外三个，层次就是假的。 */
+:root{
+  --t-display:650 1.75rem/1.15;  --tr-display:-.022em;
+  --t-title:   620 1.0625rem/1.3; --tr-title:-.012em;
+  --t-body:    400 .9375rem/1.6;  --tr-body:0;
+  --t-sub:     400 .8125rem/1.55; --tr-sub:.003em;
+  --t-label:   600 .6875rem/1.2;  --tr-label:.06em;
+}
+/* 根用百分比、其余一律 rem：**用户把系统字号调大时整个布局跟着长**，
+   而不是文字撑破固定像素的盒子。根写死 px 等于把无障碍设置关掉了 */
+html{font-size:100%}
 body{margin:0; background:var(--ground); color:var(--ink); font-family:var(--ui);
-     font-size:15px; line-height:1.55; -webkit-font-smoothing:antialiased}
+     font:var(--t-body) var(--ui); letter-spacing:var(--tr-body);
+     -webkit-font-smoothing:antialiased}
 a{color:var(--accent); text-decoration:none}
 a:hover{text-decoration:underline}
 a:focus-visible,button:focus-visible,input:focus-visible,.prow:focus-visible{
@@ -78,13 +98,18 @@ button{font:inherit; color:inherit}
       display:flex; flex-direction:column; gap:1.75rem}
 .masthead{display:flex; flex-direction:column; gap:.35rem}
 .masthead-row{display:flex; align-items:center; gap:.75rem; flex-wrap:wrap}
-h1{font-size:1.625rem; line-height:1.2; letter-spacing:-.021em; font-weight:600; margin:0}
-h2{font-size:.9375rem; font-weight:600; margin:0}
-.lede{margin:0; color:var(--ink-2); font-size:.875rem}
+h1{font:var(--t-display) var(--ui); letter-spacing:var(--tr-display); margin:0;
+   text-wrap:balance}
+/* h2 原来是 .9375rem —— **和正文一样大**，层次全靠字重撑着，
+   于是"这是一段标题"这件事要读完才知道。给它自己的一档 */
+h2{font:var(--t-title) var(--ui); letter-spacing:var(--tr-title); margin:0; text-wrap:balance}
+.lede{margin:0; color:var(--ink-2); font:var(--t-sub) var(--ui);
+      letter-spacing:var(--tr-sub); max-width:68ch}
 .lede.stale{color:var(--warn)}
 .group{display:flex; flex-direction:column; gap:.6rem}
-.group-label{font-size:.6875rem; font-weight:600; letter-spacing:.06em; text-transform:uppercase;
-             color:var(--ink-3); padding-inline:.15rem}
+.group-label{font:var(--t-label) var(--ui); letter-spacing:var(--tr-label);
+             text-transform:uppercase; color:var(--ink-3); padding-inline:.15rem;
+             display:flex; align-items:center; gap:.6rem}
 .card{background:var(--surface); border:1px solid var(--hair); border-radius:14px;
       box-shadow:var(--shadow); overflow:hidden}
 .card-pad{padding:1.1rem 1.25rem}
@@ -99,7 +124,8 @@ h2{font-size:.9375rem; font-weight:600; margin:0}
 
 .btn{display:inline-flex; align-items:center; justify-content:center; padding:.6rem 1.3rem;
      border-radius:980px; background:var(--accent); color:#fff; border:0; cursor:pointer;
-     font-size:.9375rem; font-weight:500; transition:opacity .18s ease}
+     font-size:.9375rem; font-weight:500;
+     transition:opacity .18s ease, transform .1s ease-out}
 .btn:hover{opacity:.85; text-decoration:none}
 .btn.ghost{background:var(--surface-2); color:var(--ink); border:1px solid var(--hair)}
 .btn.small{padding:.3rem .8rem; font-size:.8125rem}
@@ -168,10 +194,22 @@ h2{font-size:.9375rem; font-weight:600; margin:0}
 button.btn{border:0; cursor:pointer; font:inherit}
 button.btn.ghost{border:1px solid var(--hair)}
 button.btn:disabled{opacity:.5; cursor:progress}
-table{border-collapse:collapse; width:100%; font-size:.8125rem; font-variant-numeric:tabular-nums}
+/* 密集表格再紧一档：行距 1.45。数字等宽，列才对得齐 */
+table{border-collapse:collapse; width:100%; font:var(--t-sub) var(--ui); line-height:1.45;
+      letter-spacing:var(--tr-sub); font-variant-numeric:tabular-nums}
 th,td{text-align:left; padding:.6rem 1rem; border-top:1px solid var(--hair); vertical-align:top}
-thead th{border-top:0; font-size:.6875rem; font-weight:600; letter-spacing:.04em; color:var(--ink-3);
-         white-space:nowrap}
+
+/* **表格的外侧两列要和卡片自己的留白对齐。**
+   卡片里别的东西（标题行、网格、折叠条、工具条）左右都留 var(--gutter)=1.25rem，
+   而单元格只有 1rem —— 于是表格第一列比它上面的标题往外凸出 4px，
+   看起来就是文字贴着边框。差的这一点点，正是「不美观」的来源。
+   只改最外侧两列：中间列之间的 1rem 是列间距，动了反而挤。 */
+.card .scroll > table > * > tr > :first-child,
+.card > table > * > tr > :first-child{padding-left:var(--gutter)}
+.card .scroll > table > * > tr > :last-child,
+.card > table > * > tr > :last-child{padding-right:var(--gutter)}
+thead th{border-top:0; font:var(--t-label) var(--ui); letter-spacing:var(--tr-label);
+         color:var(--ink-3); white-space:nowrap}
 tbody tr.prow{cursor:pointer}
 tbody tr.prow:hover{background:var(--surface-2)}
 .pname{font-weight:500}
@@ -450,6 +488,30 @@ dl.kv dd{margin:0; display:flex; gap:.5rem; align-items:center; min-width:0}
 .login{max-width:24rem; margin:12vh auto 0; text-align:center; padding:2rem 1.75rem;
        display:flex; flex-direction:column; gap:.9rem; align-items:center}
 .login p{margin:0; color:var(--ink-2); font-size:.875rem}
+
+/* ── 登录页 ──────────────────────────────────────────────────────────────
+   未登录的人只看得到这一页，所以它得自己说清楚「这是什么、你能做什么」。
+   不用整屏英雄区：这是个内部工具，气派不如清楚。 */
+.login-wrap{max-width:26rem; margin:0 auto; padding:9vh 1.25rem 4rem;
+            display:flex; flex-direction:column; align-items:center; text-align:center}
+.login-mark{width:3.25rem; height:3.25rem; display:grid; place-items:center; font-size:1.6rem;
+            border-radius:18px; background:var(--accent-soft); color:var(--accent);
+            margin-bottom:1.1rem}
+.login-title{margin:0; font-size:1.625rem; font-weight:650; letter-spacing:-.01em}
+.login-sub{margin:.45rem 0 1.6rem; color:var(--ink-2); font-size:.9375rem; line-height:1.6;
+           max-width:22rem}
+.login-go{min-width:13rem; height:2.75rem; font-size:.9375rem}
+.login-note{margin:.75rem 0 0; color:var(--ink-3); font-size:.8125rem; max-width:21rem;
+            line-height:1.6}
+/* 能做什么：三行，左对齐 —— 居中的列表读起来累，而这三行是要被读的 */
+.login-can{list-style:none; margin:2.25rem 0 0; padding:1.1rem 1.25rem; width:100%;
+           text-align:left; display:grid; gap:.85rem; border-radius:14px;
+           background:var(--surface); border:1px solid var(--hair); box-shadow:var(--shadow)}
+.login-can li{display:grid; gap:.15rem}
+.login-can b{font-size:.875rem}
+.login-can span{color:var(--ink-2); font-size:.8125rem; line-height:1.55}
+.login-foot{margin:1.4rem 0 0; color:var(--ink-3); font-size:.75rem}
+@media (max-width:420px){ .login-wrap{padding-top:6vh} .login-go{width:100%} }
 .skeleton{display:flex; flex-direction:column; gap:1rem}
 .sk{background:linear-gradient(90deg,var(--surface-2),var(--surface),var(--surface-2));
     background-size:200% 100%; border-radius:12px; animation:sk 1.2s ease-in-out infinite}
@@ -519,3 +581,104 @@ tr.dim td{opacity:.55}
 .revoke-pick { display: flex; align-items: center; gap: 6px; font-size: 13px; word-break: break-all; }
 .revoke-out { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 .revoke-out .good-text { color: var(--good, #1a7f37); }
+
+/* ── 数据目录 / 数据迁移申请 ────────────────────────────────────────────── */
+
+/* 分档标签。颜色只用来区分「丢了能不能拿回来」，不是好坏 —— A 最不可逆，所以最醒目 */
+.pill.tier-a{background:var(--crit-soft); color:var(--crit)}
+.pill.tier-b{background:var(--warn-soft); color:var(--warn)}
+.pill.tier-c{background:var(--surface-2); color:var(--ink-2)}
+.pill.tier-d{background:var(--accent-soft); color:var(--accent)}
+
+/* 窄输入框：容量数字、序号。和 .inline .input 的 7rem 比再窄一档 */
+.input.narrow{width:5.5rem; flex:none}
+.inline .input.narrow{width:5.5rem}
+
+/* 批次 ID 实时预览。人填的是「场景」，ID 是拼出来的 —— 得让他看见拼成了什么 */
+.id-line{display:flex; align-items:center; gap:.4rem; margin-top:.3rem; flex-wrap:wrap}
+.path-preview{font-family:var(--mono); font-size:.8125rem; color:var(--ink);
+              background:var(--surface-2); border-radius:6px; padding:.1rem .4rem; word-break:break-all}
+.hint .path-err,.path-err{color:var(--crit); display:block}
+
+/* 路由结论框：填完两个路径立刻显示走哪条链，不等提交。
+   这是整个迁移表单的重点 —— 用户填路径，系统告诉他会怎么搬 */
+.route-box{border:1px solid var(--hair); border-radius:10px; padding:.75rem .9rem;
+           background:var(--surface-2); display:grid; gap:.45rem}
+.route-box p{margin:0; font-size:.8125rem}
+.route-box p.small{font-size:.75rem}
+.route-head{font-size:.875rem}
+.route-hops{display:flex; align-items:center; gap:.4rem; flex-wrap:wrap}
+.route-hops code{background:var(--surface); border:1px solid var(--hair); border-radius:6px;
+                 padding:.15rem .45rem; word-break:break-all}
+.route-arrow{color:var(--ink-3); flex:none}
+.route-warn{color:var(--warn)}
+.route-bad{color:var(--crit)}
+
+/* ── 和 IAM 对账 ────────────────────────────────────────────────────────── */
+.recon-head{display:flex; align-items:baseline; gap:.6rem; flex-wrap:wrap;
+            padding-top:.9rem; margin-top:.9rem; border-top:1px solid var(--hair)}
+.recon-head:first-child{padding-top:0; margin-top:0; border-top:none}
+.recon-ok{margin:.35rem 0 0; font-size:.8125rem; color:var(--good)}
+/* 每一类差异先说「这是什么、该做什么」，再列人。
+   只列人不说该做什么的话，看的人得自己推断 —— 而这四类的处置完全不同 */
+.recon-kind{display:flex; align-items:baseline; gap:.5rem; flex-wrap:wrap; margin:.7rem 0 .3rem}
+.recon-row{display:flex; align-items:baseline; gap:.5rem; flex-wrap:wrap}
+.recon-act{display:inline-flex; align-items:center; gap:.5rem; flex-wrap:wrap}
+.good-text{color:var(--good)}
+/* 导航上的待办角标。埋在二级页里的待办等于没有待办 */
+.tab-badge{display:inline-flex; align-items:center; justify-content:center; min-width:1.1rem;
+           height:1.1rem; margin-left:.35rem; padding:0 .3rem; border-radius:980px;
+           background:var(--crit); color:#fff; font-size:.6875rem; font-weight:700;
+           font-variant-numeric:tabular-nums}
+
+/* ── 按下就有反应 ────────────────────────────────────────────────────────
+   反馈要在**按下那一刻**给，不是等松手。等 click 才变样子，手感是死的 ——
+   而这个差别只有几十毫秒，却是"这东西活着"和"这东西卡了"的分界。
+   幅度刻意很小（.985）：这是个管理面板，不是可以弹来弹去的玩具。 */
+.btn:active{transform:scale(.985)}
+.chip:active,.seg:active,.icon-btn:active{transform:scale(.97)}
+tbody tr.prow:active{background:var(--surface-2)}
+
+/* 顶栏底下那条硬线换成渐隐。悬浮的 chrome 和内容之间不该有一刀切的边界 ——
+   内容是从它下面滑过去的，不是被它切掉的 */
+.topbar{border-bottom:0; position:sticky;
+        box-shadow:0 1px 0 color-mix(in srgb,var(--hair) 70%,transparent)}
+.topbar::after{content:""; position:absolute; left:0; right:0; top:100%; height:.75rem;
+               pointer-events:none;
+               background:linear-gradient(color-mix(in srgb,var(--ground) 55%,transparent),transparent)}
+
+/* 层次：卡片之间用「同一组更近、不同组更远」表达关系，不靠加更多边框。
+   邻近即关系 —— 需要一条线来说明的分组，说明间距没做对 */
+.group + .group{margin-top:.35rem}
+
+/* ── 取件页（/c/<单号>）───────────────────────────────────────────────
+   这一页在登录之外，给的是外部合作方看的 —— 他们对这套面板没有任何熟悉度，
+   所以每一行要自己说清楚「这是什么、怎么拿走」。
+
+   敏感字段默认打码：这一页常常是在会议室投屏、或者有人在旁边的时候打开的。
+   打码用固定长度的一串（不按真实长度），长度本身就是信息。 */
+.cred-row{display:grid; grid-template-columns:minmax(6.5rem,auto) minmax(0,1fr) auto;
+          gap:.35rem .9rem; align-items:center;
+          padding:.55rem var(--gutter); border-top:1px solid var(--hair)}
+.cred-row:first-of-type{border-top:0}
+.cred-label{font-size:.8125rem; color:var(--ink-2)}
+.cred-value{font-family:var(--mono); font-size:.8125rem; background:var(--surface-2);
+            padding:.3rem .55rem; border-radius:6px; overflow-x:auto; white-space:nowrap;
+            max-width:100%; user-select:all; color:var(--ink)}
+/* 打码那串不给 user-select —— 选中复制到的是圆点，而那要到粘进终端才发现 */
+.cred-value.masked{user-select:none; color:var(--ink-3); letter-spacing:.08em}
+.cred-tools{display:flex; gap:.3rem; align-items:center; flex-shrink:0}
+.icon-btn{border:1px solid var(--hair); background:var(--surface); color:var(--ink-2);
+          border-radius:7px; padding:.28rem .5rem; font-size:.75rem; line-height:1;
+          cursor:pointer; white-space:nowrap; font-family:var(--ui)}
+.icon-btn:hover{border-color:var(--hair-strong); color:var(--ink)}
+.icon-btn.eye{font-size:.875rem; padding:.22rem .42rem}
+.icon-btn.ok{border-color:var(--good); color:var(--good); background:var(--good-soft)}
+.icon-btn.bad{border-color:var(--warn); color:var(--warn); background:var(--warn-soft)}
+.snippet-tools{justify-content:flex-end; padding:0 var(--gutter) .45rem}
+
+/* 窄屏：标签单独一行，值和按钮并排 —— 三列挤在 400px 里会把值压成两个字符宽 */
+@media (max-width:30rem){
+  .cred-row{grid-template-columns:minmax(0,1fr) auto}
+  .cred-label{grid-column:1 / -1}
+}

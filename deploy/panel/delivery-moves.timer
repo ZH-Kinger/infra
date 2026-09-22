@@ -1,0 +1,14 @@
+[Unit]
+Description=Advance cloud panel data migrations every 5 minutes
+
+[Timer]
+# 开机等 3 分钟再跑第一轮：面板和网络先起来
+OnBootSec=3min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30
+# Persistent=false：错过的轮次不补。搬运是长任务，补跑一轮没有意义，
+# 只会在开机时挤出一堆并发的云调用
+Persistent=false
+
+[Install]
+WantedBy=timers.target

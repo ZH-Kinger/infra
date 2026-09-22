@@ -244,6 +244,22 @@ def _approval_fields(tpl: Mapping, payload: Mapping) -> dict:
             "caps": caps,
             "valid": _duration(hours) if hours else "",
         }
+    if kind == catalog_mod.KIND_STORAGE:
+        # 审批人要看清「什么数据、放哪、多大」。一段摘要得逐字读，拆成字段能扫
+        return {
+            "account": acct,
+            "scope": str(payload.get("path") or ""),
+            "spec": str(payload.get("stage") or ""),
+            "detail": str(payload.get("license") or ""),
+            "valid": str(payload.get("size") or ""),
+        }
+    if kind == catalog_mod.KIND_TRANSFER:
+        return {
+            "account": acct,
+            "scope": str(payload.get("source") or ""),
+            "spec": str(payload.get("dest") or ""),
+            "detail": "覆盖同名" if payload.get("overwrite") == "overwrite" else "跳过同名",
+        }
     if kind == catalog_mod.KIND_RESOURCE:
         # 调用方传的应该是校验后的 payload，但这里不假设 —— 非 dict 直接 .get() 会
         # AttributeError，而这一路上的异常会把单子打成「提交失败」
@@ -351,6 +367,10 @@ class Flows:
         #: 凭证发放身份。只有长期凭证的建号 / 清理走它，和开通身份是两把不同的 AK
         issuer: Optional[Callable[[str, str], object]] = None,
         add_manual_link: Optional[Callable[[str, str, str], None]] = None,
+        #: (union_id, platform, account, username) -> 写入前的旧值。把云上登录名写进公司 IAM
+        #: 的 cloud_accounts —— **SSO 断言的 NameID 取自那里，不写人就登不进去**。
+        #: None = 没接这个接口，退回「导 CSV 发给 IT」的老路
+        write_iam: Optional[Callable[[str, str, str, str], str]] = None,
         current_groups: Optional[Callable[[str, str, str], Optional[set]]] = None,
         policy_snapshot: Optional[Callable[[], Optional[dict]]] = None,
         policy_rules: Optional[Callable[[], policies_mod.Rules]] = None,
@@ -368,6 +388,7 @@ class Flows:
         self._executor = executor
         self._issuer = issuer
         self._add_manual_link = add_manual_link
+        self._write_iam = write_iam
         self._current_groups = current_groups
         self._policy_snapshot = policy_snapshot or (lambda: None)
         self._policy_rules = policy_rules or policies_mod.Rules
@@ -438,8 +459,10 @@ class Flows:
                 elif created is not None:
                     username = (created.get("payload") or {}).get("username", "")
                     state, note = "owned", f"子账号 {username} 已开通，名册刷新后显示"
-            elif tpl.kind == catalog_mod.KIND_RESOURCE:
-                pass  # 面板不创建资源，既不需要开通身份，也不要求申请人先有子账号
+            elif tpl.kind in catalog_mod.AWAIT_FULFIL:
+                # 面板不创建资源 / 不建目录 / 不搬数据：既不需要开通身份，
+                # 也不要求申请人先有子账号。拿这个当门槛只会把提需求的人挡在外面
+                pass
             elif self._executor_ready is not None and not self._executor_ready(
                 tpl.platform, tpl.account
             ):
@@ -837,6 +860,10 @@ class Flows:
             # 资源申请不要求申请人在这个云账号下有子账号：面板一行云都不写，
             # 只是登记 + 走审批，拿这个当门槛只会把提需求的人挡在外面
             return self._validate_resource(tpl, payload, where)
+        if tpl.kind == catalog_mod.KIND_STORAGE:
+            return self._validate_storage(tpl, payload, where)
+        if tpl.kind == catalog_mod.KIND_TRANSFER:
+            return self._validate_transfer(tpl, payload, where)
         username = str(payload.get("username") or "").strip()
         if not re.fullmatch(tpl.username_pattern, username) or not _SAFE_USERNAME.match(username):
             raise FlowError(
@@ -885,6 +912,19 @@ class Flows:
             prefix = grants_mod.check_prefix(raw_prefix)
         except grants_mod.GrantError as exc:
             raise FlowError(str(exc)) from None
+        # **判的是规范化之后的目录，不是原始串。** 原先判 raw_prefix：填一个 "/"
+        # （或 "//"、" / "）原始串非空、闸门放行，随后 check_prefix 把它削成 ""，
+        # 签出来就是整桶策略 —— 前端不是安全边界，直接调 API 就绕过去了。
+        if not prefix and tpl.allow_prefix and not tpl.whole_bucket:
+            # **目录留空 = 整个桶。** 这不该是默认能拿到的东西：
+            # 签出来的策略里 ListObjects 不带前缀条件、GetObject 的 ARN 是 `<桶>/*`，
+            # 而审批卡上那行 `oss://<桶>/` 看起来和一个普通目录没两样 —— 批的人看不出
+            # 自己批的是 859.7 TiB。真要整桶，在模板上把 whole_bucket 打开，
+            # 那是个显式的、有人负责的动作。
+            #
+            # **`allow_prefix=false` 的模板不受这条管**：那种模板压根不收目录，
+            # 整桶是它唯一的形态 —— 再拦一道就成了谁都提交不了
+            raise FlowError("要写明是哪个目录 —— 留空等于把整个桶开出去")
         hours = payload.get("hours", 1)
         if not isinstance(hours, int) or isinstance(hours, bool) or not 1 <= hours <= tpl.max_hours:
             raise FlowError(f"有效时长必须在 1–{tpl.max_hours} 小时之间")
@@ -944,6 +984,101 @@ class Flows:
             f"有效期 {_duration(hours)}，范围 {scope}，权限 {caps}。"
             f"凭证以本审批的评论下发，不回写面板。",
         )
+
+    #: 批次 ID 和目录名里允许的字符。**和 `workspace_tree._SEGMENT` 同一套** ——
+    #: 这一段会原样进 OSS key 和 RAM 策略的 `oss:Prefix` 条件，
+    #: 一个 `*` 或 `../` 就能让一条策略覆盖到别人的数据
+    _BATCH = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,62}\Z")
+    #: 迁移路径：`<scheme>://<桶>/<前缀>/`
+    _URI = re.compile(r"\A(oss|tos|cpfs|vepfs)://([A-Za-z0-9][A-Za-z0-9._-]{1,62})(/[^\s]*)?\Z")
+
+    def _validate_storage(self, tpl: catalog_mod.Template, payload: dict, where: str) -> tuple:
+        """新建数据目录。**桶和 stage 都只能从模板里选**，批次 ID 逐字符校验。
+
+        前端已经拦过一遍，这里再拦一次：前端是给人用的，不是安全边界。
+        """
+        bucket = str(payload.get("bucket") or "").strip()
+        allowed = {n: r for n, r in tpl.buckets}
+        if bucket not in allowed:
+            raise FlowError("这个桶不在可申请的范围里")
+        stage = str(payload.get("stage") or "").strip()
+        if stage not in tpl.stages.get(bucket, ()):
+            raise FlowError(f"{bucket} 不放这一类数据")
+        batch = str(payload.get("batch") or "").strip()
+        if not self._BATCH.match(batch):
+            raise FlowError(
+                "批次 ID 只能用字母、数字、点、下划线和横线，字母或数字开头，最长 63 位"
+            )
+        license_ = str(payload.get("license") or "").strip()[:80]
+        if stage in ("opensource", "web") and not license_:
+            # 出合规问题时这是唯一能自证的东西
+            raise FlowError("开源和互联网数据必须写明许可证或来源站点")
+        size = str(payload.get("size") or "").strip()[:20]
+        path = f"{bucket}/{stage}/{batch}/"
+        clean = {
+            "bucket": bucket,
+            "stage": stage,
+            "batch": batch,
+            "license": license_,
+            "size": size,
+            "path": path,
+        }
+        return clean, f"{path}（{allowed[bucket]}）" + (f"，约 {size}" if size else "")
+
+    def _validate_transfer(self, tpl: catalog_mod.Template, payload: dict, where: str) -> tuple:
+        """数据迁移。两个路径各自过格式白名单，桶必须在模板里。
+
+        **不在这里判断走哪条链**：那是执行时的事，而且六条链在别的仓库。
+        这里只保证「这两个地址是合法的、而且都在允许的范围内」。
+        """
+        allowed = {n for n, _ in tpl.buckets}
+        filesystems = {f["id"]: f.get("cloud", "") for f in tpl.filesystems}
+        out = {}
+        for side, label in (("source", "源"), ("dest", "目标")):
+            raw = str(payload.get(side) or "").strip()
+            hit = self._URI.match(raw)
+            if not hit:
+                raise FlowError(f"{label}路径格式不对，应形如 oss://桶名/目录/")
+            scheme, bucket, rest = hit.group(1), hit.group(2), hit.group(3) or "/"
+            prefix = rest.lstrip("/")
+            if prefix and not prefix.endswith("/"):
+                raise FlowError(f"{label}只能是目录，结尾要有 /")
+            if ".." in prefix or "//" in prefix or "*" in prefix:
+                raise FlowError(f"{label}路径里不能有 .. 、连续斜杠或通配符")
+            if scheme in ("cpfs", "vepfs"):
+                # 并行文件系统走数据流动那两条链（预热 / 沉降）。
+                # **白名单是另一份**：文件系统不是桶，拿桶那份去比会把所有
+                # cpfs:// 都判成「不在可申请的范围里」，而那句话指不到真正的原因
+                if bucket not in filesystems:
+                    known = "、".join(sorted(filesystems)) or "（模板里一个都没登记）"
+                    raise FlowError(
+                        f"{label}文件系统 {bucket} 不在可申请的范围里。已登记的：{known}"
+                    )
+                # scheme 和文件系统所属的云要对得上：`cpfs://vepfs-…` 会拿阿里的凭证
+                # 去调一个火山的文件系统，审批通过后执行时才炸
+                want = "aliyun" if scheme == "cpfs" else "volcano"
+                if filesystems[bucket] != want:
+                    raise FlowError(f"{label}写的是 {scheme}://，但 {bucket} 不是这朵云的文件系统")
+            elif bucket not in allowed:
+                raise FlowError(f"{label}桶 {bucket} 不在可申请的范围里")
+            out[side] = f"{scheme}://{bucket}/{prefix}"
+        if out["source"] == out["dest"]:
+            raise FlowError("源和目标是同一个地方")
+        # **链路成不成立在提交时就判**，不留到审批通过之后：cpfs→tos、vepfs→cpfs
+        # 这种组合原先能走完整个飞书审批，到执行时才被拒 —— 白等一轮审批，
+        # 还留一张要人工处理的失败单
+        from . import moves as moves_mod
+
+        try:
+            moves_mod.plan(out["source"], out["dest"])
+        except moves_mod.MoveError as exc:
+            raise FlowError(str(exc)) from None
+        overwrite = str(payload.get("overwrite") or "skip")
+        if overwrite not in ("skip", "overwrite"):
+            raise FlowError("同名策略只能是 skip 或 overwrite")
+        out["overwrite"] = overwrite
+        how = "覆盖同名" if overwrite == "overwrite" else "跳过同名"
+        return out, f"{out['source']} → {out['dest']}（{how}）"
 
     def _validate_resource(self, tpl: catalog_mod.Template, payload: dict, where: str) -> tuple:
         """资源开通：能选的一律选，不让填。
@@ -1069,6 +1204,25 @@ class Flows:
         return raw, days
 
     # ── 同步审批 ──────────────────────────────────────────────────────────
+    def sync_by_instance(self, instance_code: str) -> list:
+        """飞书回调说「这个审批实例动了」→ 找到对应的单子，立刻同步。
+
+        **按实例号查，不按单号** —— 回调里没有我们的单号，只有飞书的实例号。
+
+        返回同步过的单子（通常一张）。找不到就返回空 —— 那是正常的：
+        面板这个飞书应用底下还有别的审批定义，不是每一条都归我们管。
+        """
+        code = str(instance_code or "").strip()
+        if not code:
+            return []
+        out = []
+        for ticket in self.store.all():
+            if str((ticket.get("approval") or {}).get("instance_code") or "") != code:
+                continue
+            # force=True 跳过 10 秒的查询间隔：回调来了就是有变化，没必要等
+            out.append(self.sync(ticket["id"], force=True))
+        return out
+
     def sync(self, ticket_id: str, *, force: bool = False) -> dict:
         ticket = self.store.get(ticket_id)
         if ticket.get("status") != t.PENDING:
@@ -1249,9 +1403,10 @@ class Flows:
                 note=describe_error(exc) or type(exc).__name__,
             )
             return self._emit("failed", failed)
-        # 资源开通面板一行云都不写：停在「待开通」，等管理员按 IaC 建好回来登记实例信息。
-        # 直接置成「已完成」是在台账里说谎 —— 没有任何资源因为这次点击而存在
-        resource = ticket["kind"] == catalog_mod.KIND_RESOURCE
+        # 资源开通 / 数据目录 / 数据迁移，面板一行云都不写：停在「待开通」，
+        # 等人按流程做完回来登记。直接置成「已完成」是在台账里说谎 ——
+        # 没有任何东西因为这次点击而存在
+        resource = catalog_mod.awaits_human(tpl)
         if resource:
             fields.pop("done_at_ts", None)
             fields.pop("expires_at", None)
@@ -1719,8 +1874,37 @@ class Flows:
 
     def _run(self, tpl: catalog_mod.Template, ticket: dict) -> str:
         payload = ticket["payload"]
+        if tpl.kind == catalog_mod.KIND_STORAGE:
+            # 代码能建（`ex.make_dir`），但执行身份还没有数据桶的写权限，先停在「待开通」。
+            # 开权限之后把这三行换成：
+            #     ex = self._executor(tpl.platform, tpl.account)
+            #     region = dict(tpl.buckets).get(payload["bucket"], "")
+            #     return f"已建好 {ex.make_dir(payload['bucket'], …, region)}"
+            # 并把 KIND_STORAGE 从 catalog.AWAIT_FULFIL 里移走
+            return f"审批通过：建 {payload['path']}，等人按规范创建后回来登记"
+        if tpl.kind == catalog_mod.KIND_TRANSFER:
+            return (
+                f"审批通过：{payload['source']} → {payload['dest']}，等人发起搬运后回来登记任务号"
+            )
+        if tpl.kind == catalog_mod.KIND_RESOURCE and tpl.resource_type == "ecs":
+            # **审批通过就开**。模板里那套参数（镜像/交换机/安全组）配的就是这一刻用的
+            ex = self._executor(tpl.platform, tpl.account)
+            params = dict(tpl.params)
+            params.update(
+                tpl.resolved_params(payload.get("choices") or {}, payload.get("numbers") or {})
+            )
+            iid = ex.run_instance(region=tpl.region, params=params, name=ticket["id"])
+            self.store.update(
+                ticket["id"],
+                actor="system",
+                expect=[t.EXECUTING],
+                event="instance_created",
+                note=f"已开通 {iid}",
+                fields={"resource_ids": [iid]},
+            )
+            return f"已开通 {tpl.region} 的 ECS {iid}（{payload['spec']}）"
         if tpl.kind == catalog_mod.KIND_RESOURCE:
-            # 面板一行云都不写：只把批准的内容落成台账，等管理员按 IaC 建好回来登记
+            # 面板建不了这类资源（没配 resource_type）：只把批准的内容落成台账，等人建好回来登记
             return (
                 f"审批通过：{payload['spec']}"
                 + (f"（{payload['detail']}）" if payload.get("detail") else "")
@@ -1766,11 +1950,27 @@ class Flows:
                     ptype, name = key.split(":", 1)
                     ex.attach_policy(user, ptype, name)
                 done.append(f"已给 {user} 授予 {'、'.join(k.split(':', 1)[1] for k in keys)}")
-            return "；".join(done)
+            # **加入别的工作空间也要在那儿建一条数据集。**
+            # 数据集是工作空间的下级资源 —— 只加成员的话，人进去了、
+            # 自己的数据却看不到，他会以为是权限没给全
+            space = self._provision_workspace(tpl, ticket, user)
+            if space:
+                done.append(space.lstrip("；"))
+            return "；".join(done) or space.lstrip("；")
         username = payload["username"]
         # 重试时不再建号：上一次已经建好（由这张单子建的），直接补后面的步骤
         if not ticket.get("user_created"):
-            ex.create_user(username, ticket["applicant"].get("name") or username)
+            who = ticket.get("applicant") or {}
+            # 安全邮箱在建号那一刻写上：之后要补就得管理员一个个去控制台点。
+            # 手机号现在拿不到 —— 飞书应用没有 contact:user.phone:readonly，
+            # 通讯录返回的 `mobile` 是 None（`mobile_visible` 是 true 也没用）。
+            # 加了权限或让申请人在表单里填之后，从同一个地方传进来即可
+            ex.create_user(
+                username,
+                who.get("name") or username,
+                email=str(who.get("email") or ""),
+                phone=str(who.get("phone") or ""),
+            )
             self.store.update(
                 ticket["id"],
                 actor="system",
@@ -1781,10 +1981,456 @@ class Flows:
             )
         for group in tpl.groups:
             ex.add_to_group(username, group)
-        result = f"已新建子账号 {username}" + (
+        # **建号那一刻就开控制台登录。** 原先只有「本人领初始密码」那条路会开它，
+        # 而企业 SSO 开了之后领密码是死路 —— 号建出来了却没有登录配置，
+        # 人拿着企业账号也进不去。火山那边还多一个显式的 LoginAllowed 开关
+        console = ""
+        if tpl.console_login:
+            try:
+                if ex.enable_console(username):
+                    console = "，已开控制台登录"
+            except Exception as exc:  # noqa: BLE001 — 账号已经建好了，别为这个判整单失败
+                console = f"，**控制台登录没开成**（{describe_error(exc) or type(exc).__name__}）"
+                self.store.update(
+                    ticket["id"],
+                    actor="system",
+                    expect=[t.EXECUTING],
+                    event="console_needed",
+                    note=f"{username} 的控制台登录没开成：{console}",
+                )
+        result = f"已新建子账号 {username}{console}" + (
             f"，加入 {'、'.join(tpl.groups)}" if tpl.groups else ""
         )
-        return result + self._link_account(tpl, ticket, username)
+        space = self._provision_workspace(tpl, ticket, username)
+        result += space
+        iam = self._write_iam_attr(tpl, ticket, username)
+        link = self._link_account(tpl, ticket, username)
+        self._comment_login(tpl, ticket, username)
+        # 「他登不进去」排在最前面。写在末尾的话，申请人读到「已新建子账号 X」就停了，
+        # 而那恰恰是他最需要知道的一句
+        return (
+            (iam.lstrip("；") + "；" + result + link)
+            if iam.startswith("；**")
+            else (result + link + iam)
+        )
+
+    def _provision_workspace(self, tpl: catalog_mod.Template, ticket: dict, username: str) -> str:
+        """把人放进模板列的**每一个** PAI 工作空间，各自开个人目录 + 建数据集。
+
+        **建号和「加入别的工作空间」走同一条。** 数据集是工作空间的下级资源 ——
+        同一个人在两个空间里要各有一条指向同一路径的数据集，否则他人进去了、
+        自己的数据却看不到。两处各写一份的话，迟早只有一处记得建数据集。
+
+        **每一步都幂等**：成员重复加、目录重复建、数据集重名（PAI 回 400
+        `already existed`，`create_dataset` 把它当成功）—— 重试同一张单安全。
+
+        **一个地域出问题不影响别的地域。** 每个空间各自记各自的问题：
+        新加坡的挂载点配错了不该让杭州那份也不建，否则加一个地域就可能
+        把本来好好的那个一起弄坏。
+
+        失败不把整张单判失败 —— 账号已经建好了，那件事得被记下来；工作空间没配上
+        是「他还进不去 DSW」，写进结果文案让人看见，重试这张单就能补。
+        """
+        spaces = getattr(tpl, "workspaces", None) or ()
+        if not spaces or ticket.get("workspace_done"):
+            return ""
+        ex = self._executor(tpl.platform, tpl.account)
+        done, problems = [], []
+        for ws in spaces:
+            done_here, bad_here = provision_workspace(ex, ws, username)
+            done += done_here
+            problems += bad_here
+        note = "；".join(done + problems)
+        self.store.update(
+            ticket["id"],
+            actor="system",
+            expect=[t.EXECUTING],
+            event="workspace_done" if not problems else "workspace_needed",
+            note=note or "工作空间：没什么要做的",
+            fields={"workspace_done": True} if not problems else None,
+        )
+        if problems:
+            return "；**他还进不去 DSW/DLC**：" + "；".join(problems)
+        return "；" + "；".join(done)
+
+    def _write_iam_attr(
+        self, tpl: catalog_mod.Template, ticket: dict, username: str, *, expect=(t.EXECUTING,)
+    ) -> str:
+        """把新账号的登录名写进公司 IAM 的 cloud_accounts。**这一步不成，人就登不进去。**
+
+        为什么失败了也不把整张单判失败
+        ──────────────────────────────
+        云上账号这时已经建好了。判失败会让单子进 FAILED，而重试是安全的
+        （`user_created` 守着不会重复建号，写属性本身也幂等）—— 但更重要的是：
+        **账号确实存在这件事得被记下来**，否则管理员看到 FAILED 会以为什么都没发生，
+        跑去手工再建一个。
+
+        所以走 `_link_account` 同一套：记事件、把问题写进结果文案，**而且这句话要顶在最前面**
+        —— 结果里写「已新建子账号 X」而不提「他登不进去」，申请人会以为可以用了。
+        """
+        if ticket.get("iam_written"):
+            return ""
+        if self._write_iam is None:
+            # **「没接上」不能静默。** 原先这里和「已经写过了」共用一个 return ""，
+            # 于是调用方漏传 write_iam 时，建号照常成功、单子干干净净进 done、
+            # 结果文案只有「已新建子账号 X」—— 而那个人根本登不进去。
+            # 线上第一个账号就是这么出的事：定时任务构造 Flows 时没传这个回调。
+            self.store.update(
+                ticket["id"],
+                actor="system",
+                expect=list(expect),
+                event="iam_write_needed",
+                note=f"{username} 的登录名没能写进公司 IAM：这条执行路径没接上写入回调",
+            )
+            return "；**他现在登不进去**：没接上公司 IAM 的写入（管理员检查 --iam-attributes）"
+        union_id = str((ticket.get("applicant") or {}).get("union_id") or "")
+        if not union_id:
+            # 接口只认 union_id。没有就是发不出去，不是「等会儿再试」
+            self.store.update(
+                ticket["id"],
+                actor="system",
+                expect=list(expect),
+                event="iam_write_needed",
+                note=f"{username} 的登录名没能写进公司 IAM：这张单没有申请人的 union_id",
+            )
+            return "；**他现在登不进去**：没有 union_id，属性写不了"
+        try:
+            previous = self._write_iam(union_id, tpl.platform, tpl.account, username)
+        except Exception as exc:  # noqa: BLE001 — 见下
+            # **接一切**。urllib 会抛 `http.client.HTTPException`，它不是 OSError；
+            # 漏出去会被 `execute` 的兜底判成整单 FAILED —— 而那正是这段想避免的结局：
+            # 账号已经建好了，单子却显示什么都没发生
+            problem = describe_error(exc) or type(exc).__name__
+            self.store.update(
+                ticket["id"],
+                actor="system",
+                expect=list(expect),
+                event="iam_write_needed",
+                note=f"{username} 的登录名没能写进公司 IAM（{problem}），他暂时登不进去",
+            )
+            return f"；**他现在登不进去**：公司 IAM 属性没写成功（{problem}），重试这张单即可"
+        self.store.update(
+            ticket["id"],
+            actor="system",
+            expect=list(expect),
+            event="iam_written",
+            note=f"已把 {username} 写进公司 IAM" + (f"（原 {previous}）" if previous else ""),
+            fields={"iam_written": True},
+        )
+        return "；已写进公司 IAM，可以用企业账号登录了"
+
+    def link_pending(self, ticket: dict) -> bool:
+        """开账号单子建好了号，但没能自动对应到申请人，而且名册里到现在也还没对应上。
+
+        管理员在「人员与名册」里确认之后名册会更新，这里随之变成 False；不依赖单子上补事件。
+        """
+        if ticket.get("kind") != catalog_mod.KIND_ACCOUNT or not ticket.get("user_created"):
+            return False
+        events = [e.get("event") for e in ticket.get("events") or []]
+        if "link_needed" not in events or (
+            "linked" in events and events[::-1].index("linked") < events[::-1].index("link_needed")
+        ):
+            return False
+        tpl = ticket["template"]
+        key = (tpl["platform"], tpl["account"], (ticket.get("payload") or {}).get("username"))
+        try:
+            people = self._roster().people
+        except DeliveryError:
+            return True  # 名册读不了：保持提醒
+        return not any(
+            (ref.platform, ref.account, ref.name) == key
+            for person in people
+            for ref in person.accounts
+        )
+
+    def _account_owner_ok(self, ticket: dict, username: str) -> bool:
+        """名册里这个子账号要么还没对应给人，要么对应的就是申请人。"""
+        tpl = ticket["template"]
+        applicant = ticket["applicant"]
+        for person in self._roster().people:
+            for ref in person.accounts:
+                if (ref.platform, ref.account, ref.name) != (
+                    tpl["platform"],
+                    tpl["account"],
+                    username,
+                ):
+                    continue
+                if person.union_id:
+                    return person.union_id == applicant["union_id"]
+                email = str(applicant.get("email") or "").lower()
+                return bool(email) and person.email.lower() == email
+        return True
+
+    # ── 员工操作 ──────────────────────────────────────────────────────────
+    def _own(self, ticket_id: str, union_id: str) -> dict:
+        if not union_id:
+            raise FlowError("没有这张申请单", 404)
+        ticket = self.store.get(ticket_id)
+        if ticket["applicant"].get("union_id") != union_id:
+            raise FlowError("没有这张申请单", 404)
+        return ticket
+
+    def withdraw(self, ticket_id: str, *, union_id: str) -> dict:
+        ticket = self._own(ticket_id, union_id)
+        if ticket.get("status") != t.PENDING:
+            raise FlowError("只有待审批的申请可以撤回", 409)
+        approval = self._approval()
+        if approval is not None:
+            approval.cancel(ticket["approval"]["instance_code"], _applicant(ticket))
+        return self.store.update(
+            ticket_id,
+            actor=union_id,
+            expect=[t.PENDING],
+            to=t.WITHDRAWN,
+            event="withdrawn",
+            note="申请人撤回",
+        )
+
+    def claim_password(self, ticket_id: str, *, union_id: str):
+        """开账号申请：领取一次性初始密码（强制首次登录修改）。返回 (申请单, 密码)。
+
+        只在开通后 _PASSWORD_WINDOW_DAYS 天内、子账号确实由这张单子新建、名册里没有对应给别人时
+        才能领：否则一张很久以前没领的单子，可以把后来同名的别人的账号密码重置掉。
+        """
+        ticket = self._own(ticket_id, union_id)
+        if ticket["kind"] != catalog_mod.KIND_ACCOUNT or ticket.get("status") != t.DONE:
+            raise FlowError("这张申请单没有可领取的初始密码", 409)
+        if not ticket["template"].get("console_login"):
+            raise FlowError("这个模板没有开通控制台登录", 409)
+        tpl_snap = ticket["template"]
+        if platforms_mod.console_login_is_sso(
+            tpl_snap.get("platform", ""), tpl_snap.get("account", "")
+        ):
+            # 开了用户 SSO 之后 RAM 密码登录就失效了（阿里云那个是全局开关，不是并行）。
+            # 还发密码的话，人领到一串登不进去的东西，只会以为是账号没建好
+            raise FlowError(
+                "这个云账号的控制台登录走企业账号（SSO），不需要领初始密码 —— "
+                "直接用公司账号登录即可。登不进去说明登录名还没写进公司 IAM，找管理员重试这张单",
+                409,
+            )
+        if password_claims(ticket) > 0:
+            raise FlowError("初始密码已经领取过。忘记密码请联系管理员重置", 409)
+        if not ticket.get("user_created"):
+            raise FlowError(
+                "这个子账号不是由这张申请单新建的，不能在这里领取密码，请联系管理员", 409
+            )
+        done_at = float(ticket.get("done_at_ts") or 0)
+        if not done_at or self._clock() - done_at > _PASSWORD_WINDOW_DAYS * 86400:
+            raise FlowError(
+                f"初始密码只能在开通后 {_PASSWORD_WINDOW_DAYS} 天内领取，已超过。请联系管理员重置",
+                409,
+            )
+        username = ticket["payload"]["username"]
+        tpl_key = (ticket["template"]["platform"], ticket["template"]["account"])
+        for other in self.store.all():
+            if (
+                other.get("id") != ticket["id"]
+                and other.get("kind") == catalog_mod.KIND_ACCOUNT
+                and other.get("user_created")
+                and (other["template"]["platform"], other["template"]["account"]) == tpl_key
+                and (other.get("payload") or {}).get("username") == username
+            ):
+                raise FlowError(
+                    "这个用户名也被别的申请单新建过，不能在这里领取密码，请联系管理员", 409
+                )
+        if not self._account_owner_ok(ticket, username):
+            raise FlowError("这个子账号在名册里已经对应给别人，不能领取密码，请联系管理员", 409)
+        self._verify_approval(ticket)
+        platform, account = ticket["template"]["platform"], ticket["template"]["account"]
+        # 先记事件再签发：并发领取时两边都会看到计数 > 1，一起作废，稍后重试
+        ticket = self.store.update(
+            ticket_id, actor=union_id, expect=[t.DONE], event="password_issued", note="领取初始密码"
+        )
+        if password_claims(ticket) > 1:
+            self.store.update(
+                ticket_id,
+                actor="system",
+                expect=[t.DONE],
+                event="password_failed",
+                note="同时有多次领取，本次作废",
+            )
+            raise FlowError("正在领取初始密码，请稍后刷新重试", 409)
+        try:
+            password = self._executor(platform, account).reset_password(username)
+        except Exception as exc:  # noqa: BLE001 — 失败撤销这次领取记录，允许重试
+            note = describe_error(exc) or type(exc).__name__
+            self.store.update(
+                ticket_id, actor="system", expect=[t.DONE], event="password_failed", note=note
+            )
+            raise ProvisionError(f"生成初始密码失败：{note}。可以稍后重试") from None
+        return ticket, password
+
+    def close(self, ticket_id: str, *, actor: str, note: str) -> dict:
+        # 记下从哪个状态关的，重开时原样回去。事件流里也能翻出来，但那要按事件名倒着找，
+        # 而「关闭前是什么状态」是重开唯一需要的事实，值得直接存一个字段
+        before = self.store.get(ticket_id).get("status")
+        return self.store.update(
+            ticket_id,
+            actor=actor,
+            expect=[t.FAILED, t.FULFILLING],
+            to=t.CLOSED,
+            event="closed",
+            note=note or "管理员关闭",
+            fields={"closed_from": before},
+        )
+
+    def reopen(self, ticket_id: str, *, actor: str, note: str = "") -> dict:
+        """把关掉的单子放回关闭前的状态，好继续处理（失败的能重试、待开通的能登记）。
+
+        **不重新走审批**：审批实例还是原来那张，`_verify` 在每次开通时都会重新回拉核对
+        （实例级 APPROVED、绑定的单号、审批人不是申请人本人）。所以重开不放宽任何门禁 ——
+        当初因为审批不合规被关的单子，重开后照样会在同一处被拦下来。
+
+        云上还挂着子账号的凭证单不给重开：重试签发只会在同一个 `cred_user` 上再发一把，
+        上一把没人清理。这种要先走「作废凭证」把云上删干净（那条路会清掉 `cred_user`），
+        之后才能重开。
+        """
+        ticket = self.store.get(ticket_id)
+        if ticket.get("status") != t.CLOSED:
+            status = ticket.get("status")
+            raise FlowError(
+                f"申请单当前是「{t.LABELS.get(status, status)}」，只有已关闭的才能重新打开", 409
+            )
+        # `cred_user` 在**预留子账号名**那一刻就写上了（事件 `cred_user_reserved`），
+        # 签发失败后的清理只清 `cred_ak_id`、不清它。所以非空只说明「云上可能还有东西」，
+        # 不等于「凭证已经发到人手里」—— 文案要照这个说，否则运维会以为密钥已经泄出去了
+        user = str(ticket.get("cred_user") or "")
+        if user:
+            raise FlowError(
+                f"云上可能还留着子账号 {user}。先点「作废凭证」清干净，之后才能重新打开", 409
+            )
+        if (ticket.get("sealed") or {}).get("ciphertext"):
+            raise FlowError("这张单子的凭证已经签发过了，不能重新打开。要收回请用「作废凭证」", 409)
+        # 关掉的单子不在去重范围内（`submit` 只看 OPEN），所以「关掉 → 让他重新申请」之后，
+        # 这张旧单往往已经配着一张开通好的新单。开账号单尤其危险：旧单 user_created 为 False 时
+        # 重试会**再建一个子账号**，同一个人在同一云账号下就有两个号了
+        if ticket.get("kind") == catalog_mod.KIND_ACCOUNT:
+            tpl = ticket.get("template") or {}
+            key = (tpl.get("platform"), tpl.get("account"))
+            for other in self.store.all():
+                o_tpl = other.get("template") or {}
+                if (
+                    other.get("id") != ticket_id
+                    and other.get("kind") == catalog_mod.KIND_ACCOUNT
+                    and (o_tpl.get("platform"), o_tpl.get("account")) == key
+                    and other["applicant"].get("union_id") == ticket["applicant"].get("union_id")
+                    and (other.get("status") in t.OPEN or other.get("status") == t.DONE)
+                ):
+                    raise FlowError(
+                        f"申请人在这个云账号下已经有申请单 {other['id']}，不能再把这张放回去", 409
+                    )
+        back = str(ticket.get("closed_from") or "")
+        if back not in (t.FAILED, t.FULFILLING):
+            # 没记 closed_from 的是这个字段加上之前关的老单子。FAILED 是两者里更保守的一个：
+            # 它只是让管理员能点「重试开通」，而 FULFILLING 会让单子重新出现在
+            # 「等管理员去建资源」的待办里，把一张当初明确关掉的单子塞回别人的队列
+            back = t.FAILED
+        return self.store.update(
+            ticket_id,
+            actor=actor,
+            expect=[t.CLOSED],
+            to=back,
+            event="reopened",
+            note=note or "管理员重新打开",
+        )
+
+    def _comment_login(self, tpl: catalog_mod.Template, ticket: dict, username: str) -> None:
+        """把登录地址贴到审批实例的评论里。
+
+        为什么贴在审批下
+        ────────────────
+        飞书的私聊卡片会被后面的消息淹掉，而审批实例是这次开号的**权威记录** ——
+        谁申请、谁批准、最后开出来的登录名和地址，在同一个地方对齐。
+        半年后有人问「这个号当初是谁批的、怎么登」，翻审批单就够了。
+
+        **贴失败不影响开通。** 号已经建好了，把整张单打成失败只会让管理员
+        以为什么都没发生、跑去手工再建一个。失败记一条事件，人能看见。
+
+        这里**不贴任何密钥** —— 开号本来就不发 AK，登录地址也是公开信息。
+        """
+        code = str((ticket.get("approval") or {}).get("instance_code") or "")
+        if not code or ticket.get("login_commented"):
+            return
+        approval = self._approval()
+        if approval is None:
+            return
+        spec = platforms_mod.get(tpl.platform)
+        how = (
+            "用公司账号登录，不需要密码 —— 在登录页选企业/SSO 登录"
+            if platforms_mod.console_login_is_sso(tpl.platform, tpl.account)
+            else "初始密码到面板「我的申请」里领，7 天内有效"
+        )
+        text = f"子账号已开通\n登录名：{username}\n云账号：{spec.name} {tpl.account}\n" + (
+            f"登录地址：{spec.login_url(tpl.account)}\n怎么登：{how}"
+            if tpl.console_login
+            else "这个账号不开控制台登录，只能用访问凭证"
+        )
+        try:
+            approval.comment(code, text)
+        except Exception as exc:  # noqa: BLE001 — 贴不上不该让开通算失败，见 docstring
+            self.store.update(
+                ticket["id"],
+                actor="system",
+                expect=[t.EXECUTING],
+                event="login_comment_failed",
+                note=f"登录地址没贴到审批下（{describe_error(exc) or type(exc).__name__}）",
+            )
+            return
+        self.store.update(
+            ticket["id"],
+            actor="system",
+            expect=[t.EXECUTING],
+            event="login_commented",
+            note="登录地址已贴到审批评论",
+            fields={"login_commented": True},
+        )
+
+    def push_iam(self, ticket_id: str, *, actor: str) -> dict:
+        """只补「把登录名写进公司 IAM」这一步。**不碰云上账号，不重跑建号，不动状态。**
+
+        为什么要单独有这个动作
+        ──────────────────────
+        建号成功但属性没写成时，单子是 **DONE** 不是 FAILED（刻意的：账号确实建好了，
+        判失败会让管理员以为什么都没发生、跑去手工再建一个）。可 DONE 的单子没有重试按钮，
+        于是这一步一旦漏了就只能靠全量 `identity iam-push` 去扫 —— 而那条路会连带
+        触发「整体消失」的删除闸门，为了补一个人得先确认一批离职。
+
+        线上第一个账号就卡在这儿：号建出来了、单子绿着、人登不进去，没有任何按钮可按。
+
+        **状态一动不动。** `DONE` 在状态机里只通向 `REVOKED`，借道 `EXECUTING` 走不通；
+        而且这一步本来也不该改变「这张单办完了没有」的结论 —— 它补的是一个附加属性。
+        """
+        ticket = self.store.get(ticket_id)
+        if ticket.get("kind") != catalog_mod.KIND_ACCOUNT:
+            raise FlowError("只有开账号的申请需要写公司 IAM 属性", 409)
+        if ticket.get("status") != t.DONE:
+            raise FlowError("这张单还没开通完，先处理开通本身", 409)
+        if not ticket.get("user_created"):
+            raise FlowError("这张单没有建出子账号，没有登录名可写", 409)
+        if ticket.get("iam_written"):
+            raise FlowError("这张单的登录名已经写进公司 IAM 了", 409)
+        snap = ticket.get("template") or {}
+        tpl = self._catalog().get(str(snap.get("id") or ""))
+        same = tpl is not None and (tpl.platform, tpl.account) == (
+            snap.get("platform"),
+            snap.get("account"),
+        )
+        if not same:
+            # 模板可能被删了或改过云账号；**当初开通用的是快照里那一份**，以它为准
+            tpl = catalog_mod.Template(
+                id=str(snap.get("id") or ""),
+                kind=catalog_mod.KIND_ACCOUNT,
+                platform=str(snap.get("platform") or ""),
+                account=str(snap.get("account") or ""),
+                title=str(snap.get("title") or ""),
+                description="",
+            )
+        username = str((ticket.get("payload") or {}).get("username") or "")
+        said = self._write_iam_attr(tpl, ticket, username, expect=(t.DONE,))
+        if said.startswith("；**"):
+            # 还是没写成。把原因抛给管理员，别让按钮看起来点了就好了
+            raise FlowError(said.lstrip("；").replace("**", ""), 502)
+        return self.store.get(ticket_id)
 
     def _offer_credential(self, tpl: catalog_mod.Template, ticket: dict) -> str:
         """审批通过就签发，把凭证**密封**起来存，评论里给一个带密钥的查看地址。
@@ -2130,206 +2776,91 @@ class Flows:
         )
         return ""
 
-    def link_pending(self, ticket: dict) -> bool:
-        """开账号单子建好了号，但没能自动对应到申请人，而且名册里到现在也还没对应上。
 
-        管理员在「人员与名册」里确认之后名册会更新，这里随之变成 False；不依赖单子上补事件。
-        """
-        if ticket.get("kind") != catalog_mod.KIND_ACCOUNT or not ticket.get("user_created"):
-            return False
-        events = [e.get("event") for e in ticket.get("events") or []]
-        if "link_needed" not in events or (
-            "linked" in events and events[::-1].index("linked") < events[::-1].index("link_needed")
-        ):
-            return False
-        tpl = ticket["template"]
-        key = (tpl["platform"], tpl["account"], (ticket.get("payload") or {}).get("username"))
+def provision_workspace(ex, ws: dict, username: str) -> tuple:
+    """一个空间里的三件事。返回 `(做成了什么, 出了什么问题)`。
+
+    **个人目录没开成就不建数据集**：数据集是指针，指向一个连占位对象都放不进去的
+    地方多半意味着桶名或地域配错了 —— 那时候建出来的数据集看着正常、挂载时才炸。
+    但这个「跳过」只在**这一个**空间内生效（见 `_provision_workspace`）。
+    """
+    where = f"{ws.get('label') or ws['id']}"
+    done, problems = [], []
+    try:
+        ex.add_workspace_member(
+            region=ws["region"], workspace=ws["id"], user=username, roles=ws["roles"]
+        )
+        done.append(f"已加入工作空间 {ws['id']}（{where}）")
+    except Exception as exc:  # noqa: BLE001 — 见 docstring
+        problems.append(f"{where} 加入工作空间失败（{describe_error(exc) or type(exc).__name__}）")
+        return done, problems
+    # OSS 个人目录：前缀是虚的，放一个 0 字节占位让人在控制台看得见。
+    # CPFS 那边不用建 —— 挂载时自动创建
+    if ws.get("bucket"):
+        group = str(ws.get("bucket_prefix") or "").strip("/")
+        key = f"{group}/{username}" if group else username
         try:
-            people = self._roster().people
-        except DeliveryError:
-            return True  # 名册读不了：保持提醒
-        return not any(
-            (ref.platform, ref.account, ref.name) == key
-            for person in people
-            for ref in person.accounts
-        )
-
-    def _account_owner_ok(self, ticket: dict, username: str) -> bool:
-        """名册里这个子账号要么还没对应给人，要么对应的就是申请人。"""
-        tpl = ticket["template"]
-        applicant = ticket["applicant"]
-        for person in self._roster().people:
-            for ref in person.accounts:
-                if (ref.platform, ref.account, ref.name) != (
-                    tpl["platform"],
-                    tpl["account"],
-                    username,
-                ):
-                    continue
-                if person.union_id:
-                    return person.union_id == applicant["union_id"]
-                email = str(applicant.get("email") or "").lower()
-                return bool(email) and person.email.lower() == email
-        return True
-
-    # ── 员工操作 ──────────────────────────────────────────────────────────
-    def _own(self, ticket_id: str, union_id: str) -> dict:
-        if not union_id:
-            raise FlowError("没有这张申请单", 404)
-        ticket = self.store.get(ticket_id)
-        if ticket["applicant"].get("union_id") != union_id:
-            raise FlowError("没有这张申请单", 404)
-        return ticket
-
-    def withdraw(self, ticket_id: str, *, union_id: str) -> dict:
-        ticket = self._own(ticket_id, union_id)
-        if ticket.get("status") != t.PENDING:
-            raise FlowError("只有待审批的申请可以撤回", 409)
-        approval = self._approval()
-        if approval is not None:
-            approval.cancel(ticket["approval"]["instance_code"], _applicant(ticket))
-        return self.store.update(
-            ticket_id,
-            actor=union_id,
-            expect=[t.PENDING],
-            to=t.WITHDRAWN,
-            event="withdrawn",
-            note="申请人撤回",
-        )
-
-    def claim_password(self, ticket_id: str, *, union_id: str):
-        """开账号申请：领取一次性初始密码（强制首次登录修改）。返回 (申请单, 密码)。
-
-        只在开通后 _PASSWORD_WINDOW_DAYS 天内、子账号确实由这张单子新建、名册里没有对应给别人时
-        才能领：否则一张很久以前没领的单子，可以把后来同名的别人的账号密码重置掉。
-        """
-        ticket = self._own(ticket_id, union_id)
-        if ticket["kind"] != catalog_mod.KIND_ACCOUNT or ticket.get("status") != t.DONE:
-            raise FlowError("这张申请单没有可领取的初始密码", 409)
-        if not ticket["template"].get("console_login"):
-            raise FlowError("这个模板没有开通控制台登录", 409)
-        if password_claims(ticket) > 0:
-            raise FlowError("初始密码已经领取过。忘记密码请联系管理员重置", 409)
-        if not ticket.get("user_created"):
-            raise FlowError(
-                "这个子账号不是由这张申请单新建的，不能在这里领取密码，请联系管理员", 409
+            ex.make_dir(ws["bucket"], key, ws["bucket_region"])
+            done.append(f"已开个人目录 {ws['bucket']}/{key}/")
+        except Exception as exc:  # noqa: BLE001
+            problems.append(
+                f"{where} 个人目录没开成（{describe_error(exc) or type(exc).__name__}）"
             )
-        done_at = float(ticket.get("done_at_ts") or 0)
-        if not done_at or self._clock() - done_at > _PASSWORD_WINDOW_DAYS * 86400:
-            raise FlowError(
-                f"初始密码只能在开通后 {_PASSWORD_WINDOW_DAYS} 天内领取，已超过。请联系管理员重置",
-                409,
-            )
-        username = ticket["payload"]["username"]
-        tpl_key = (ticket["template"]["platform"], ticket["template"]["account"])
-        for other in self.store.all():
-            if (
-                other.get("id") != ticket["id"]
-                and other.get("kind") == catalog_mod.KIND_ACCOUNT
-                and other.get("user_created")
-                and (other["template"]["platform"], other["template"]["account"]) == tpl_key
-                and (other.get("payload") or {}).get("username") == username
-            ):
-                raise FlowError(
-                    "这个用户名也被别的申请单新建过，不能在这里领取密码，请联系管理员", 409
-                )
-        if not self._account_owner_ok(ticket, username):
-            raise FlowError("这个子账号在名册里已经对应给别人，不能领取密码，请联系管理员", 409)
-        self._verify_approval(ticket)
-        platform, account = ticket["template"]["platform"], ticket["template"]["account"]
-        # 先记事件再签发：并发领取时两边都会看到计数 > 1，一起作废，稍后重试
-        ticket = self.store.update(
-            ticket_id, actor=union_id, expect=[t.DONE], event="password_issued", note="领取初始密码"
-        )
-        if password_claims(ticket) > 1:
-            self.store.update(
-                ticket_id,
-                actor="system",
-                expect=[t.DONE],
-                event="password_failed",
-                note="同时有多次领取，本次作废",
-            )
-            raise FlowError("正在领取初始密码，请稍后刷新重试", 409)
+            return done, problems
+    # PAI 数据集：只登记指针。**CPFS 和 OSS 各一条**，缺一条人就少一个挂载入口
+    for spec in datasets_for(ws, username):
         try:
-            password = self._executor(platform, account).reset_password(username)
-        except Exception as exc:  # noqa: BLE001 — 失败撤销这次领取记录，允许重试
-            note = describe_error(exc) or type(exc).__name__
-            self.store.update(
-                ticket_id, actor="system", expect=[t.DONE], event="password_failed", note=note
+            did = ex.create_dataset(
+                region=ws["region"],
+                workspace=ws["id"],
+                name=spec["name"],
+                uri=spec["uri"],
+                source=spec["source"],
+                user=username,
+                labels=[
+                    {"Key": "kind", "Value": "personal"},
+                    {"Key": "owner", "Value": username},
+                ],
             )
-            raise ProvisionError(f"生成初始密码失败：{note}。可以稍后重试") from None
-        return ticket, password
+            # `did` 为空 = 这条本来就在（重试或补齐），不是没建成
+            done.append(
+                f"已建数据集 {spec['name']}（{did}）" if did else f"数据集 {spec['name']} 已有"
+            )
+        except Exception as exc:  # noqa: BLE001
+            problems.append(
+                f"{where} 数据集 {spec['name']} 没建成"
+                f"（{describe_error(exc) or type(exc).__name__}）"
+            )
+    return done, problems
 
-    def close(self, ticket_id: str, *, actor: str, note: str) -> dict:
-        # 记下从哪个状态关的，重开时原样回去。事件流里也能翻出来，但那要按事件名倒着找，
-        # 而「关闭前是什么状态」是重开唯一需要的事实，值得直接存一个字段
-        before = self.store.get(ticket_id).get("status")
-        return self.store.update(
-            ticket_id,
-            actor=actor,
-            expect=[t.FAILED, t.FULFILLING],
-            to=t.CLOSED,
-            event="closed",
-            note=note or "管理员关闭",
-            fields={"closed_from": before},
+
+def datasets_for(ws: dict, username: str) -> list:
+    """这个人该有哪几条数据集。**CPFS 和 OSS 各一条，都配了就都建。**
+
+    形状照现网那 30 条，不照文档：
+      CPFS  name=`<登录名>`      uri=`bmcpfs://<挂载点>/<登录名>/`        扁平
+      OSS   name=`<登录名>-oss`  uri=`oss://<桶>.oss-<地域>.aliyuncs.com/<组>/<登录名>/`
+
+    **OSS 那条的 URI 是「桶.域名」形式，不是 `oss://桶/路径`** —— 现网全是前者，
+    写成后者的话新建的和老的在控制台里会长成两种东西。
+    """
+    out = []
+    if ws.get("mount"):
+        out.append(
+            {
+                "name": username,
+                "source": "BMCPFS",
+                "uri": f"bmcpfs://{ws['mount']}/{username}/",
+            }
         )
-
-    def reopen(self, ticket_id: str, *, actor: str, note: str = "") -> dict:
-        """把关掉的单子放回关闭前的状态，好继续处理（失败的能重试、待开通的能登记）。
-
-        **不重新走审批**：审批实例还是原来那张，`_verify` 在每次开通时都会重新回拉核对
-        （实例级 APPROVED、绑定的单号、审批人不是申请人本人）。所以重开不放宽任何门禁 ——
-        当初因为审批不合规被关的单子，重开后照样会在同一处被拦下来。
-
-        云上还挂着子账号的凭证单不给重开：重试签发只会在同一个 `cred_user` 上再发一把，
-        上一把没人清理。这种要先走「作废凭证」把云上删干净（那条路会清掉 `cred_user`），
-        之后才能重开。
-        """
-        ticket = self.store.get(ticket_id)
-        if ticket.get("status") != t.CLOSED:
-            status = ticket.get("status")
-            raise FlowError(
-                f"申请单当前是「{t.LABELS.get(status, status)}」，只有已关闭的才能重新打开", 409
-            )
-        # `cred_user` 在**预留子账号名**那一刻就写上了（事件 `cred_user_reserved`），
-        # 签发失败后的清理只清 `cred_ak_id`、不清它。所以非空只说明「云上可能还有东西」，
-        # 不等于「凭证已经发到人手里」—— 文案要照这个说，否则运维会以为密钥已经泄出去了
-        user = str(ticket.get("cred_user") or "")
-        if user:
-            raise FlowError(
-                f"云上可能还留着子账号 {user}。先点「作废凭证」清干净，之后才能重新打开", 409
-            )
-        if (ticket.get("sealed") or {}).get("ciphertext"):
-            raise FlowError("这张单子的凭证已经签发过了，不能重新打开。要收回请用「作废凭证」", 409)
-        # 关掉的单子不在去重范围内（`submit` 只看 OPEN），所以「关掉 → 让他重新申请」之后，
-        # 这张旧单往往已经配着一张开通好的新单。开账号单尤其危险：旧单 user_created 为 False 时
-        # 重试会**再建一个子账号**，同一个人在同一云账号下就有两个号了
-        if ticket.get("kind") == catalog_mod.KIND_ACCOUNT:
-            tpl = ticket.get("template") or {}
-            key = (tpl.get("platform"), tpl.get("account"))
-            for other in self.store.all():
-                o_tpl = other.get("template") or {}
-                if (
-                    other.get("id") != ticket_id
-                    and other.get("kind") == catalog_mod.KIND_ACCOUNT
-                    and (o_tpl.get("platform"), o_tpl.get("account")) == key
-                    and other["applicant"].get("union_id") == ticket["applicant"].get("union_id")
-                    and (other.get("status") in t.OPEN or other.get("status") == t.DONE)
-                ):
-                    raise FlowError(
-                        f"申请人在这个云账号下已经有申请单 {other['id']}，不能再把这张放回去", 409
-                    )
-        back = str(ticket.get("closed_from") or "")
-        if back not in (t.FAILED, t.FULFILLING):
-            # 没记 closed_from 的是这个字段加上之前关的老单子。FAILED 是两者里更保守的一个：
-            # 它只是让管理员能点「重试开通」，而 FULFILLING 会让单子重新出现在
-            # 「等管理员去建资源」的待办里，把一张当初明确关掉的单子塞回别人的队列
-            back = t.FAILED
-        return self.store.update(
-            ticket_id,
-            actor=actor,
-            expect=[t.CLOSED],
-            to=back,
-            event="reopened",
-            note=note or "管理员重新打开",
+    if ws.get("bucket"):
+        group = str(ws.get("bucket_prefix") or "").strip("/")
+        path = f"{group}/{username}" if group else username
+        out.append(
+            {
+                "name": f"{username}-oss",
+                "source": "OSS",
+                "uri": f"oss://{ws['bucket']}.oss-{ws['bucket_region']}.aliyuncs.com/{path}/",
+            }
         )
+    return out

@@ -307,7 +307,17 @@ def collect_pai_datasets(
             wid = str(ws.get("WorkspaceId") or "")
             if not wid:
                 continue
-            for d in _pai_datasets(creds, region, wid, transport=transport):
+            # 和地区层同一个取舍：权限不足一律中断（`AliyunDenied` 不接），
+            # 其余错误记进 skipped 不让一个空间挡住其余。**不能静默跳过** ——
+            # 少一个工作空间的数据集，台账看起来照样是完整的
+            try:
+                found = _pai_datasets(creds, region, wid, transport=transport)
+            except aliyun.AliyunDenied:
+                raise
+            except aliyun.AliyunError as exc:
+                skipped.append(f"{region} 工作空间 {wid}：{exc}")
+                continue
+            for d in found:
                 uid = str(d.get("UserId") or "")
                 owner = ram_users.get(uid, {})
                 kind = OWNER_USER if owner else (OWNER_ROOT if uid == account else OWNER_GONE)
@@ -398,6 +408,32 @@ def _pai_path(uri: str) -> str:
     body = str(uri or "").split("://", 1)[-1]
     slash = body.find("/")
     return body[slash:].rstrip("/") if slash >= 0 else ""
+
+
+def _pai_store(uri: str) -> str:
+    """数据集**落在哪个桶 / 哪个文件系统**。
+
+    为什么非要单独有这个
+    ────────────────────
+    `_pai_path` 只给出 `/wzh`、`/general/wangzihan` 这种路径，而**路径在不同的桶里是会重名的**。
+    页面上只显示路径的话，「OSS · /general/wangzihan」这一行没法回答最要紧的那个问题：
+    是哪个 OSS？杭州的开发桶，还是新加坡那个？
+
+    现网 6 种 host 形状（实测）：
+      wuji-algo-dev-hz.oss-cn-hangzhou.aliyuncs.com              → wuji-algo-dev-hz
+      cpfs-00000ub3ici1dnniit2i0-vpc-egtdgw.cn-hangzhou.cpfs…    → cpfs-00000ub3ici1dnniit2i0
+      bmcpfs-00000ub3ici1dnniit2i0.cn-hangzhou                   → bmcpfs-00000ub3ici1dnniit2i0
+
+    **不把 `cpfs-<id>-vpc-x` 归一成 `bmcpfs-<id>`**：智算版这两个确实指同一个文件系统，
+    但通用版只有 `cpfs-` 这一种写法，归一的规则对两种版本不一样，写错了比不归一更糟。
+    去掉 `-vpc-xxx` 就够了 —— 剩下的 id 段相同，人一眼看得出是同一个。
+    """
+    body = str(uri or "").split("://", 1)[-1]
+    host = body.split("/", 1)[0]
+    first = host.split(".", 1)[0]
+    # CPFS 挂载点带 `-vpc-<随机>`，那是挂载地址的一部分，不是文件系统标识
+    cut = first.find("-vpc-")
+    return first[:cut] if cut > 0 else first
 
 
 #: 数据集的可见范围。**个人目录一律 ROLE_PUBLIC**：
@@ -841,6 +877,8 @@ def datasets_view(datasets, *, logins=None, labels=None) -> dict:
                 "source": str(d.get("source") or ""),
                 "path": str(d.get("path") or ""),
                 "uri": str(d.get("uri") or ""),
+                # 从 uri 现算，不依赖采集时有没有存 —— 旧快照照样显示得出来
+                "store": _pai_store(str(d.get("uri") or "")),
                 "accessibility": str(d.get("accessibility") or ""),
                 "owner_login": owner,
                 "owner_name": str(d.get("owner_name") or ""),

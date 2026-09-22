@@ -123,7 +123,7 @@ class ViewLinkTests(unittest.TestCase):
         self.env = Env()
 
     def issued(self, **payload):
-        return self.env.run(payload={"bucket": BUCKET, "hours": 2, **payload})
+        return self.env.run(payload={"bucket": BUCKET, "prefix": "batch/", "hours": 2, **payload})
 
     def test_comment_has_exactly_one_address_and_no_credential_in_it(self):
         done = self.issued()
@@ -230,7 +230,7 @@ class ViewLinkTests(unittest.TestCase):
 class LifecycleTests(unittest.TestCase):
     """签发之后：到期、关闭、进程挂掉、重试。链接什么时候该失效。"""
 
-    LONG = {"bucket": BUCKET, "hours": 24}
+    LONG = {"bucket": BUCKET, "prefix": "batch/", "hours": 24}
 
     def test_expiry_is_counted_from_issuance_and_the_link_dies_with_the_credential(self):
         env = Env()
@@ -327,7 +327,7 @@ class ApprovalGateTests(unittest.TestCase):
 
     def test_self_approved_ticket_never_reaches_the_cloud(self):
         env = Env()
-        ticket = env.submit(payload={"bucket": BUCKET, "hours": 2})
+        ticket = env.submit(payload={"bucket": BUCKET, "prefix": "batch/", "hours": 2})
         inst = env.feishu.instances[ticket["approval"]["instance_code"]]
         inst["status"] = "APPROVED"
         inst["task_list"] = [{"open_id": "ou_li", "user_id": "", "status": "APPROVED"}]
@@ -341,7 +341,7 @@ class ApprovalGateTests(unittest.TestCase):
     def test_template_changed_during_approval_blocks_issuance(self):
         """审批期间桶被从模板里删掉：不签发、不发地址，单子落到失败等人处理。"""
         env = Env()
-        ticket = env.submit(payload={"bucket": BUCKET, "hours": 2})
+        ticket = env.submit(payload={"bucket": BUCKET, "prefix": "batch/", "hours": 2})
         env.templates["templates"][0]["buckets"] = [{"name": SHENZHEN, "region": "cn-shenzhen"}]
         env.feishu.instances[ticket["approval"]["instance_code"]]["status"] = "APPROVED"
         failed = env.flows.sync(ticket["id"], force=True)

@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from delivery import assets
 from delivery.clouds import aliyun
+from delivery.clouds import oss as oss_mod
 
 ACC = "1704065796538912"
 HZ = "aiworkspace.cn-hangzhou.aliyuncs.com"
@@ -164,6 +165,50 @@ class ShapeTests(unittest.TestCase):
             )
 
 
+class WorkspaceLevelFailureTests(unittest.TestCase):
+    """一个工作空间出问题时，别让它静默地从台账里消失。"""
+
+    @staticmethod
+    def _transport(dataset_status, dataset_body):
+        def send(url, headers=None, method="GET", body=b""):
+            parts = urlsplit(url)
+            if parts.netloc.startswith(("sts.", "ram.")):
+                return 200, {"AccountId": ACC, "IsTruncated": False, "Users": {"User": []}}
+            if parts.path == "/api/v1/workspaces":
+                return 200, {"Workspaces": [{"WorkspaceId": "1", "WorkspaceName": "hz"}]}
+            return dataset_status, dataset_body
+
+        return send
+
+    def test_a_denied_workspace_stops_everything(self):
+        """权限不足一律中断 —— 和地区层同一个取舍。
+        记成「跳过」的话，一次少采了一整个空间的采集会被写成一份干净的清单。"""
+        with self.assertRaises(aliyun.AliyunDenied):
+            assets.collect_pai_datasets(
+                aliyun.Credentials("ak", "sk"),
+                regions=("cn-hangzhou",),
+                transport=self._transport(
+                    404,
+                    {
+                        "Code": "100700008",
+                        "Message": "No permission: denied by RAM and AIWorkspace Rbac",
+                    },
+                ),
+            )
+
+    def test_a_broken_workspace_is_noted_not_silently_dropped(self):
+        """非权限类错误不让一个空间挡住其余，但**必须记一笔**：
+        否则「这个空间没有数据集」和「这个空间没问到」在结果里长得一样。"""
+        sets, skipped = assets.collect_pai_datasets(
+            aliyun.Credentials("ak", "sk"),
+            regions=("cn-hangzhou",),
+            transport=self._transport(500, {"Code": "InternalError", "Message": "boom"}),
+        )
+        self.assertEqual(sets, [])
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("工作空间 1", skipped[0])
+
+
 class SnapshotTests(unittest.TestCase):
     def test_not_collected_is_not_the_same_as_none(self):
         """采不到时快照里**没有 datasets 这个键**，不是空列表。
@@ -234,6 +279,39 @@ class RoaSigningTests(unittest.TestCase):
 
         with self.assertRaises(aliyun.AliyunDenied):
             aliyun.call_roa(HZ, "v", "/p", creds=aliyun.Credentials("a", "b"), transport=denied)
+
+    def test_pai_workspace_rbac_denial_is_a_denial_even_though_it_is_a_404(self):
+        """PAI 的工作空间 RBAC 回 **404 不是 403**，措辞也不是 "has no permission"：
+
+            100700008 No permission: denied by RAM and AIWorkspace Rbac PaiDataset:ListDatasets
+
+        按状态码判、或者按老那条 "has no permission" 匹配，都会把它当成「没有数据」——
+        于是台账少掉一整个工作空间，而页面上看起来是完整的。真机实测过这个返回。
+        """
+
+        def rbac_denied(url, headers=None, method="GET", body=b""):
+            return 404, {
+                "Code": "100700008",
+                "Message": (
+                    "No permission: denied by RAM and AIWorkspace Rbac PaiDataset:ListDatasets"
+                ),
+            }
+
+        with self.assertRaises(aliyun.AliyunDenied):
+            aliyun.call_roa(
+                HZ, "v", "/p", creds=aliyun.Credentials("a", "b"), transport=rbac_denied
+            )
+
+    def test_a_plain_404_is_still_not_a_denial(self):
+        """反向断言：别为了认出 RBAC 那条就把所有 404 当成权限问题。
+        「这个东西不存在」和「你没权限看」的处置完全不同。"""
+
+        def missing(url, headers=None, method="GET", body=b""):
+            return 404, {"Code": "EntityNotExist", "Message": "The resource does not exist"}
+
+        with self.assertRaises(aliyun.AliyunError) as caught:
+            aliyun.call_roa(HZ, "v", "/p", creds=aliyun.Credentials("a", "b"), transport=missing)
+        self.assertNotIsInstance(caught.exception, aliyun.AliyunDenied)
 
 
 if __name__ == "__main__":
@@ -741,4 +819,108 @@ class OssSigningTests(unittest.TestCase):
                 region="oss-cn-hangzhou",
                 creds=aliyun.Credentials("AK", "SK"),
                 transport=transport,
+            )
+
+
+class OssHostTests(unittest.TestCase):
+    """OSS 主机名里的地域写法。**断言的是发出去的 URL**，不是返回值。
+
+    两套写法在这个仓库里并存：模板和引擎存裸地域（`cn-hangzhou`），
+    `ListBuckets` 回带前缀的（`oss-cn-hangzhou`）。归一漏了的话两个方向各有一种错法，
+    而且都表现成 DNS 解析失败 —— 那个错误指不到「地域写法不对」。
+    """
+
+    def _host(self, region: str) -> str:
+        seen = []
+
+        def transport(url, method, headers, body):
+            seen.append(url)
+            return 200, b""
+
+        oss_mod.put_folder(
+            "wuji-algo-dev-hz", "general/me/", region=region, creds=_Creds(), transport=transport
+        )
+        return seen[0]
+
+    def test_a_bare_region_gets_the_oss_prefix(self):
+        """模板里存的就是裸地域。拼成 `<桶>.cn-hangzhou.aliyuncs.com` 的话
+        那个域名根本不存在 —— 建号时开个人目录就栽在这，而它一失败，
+        `_provision_workspace` 会把数据集也一起跳过。"""
+        self.assertIn("wuji-algo-dev-hz.oss-cn-hangzhou.aliyuncs.com", self._host("cn-hangzhou"))
+
+    def test_a_region_that_already_has_the_prefix_is_not_doubled(self):
+        self.assertIn(
+            "wuji-algo-dev-hz.oss-cn-hangzhou.aliyuncs.com", self._host("oss-cn-hangzhou")
+        )
+
+    def test_other_regions_work_the_same_way(self):
+        """新加坡工作空间走的是同一条路，地域换成 `ap-southeast-1`。"""
+        self.assertIn(".oss-ap-southeast-1.aliyuncs.com", self._host("ap-southeast-1"))
+
+    def test_an_empty_region_is_refused_instead_of_building_a_broken_host(self):
+        """`<桶>..aliyuncs.com` 也只换来一个 DNS 错误，而那指不到「调用方没给地域」。"""
+        with self.assertRaises(oss_mod.OssError):
+            self._host("")
+
+
+class _Creds:
+    access_key_id = "AK"
+    access_key_secret = "SK"
+    security_token = ""
+
+
+class DatasetIdempotenceTests(unittest.TestCase):
+    """重名不是失败。
+
+    PAI 对同名数据集回的是 HTTP 400 `201300003 Dataset name already existed`，
+    不是一个「已存在」的成功。不吞的话，重试一张单（或给已有账号补齐）会把它记成问题，
+    而 `_provision_workspace` 的 problems 一非空就返回「**他还进不去 DSW/DLC**」——
+    人看到这句会去查权限，而那条数据集一直好好地在那儿。
+    """
+
+    def _make(self, boom):
+        from delivery import provision
+
+        ex = provision.AliyunExecutor(account="1704065796538912", creds=_Creds())
+        ex.user_id = lambda user: "20026"
+        ex._check_account = lambda: None
+        import delivery.assets as assets_mod
+
+        self.addCleanup(setattr, assets_mod, "create_dataset", assets_mod.create_dataset)
+        assets_mod.create_dataset = boom
+        return ex
+
+    def test_an_existing_dataset_is_not_an_error(self):
+        def boom(*_a, **_k):
+            raise RuntimeError(
+                "`/api/v1/datasets` 失败 HTTP 400：201300003 "
+                "Dataset Request Error: Dataset name already existed."
+            )
+
+        ex = self._make(boom)
+        got = ex.create_dataset(
+            region="cn-hangzhou",
+            workspace="640957",
+            name="li",
+            uri="oss://b/li/",
+            source="OSS",
+            user="li",
+        )
+        self.assertEqual(got, "", "本来就有的数据集应该安静通过，返回空 id")
+
+    def test_a_real_failure_still_raises(self):
+        """全吞掉的话，一条真建不出来的数据集会被当成建好了。"""
+
+        def boom(*_a, **_k):
+            raise RuntimeError("HTTP 403：没有权限")
+
+        ex = self._make(boom)
+        with self.assertRaises(RuntimeError):
+            ex.create_dataset(
+                region="cn-hangzhou",
+                workspace="640957",
+                name="li",
+                uri="oss://b/li/",
+                source="OSS",
+                user="li",
             )

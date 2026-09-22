@@ -138,21 +138,40 @@ function datasetCard(data, admin) {
   if (!data || !data.collected) return null;
   const items = data.items || [];
   if (!items.length && !admin) return null;
-  const rows = items.map((d) => {
+  // **桶 / 文件系统必须显示出来。** 路径在不同的桶里会重名 ——
+  // 只写「OSS · /general/wangzihan」的话，最要紧的那个问题（哪个 OSS？杭州还是新加坡？）
+  // 页面上根本答不了
+  const row = (d) => {
     const [access, tone] = ACCESS_LABEL[d.accessibility] || [d.accessibility || "—", ""];
     const gone = d.owner_kind === "gone";
     return h("tr", {},
       h("td", {}, h("span", { class: "pname" }, d.name),
         h("span", { class: "pmail" }, `${SOURCE_LABEL[d.source] || d.source} · ${d.path || "—"}`)),
-      h("td", {}, d.workspace_name || d.workspace, h("span", { class: "pmail" }, d.region)),
+      h("td", {}, h("span", { class: "mono" }, d.store || "—"),
+        h("span", { class: "pmail" }, d.region || "—")),
+      h("td", {}, d.workspace_name || d.workspace,
+        h("span", { class: "pmail" }, d.region)),
       admin
         ? h("td", {}, gone
             ? h("span", { class: "warn-text" }, `${d.owner_name || "?"}（号已删）`)
             : `${d.owner_name || ""} ${d.owner_login || ""}`.trim() || "—")
         : null,
       h("td", {}, h("span", { class: tone ? `pill ${tone}` : "" }, access)));
-  });
+  };
   const anyPublic = items.some((d) => d.accessibility === "PUBLIC");
+  // 按地域筛。数据集散在杭州和新加坡两地，混在一张表里看不出哪条在哪
+  const regions = [...new Set(items.map((d) => d.region).filter(Boolean))].sort();
+  const body = h("tbody", {}, ...items.map(row));
+  const bar = h("div", { class: "chips" });
+  let pick = "";
+  const draw = () => {
+    fillEl(body, ...items.filter((d) => !pick || d.region === pick).map(row));
+    fillEl(bar, ...[["", `全部 ${items.length}`], ...regions.map((r) =>
+      [r, `${r} ${items.filter((d) => d.region === r).length}`])].map(([v, label]) =>
+        h("button", { type: "button", class: v === pick ? "chip on" : "chip",
+          onclick: () => { pick = v; draw(); } }, label)));
+  };
+  if (regions.length > 1) draw();
   return h("section", { class: "card asset-card" },
     h("div", { class: "asset-head" },
       h("div", { class: "chips" }, h("b", {}, admin ? "PAI 数据集" : "你的数据集")),
@@ -167,12 +186,13 @@ function datasetCard(data, admin) {
       ? h("div", { class: "banner warn" },
           `其中 ${data.abandoned} 条的属主 RAM 号已经删了，东西还留着 —— 见「体检」页。`)
       : null,
+    regions.length > 1 ? h("div", { class: "pad" }, bar) : null,
     items.length
       ? h("div", { class: "scroll" }, h("table", {},
           h("thead", {}, h("tr", {},
-            h("th", {}, "数据集"), h("th", {}, "工作空间"),
+            h("th", {}, "数据集"), h("th", {}, "存储位置"), h("th", {}, "工作空间"),
             admin ? h("th", {}, "属主") : null, h("th", {}, "可见范围"))),
-          h("tbody", {}, ...rows)))
+          body))
       : h("p", { class: "pad muted" }, "还没有数据集。"));
 }
 
@@ -219,6 +239,14 @@ function keyConsoles(keys, uncollected) {
   return h("p", { class: "pad muted" }, "要换或停用密钥，自己在控制台做：", ...links);
 }
 
+/** 时间戳取日期。**两种写法现网都有**：阿里云 `2026-04-07T10:45:30Z`、
+ *  火山紧凑型 `20260407T104530Z`。只 slice(0,10) 的话火山那种会显示成 `20260407T0`。 */
+function day(value) {
+  const t = String(value || "");
+  if (/^\d{8}T/.test(t)) return `${t.slice(0, 4)}-${t.slice(4, 6)}-${t.slice(6, 8)}`;
+  return t.slice(0, 10);
+}
+
 /** 自己的 AK 台账：每把建了多久、上次什么时候用过。 */
 function keysCard(data) {
   const keys = data.keys || [];
@@ -235,11 +263,11 @@ function keysCard(data) {
     return h("tr", { class: k.active ? "" : "dim" },
       h("td", {}, h("span", { class: "mono" }, `${k.id}…`)),
       h("td", {}, h("span", { class: "pname" }, k.user), h("span", { class: "pmail" }, k.account_label || k.account)),
-      h("td", {}, ageText(k.age_days), k.created ? h("span", { class: "pmail" }, k.created.slice(0, 10)) : null),
+      h("td", {}, ageText(k.age_days), k.created ? h("span", { class: "pmail" }, day(k.created)) : null),
       // 三态：这朵云查不到 / 确实从来没用过 / 多久以前用过。
       // 前两者混成一个的话，火山每一把都会被写成「从来没用过」—— 那不是事实，是我们看不到
       h("td", {}, k.last_used_known === false
-        ? h("span", { class: "muted", title: "这朵云的接口不返回最近使用时间" }, "这朵云查不到")
+        ? h("span", { class: "muted", title: "这朵云的接口不返回最近使用时间，不是「没用过」" }, "—")
         : k.never_used
           ? h("span", { class: "warn-text" }, "从来没用过")
           : k.idle_days === null || k.idle_days === undefined

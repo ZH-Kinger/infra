@@ -200,6 +200,32 @@ def storage_of(platform: str) -> StorageDialect:
     return dialect
 
 
+#: 哪些云账号的控制台登录走企业 SSO。形如 `aliyun/1704065796538912,volcano/2111674479`
+ENV_SSO = "DELIVERY_CONSOLE_SSO"
+
+
+def sso_accounts(environ=None) -> frozenset:
+    """控制台登录走 SSO 的云账号集合（`platform/account`）。
+
+    **开了用户 SSO 的账号，RAM 密码登录就失效了** —— 阿里云那个是全局开关，
+    不是和密码并行。面板却还在单子上显示「可领取初始密码」：人领到一串密码、
+    登录页不认，只会更困惑，而且他会以为是账号没建好。
+
+    配在环境变量里而不是去云上查：查一次要调 `ims:GetUserSsoSettings`，
+    而这是申请页每次渲染都要判断的东西，不该挂一个云调用在上面；
+    何况开关是人在控制台点的，改了本来就该同步改这里。
+    """
+    import os
+
+    env = os.environ if environ is None else environ
+    raw = str(env.get(ENV_SSO, "") or "")
+    return frozenset(x.strip() for x in raw.replace(";", ",").split(",") if x.strip())
+
+
+def console_login_is_sso(platform: str, account: str, environ=None) -> bool:
+    return f"{platform}/{account}" in sso_accounts(environ)
+
+
 def cred_env_names(platform: str, prefix: str) -> tuple:
     """(AK 环境变量名, SK 环境变量名)。两朵云的后缀叫法不一样。"""
     p = get(platform)

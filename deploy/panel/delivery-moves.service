@@ -1,0 +1,41 @@
+# 云权限面板：推进数据迁移（由 delivery-moves.timer 触发）
+# 安装：复制到 /etc/systemd/system/ → systemctl daemon-reload
+#       systemctl enable --now delivery-moves.timer
+#
+# 为什么不并进 delivery-sweep：那条一分钟一轮，干的是同步审批、回收到期权限，
+# 都是轻活。一趟迁移动辄几小时 —— 一分钟查一次进度不会让它更快，
+# 只是把云 API 调用量乘以 5。
+[Unit]
+Description=Cloud panel: submit approved data migrations and advance running ones
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=delivery
+WorkingDirectory=/opt/infra
+# 两朵云的开通身份 + 迁移服务配置（DELIVERY_TRANSFER_OSS_ROLE 等）
+EnvironmentFile=/etc/delivery/panel.env
+# 迁移用的两家云 SDK 装在 /opt/infra/vendor —— 不进系统 Python（这台机 PEP668 受管），
+# 删掉那个目录就等于回滚，不影响面板其余部分
+Environment=PYTHONPATH=/opt/infra/src:/opt/infra/vendor
+ExecStart=/usr/bin/python3 -m delivery.cli requests moves --tickets identity/tickets.json
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# 进度写回申请单；第三方源登记表在同一个目录下，只读
+ReadWritePaths=/opt/infra/identity
+# 一趟提交要建两个地址、各校验一次、再建任务，都是网络往返。
+# 给够时间，但不能没有上限 —— 卡死的话下一轮会被 systemd 拦在门外
+TimeoutStartSec=10min
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+LockPersonality=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native

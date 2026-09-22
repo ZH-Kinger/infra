@@ -1,0 +1,64 @@
+{
+  "_what": "面板「新建数据目录」要的权限。挂在开通身份（panel-executor）上。",
+
+  "_why_this_shape": [
+    "OSS 没有真目录，建目录 = PUT 一个 key 以 `/` 结尾的 0 字节对象。",
+    "所以资源 ARN 写成 `<桶>/*/` —— 末尾那个斜杠是全部的安全边界：",
+    "  能写  raw/20260920-ego-kitchen/        （目录占位）",
+    "  不能写 raw/20260920-ego-kitchen/a.bin  （不以 / 结尾）",
+    "面板因此能建目录，但**放不进任何一个字节的数据**。",
+    "",
+    "为什么不给整桶的 PutObject：面板是个有登录入口的 Web 服务，它出漏洞时",
+    "能写整个数据桶和只能写目录占位，是两个量级的事故。"
+  ],
+
+  "_no_delete": "一条删除动作都没有。误建一个空目录的代价是它在那儿碍眼；误删一个目录的代价是数据没了。",
+
+  "_ip": "和其余执行策略一样叠面板服务器的出口 IP。AK 泄漏出去在别处也用不了。",
+
+  "Version": "1",
+  "Statement": [
+    {
+      "Action": ["oss:PutObject"],
+      "Resource": [
+        "acs:oss:*:*:wuji-egocentric-processed/*/",
+        "acs:oss:*:*:wuji-bucket-hangzhou/*/"
+      ],
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    },
+    {
+      "_note": "建之前要能确认桶在哪个地域、以及这个目录是不是已经有了。只读。",
+      "Action": [
+        "oss:GetBucketInfo",
+        "oss:GetBucketLocation",
+        "oss:ListObjects"
+      ],
+      "Resource": [
+        "acs:oss:*:*:wuji-egocentric-processed",
+        "acs:oss:*:*:wuji-bucket-hangzhou"
+      ],
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    }
+  ],
+
+  "_verify": [
+    "挂上之后必须真机验一次，别只看策略长得对：",
+    "  ① 提一张「新建数据目录」的单，走完审批 → 目录应该出现在控制台上",
+    "  ② 用同一把 AK 试着 PUT 一个不以 / 结尾的 key → 应该 403",
+    "第 ② 条是这份策略的全部意义所在，不验等于没写。"
+  ]
+}

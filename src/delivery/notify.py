@@ -29,6 +29,10 @@ from . import alerts, platforms
 from .errors import DeliveryError
 
 API = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id"
+#: 允许的收件人标识类型。**白名单，不是拼接** —— 这一段直接进 URL 的查询串，
+#: 放任意字符串进去等于让上游数据决定请求打到哪
+_ID_TYPES = ("open_id", "user_id", "union_id")
+_API_BASE = "https://open.feishu.cn/open-apis/im/v1/messages"
 #: 公司 IAM 登录（oauth2-proxy）拿不到 open_id，只有企业内通用的 user_id
 API_BY_USER_ID = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=user_id"
 ENV_NOTIFY = "DELIVERY_NOTIFY"
@@ -115,6 +119,41 @@ def ticket_title(ticket: Mapping) -> str:
     return _clip(title, _TITLE_MAX)
 
 
+def _account_how(tpl: Mapping) -> str:
+    """开完号之后，这个人到底该怎么登进去。
+
+    **这句话是这张卡唯一有用的信息。** 原先写死成「初始密码请在 7 天内到平台领取」——
+    那是密码时代的说法；开了企业 SSO 之后 RAM 密码登录全局失效，照着做只会拿到
+    一串登不进去的东西，而他会以为是账号没建好。
+    """
+    from . import platforms as platforms_mod
+
+    if not tpl.get("console_login"):
+        return "子账号已建好。这个账号不开控制台登录，只能用访问凭证。"
+    platform = str(tpl.get("platform") or "")
+    account = str(tpl.get("account") or "")
+    if platforms_mod.console_login_is_sso(platform, account):
+        return "子账号已建好。**用公司账号登录，不需要密码** —— 在登录页选企业/SSO 登录。"
+    return "子账号已建好。控制台初始密码请在 7 天内到平台领取。"
+
+
+def console_link(ticket: Mapping) -> str:
+    """这个云账号的控制台登录地址。拼不出来返回空串。
+
+    地址模板只写在 `platforms.py` 一处 —— 在这儿再拼一遍的话，
+    哪天某朵云换了登录域名，两处会不一致，而不一致的那一处没人会去看。
+    """
+    from . import platforms as platforms_mod
+
+    tpl = ticket.get("template") or {}
+    try:
+        spec = platforms_mod.get(str(tpl.get("platform") or ""))
+    except Exception:  # noqa: BLE001 — 不认识的平台就是没有地址，不该让整张卡发不出去
+        return ""
+    account = str(tpl.get("account") or "")
+    return spec.login_url(account) if account else ""
+
+
 def _when(iso: object) -> str:
     try:
         return datetime.fromisoformat(str(iso)).strftime("%m-%d %H:%M")
@@ -149,11 +188,7 @@ def message(event: str, ticket: Mapping, *, now: Optional[float] = None) -> tupl
             )
         if kind == "account":
             tpl = ticket.get("template") or {}
-            lines.append(
-                "子账号已建好。控制台初始密码请在 7 天内到平台领取。"
-                if tpl.get("console_login")
-                else "子账号已建好。"
-            )
+            lines.append(_account_how(tpl))
         if kind == "credential":
             # 这张卡会进飞书的消息列表，比审批实例好转发得多，所以刻意不带任何
             # 凭证内容，连查看地址都不带 —— 地址就是凭证
@@ -204,6 +239,211 @@ def message(event: str, ticket: Mapping, *, now: Optional[float] = None) -> tupl
     raise NotifyError(f"不认识的通知类型 {event!r}")
 
 
+#: 面板上「权限对账」那一页的地址。**只写一份。**
+#: 前端 `app.js:parseHash` 只认 `admin/iam` 这一个串，写成别的（比如 `iam`）会掉到
+#: 兜底分支、落在「我的」页面上 —— 而按钮看起来是好的，点了只是没到该到的地方。
+#: 这个错刚发生过一次：两张卡片各写各的，一张对一张错。
+IAM_PAGE = "#admin/iam"
+
+
+def page_link(base_url: str, page: str = IAM_PAGE) -> str:
+    """面板内页地址。base_url 不可用时返回空串 —— 调用方据此不加按钮。"""
+    link = safe_base_url(base_url)
+    return f"{link}/{page}" if link else ""
+
+
+def reclaim_card(report: Mapping, *, base_url: str = "") -> dict:
+    """离职回收的飞书交互卡片，发到管理员群。
+
+    **删掉的和扣住的分两段、两种颜色，不合并计数。** 删掉的是已经发生的事（知会一声），
+    扣住的是**要人去做的事**（两边不一致，得去问一句）。合成一句「本轮处理 3 人」的话，
+    那件要人做的事就没人做了 —— 卡片的头色也按「有没有待办」定，不按「做了多少」。
+    """
+    done = list(report.get("done") or [])
+    held = list(report.get("held") or [])
+    failed = list(report.get("failed") or [])
+    who = lambda r: f"{r.get('username', '')} {r.get('name', '')}".strip() or r.get("union_id", "")  # noqa: E731
+    div = lambda md: {"tag": "div", "text": {"tag": "lark_md", "content": md}}  # noqa: E731
+
+    elements: list = []
+    if done:
+        elements.append(div(f"**已回收 {len(done)} 人的云登录名**"))
+        for r in done[:10]:
+            elements.append(
+                div(
+                    f"· {who(r)}　`{r.get('app', '')}`　"
+                    f"{_clip(r.get('previous') or r.get('value'), 60)}"
+                )
+            )
+        if len(done) > 10:
+            elements.append(div(f"　…… 还有 {len(done) - 10} 人"))
+        elements.append(
+            {
+                "tag": "note",
+                "elements": [
+                    {
+                        "tag": "plain_text",
+                        "content": "只删了公司 IAM 的属性。"
+                        "云上的 RAM/IAM 账号还在，需要去控制台禁用。",
+                    }
+                ],
+            }
+        )
+    if held:
+        if elements:
+            elements.append({"tag": "hr"})
+        elements.append(div(f"**{len(held)} 人待确认**（IT 的 IAM 说已离职，我们名册里还有）"))
+        for r in held[:10]:
+            elements.append(div(f"· {who(r)}　`{r.get('app', '')}`　{_clip(r.get('value'), 60)}"))
+        elements.append(
+            {
+                "tag": "note",
+                "elements": [
+                    {
+                        "tag": "plain_text",
+                        "content": "在面板上确认离职后回收，或等名册同步后下一轮自动处理。",
+                    }
+                ],
+            }
+        )
+    if failed:
+        elements.append({"tag": "hr"})
+        elements.append(div(f"**{len(failed)} 条失败**"))
+        for r in failed[:5]:
+            elements.append(div(f"· {_clip(r.get('error'), 90)}"))
+    if not elements:
+        elements.append(div("没有要回收的。"))
+
+    link = page_link(base_url)
+    if link:
+        elements.append(
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "type": "primary",
+                        "text": {"tag": "plain_text", "content": "去后台看"},
+                        "url": link,
+                    }
+                ],
+            }
+        )
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            # 有待办就橙色。**不按「回收了多少」定色** —— 全自动做完是常态，不需要显眼
+            "template": "orange" if (held or failed) else ("blue" if done else "grey"),
+            "title": {"tag": "plain_text", "content": "云账号离职回收"},
+        },
+        "elements": elements,
+    }
+
+
+def notify_admins(notifier, union_ids, card: dict) -> list:
+    """把一张卡片私聊发给每个管理员。返回失败说明（空 = 全发出去了）。
+
+    **按人分别 try。** 一个管理员的 open_id 失效（离职、退出企业）不该让其余人收不到 ——
+    而通知的全部价值就在于「有人看到了」。
+    """
+    problems = []
+    for uid in sorted({str(u or "").strip() for u in union_ids if str(u or "").strip()}):
+        try:
+            notifier.send(uid, card, id_type="union_id")
+        except Exception as exc:  # noqa: BLE001 — 一个人发不到不挡其余
+            problems.append(f"{uid[:12]}…：{type(exc).__name__}: {str(exc)[:80]}")
+    return problems
+
+
+def drift_card(report: Mapping, *, base_url: str = "") -> dict:
+    """对账发现「人走了但云登录名还挂着」时，私聊管理员。**只提醒，不回收。**
+
+    为什么要有这个
+    ──────────────
+    回收本身是人点的（有确认按钮和「稍后处理」）—— 可原先**没有任何东西去提醒人来点**：
+    `identity iam-reclaim` 只能手工跑，而那条飞书私聊只在 `--apply` 时才发。
+    于是一个人离职之后，他的云登录名会一直挂着，直到某天有人恰好打开面板那一页。
+    线上就有这么一条躺着，没人被通知过。
+
+    **不在这里做回收**：删属性是不可逆的，而「他到底离没离职」的判据来自 IT 的 Authentik，
+    接口抖一下就可能把在职的人判成离职。提醒的代价是多一条消息，误删的代价是人登不进去。
+    """
+    rows = [
+        (e, d)
+        for e in (report.get("apps") or ())
+        for d in (e.get("drift") or ())
+        if d.get("kind") == "inactive"
+    ]
+    lines = [
+        f"{d.get('name') or d.get('username') or d.get('union_id', '')[:12]}"
+        f"（{e.get('app', '')}）：{_clip(d.get('theirs'), 60)}"
+        for e, d in rows[:8]
+    ]
+    if len(rows) > 8:
+        lines.append(f"…还有 {len(rows) - 8} 人")
+    lines.append("到面板「权限对账」确认回收，或先点「稍后处理」。")
+    elements: list = [
+        {"tag": "div", "text": {"tag": "plain_text", "content": line}} for line in lines
+    ]
+    link = page_link(base_url)
+    if link:
+        elements.append(
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "type": "primary",
+                        "text": {"tag": "plain_text", "content": "去确认"},
+                        "url": link,
+                    }
+                ],
+            }
+        )
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "orange",
+            "title": {"tag": "plain_text", "content": f"{len(rows)} 人已离职，云登录名还挂着"},
+        },
+        "elements": elements,
+    }
+
+
+def reclaim_text(report: Mapping, *, base_url: str = "") -> str:
+    """离职回收的结果，发到管理员群（`alerts` 那个签名机器人，文本通道）。
+
+    **删掉的和扣住的分两段写，不合并计数。** 删掉的是已经发生的事（知会一声），
+    扣住的是**要人去做的事**（两边不一致，得问一句）。合成一句「本轮处理 3 人」的话，
+    那件要人做的事就没人做了。
+    """
+    done = list(report.get("done") or [])
+    held = list(report.get("held") or [])
+    failed = list(report.get("failed") or [])
+    who = lambda r: f"{r.get('username', '')} {r.get('name', '')}".strip() or r.get("union_id", "")  # noqa: E731
+    lines = ["【云账号离职回收】"]
+    if done:
+        lines.append(f"已回收 {len(done)} 人的云登录名（属性已删，云上账号还在）：")
+        lines += [
+            f"  · {who(r)} {r.get('app', '')} {_clip(r.get('previous') or r.get('value'), 60)}"
+            for r in done[:10]
+        ]
+        if len(done) > 10:
+            lines.append(f"  …… 还有 {len(done) - 10} 人")
+    if held:
+        lines.append(f"{len(held)} 人待确认 —— IT 的 IAM 说已离职，但我们名册里还有，没动：")
+        lines += [f"  · {who(r)} {r.get('app', '')} {_clip(r.get('value'), 60)}" for r in held[:10]]
+        lines.append("  两边不一致时该去问一句，不是删。确认离职后名册会少掉他，下一轮自动回收。")
+    if failed:
+        lines.append(f"{len(failed)} 条失败：")
+        lines += [f"  · {_clip(r.get('error'), 90)}" for r in failed[:5]]
+    if done:
+        lines.append("云上的 RAM/IAM 用户还在 —— 禁用或删除账号不自动做。")
+    if base_url:
+        lines.append(f"详情：{page_link(base_url)}")
+    return "\n".join(lines)
+
+
 def build_card(event: str, ticket: Mapping, *, base_url: str, now: Optional[float] = None) -> dict:
     color, title, lines = message(event, ticket, now=now)
     elements: list = [
@@ -216,7 +456,77 @@ def build_card(event: str, ticket: Mapping, *, base_url: str, now: Optional[floa
             "elements": [{"tag": "plain_text", "content": f"申请单 {_clip(ticket.get('id'), 40)}"}],
         }
     )
+    actions = []
+    # 开完号的那张卡把控制台地址放上去。**这是他最需要的一个东西**，
+    # 而原先整张卡里一个链接都没有 —— 人得自己去问「在哪登」
+    if event == "done" and ticket.get("kind") == "account":
+        console = console_link(ticket)
+        if console:
+            actions.append(
+                {
+                    "tag": "button",
+                    "type": "primary",
+                    "text": {"tag": "plain_text", "content": "去登录控制台"},
+                    "url": console,
+                }
+            )
     link = request_link(base_url, str(ticket.get("id") or ""))
+    if link:
+        actions.append(
+            {
+                "tag": "button",
+                "type": "default" if actions else "primary",
+                "text": {"tag": "plain_text", "content": "查看申请"},
+                "url": link,
+            }
+        )
+    if actions:
+        elements.append({"tag": "action", "actions": actions})
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": color, "title": {"tag": "plain_text", "content": title}},
+        "elements": elements,
+    }
+
+
+#: 搬运要管理员出手的两种情况 → (卡片颜色, 标题前缀, 该做什么)
+_MOVE_REASON = {
+    "review": ("orange", "搬运等确认", "确认体积没问题后放行；量不出来的多半是源目录读不到。"),
+    "failed": ("red", "搬运失败", "看一眼原因，决定重试还是关掉这张单。"),
+    # 「这一轮没跑成」——多半是配置或网络，搬运本身还没有结论。
+    # 和 failed 分开是因为它俩的处置不同：这个等下一轮自己好，那个要人决定
+    "error": ("orange", "搬运这轮没跑成", "多半是配置或网络。下一轮会再试；一直不好就看一眼原因。"),
+}
+
+
+def move_card(ticket: Mapping, stage: str, *, base_url: str = "") -> dict:
+    """搬运卡在人这一步时，私聊管理员。
+
+    **只发给管理员，不发申请人。** 申请人确认不了体积、也重试不了，
+    给他一条「等确认」只是让他来问一句「还要多久」。
+
+    **也不发群。** 这是要人去做的事 —— 发群等于发给没有人。
+    """
+    color, what, todo = _MOVE_REASON.get(stage, _MOVE_REASON["failed"])
+    payload = ticket.get("payload") or {}
+    lines = [
+        f"{_clip(payload.get('source'), 120)}",
+        f"→ {_clip(payload.get('dest'), 120)}",
+    ]
+    why = str(ticket.get("move_error") or "").strip()
+    if why:
+        lines.append(why[:_LINE_MAX])
+    lines.append(todo)
+    elements: list = [
+        {"tag": "div", "text": {"tag": "plain_text", "content": line}} for line in lines
+    ]
+    elements.append(
+        {
+            "tag": "note",
+            "elements": [{"tag": "plain_text", "content": f"申请单 {_clip(ticket.get('id'), 40)}"}],
+        }
+    )
+    link = request_link(base_url, str(ticket.get("id") or ""), admin=True)
     if link:
         elements.append(
             {
@@ -225,7 +535,7 @@ def build_card(event: str, ticket: Mapping, *, base_url: str, now: Optional[floa
                     {
                         "tag": "button",
                         "type": "primary",
-                        "text": {"tag": "plain_text", "content": "查看申请"},
+                        "text": {"tag": "plain_text", "content": "去处理"},
                         "url": link,
                     }
                 ],
@@ -233,7 +543,10 @@ def build_card(event: str, ticket: Mapping, *, base_url: str, now: Optional[floa
         )
     return {
         "config": {"wide_screen_mode": True},
-        "header": {"template": color, "title": {"tag": "plain_text", "content": title}},
+        "header": {
+            "template": color,
+            "title": {"tag": "plain_text", "content": f"{what}：{ticket_title(ticket)}"},
+        },
         "elements": elements,
     }
 
@@ -264,7 +577,16 @@ class FeishuNotifier:
 
     reaches_applicant = True
 
-    def send(self, open_id: str, card: dict, *, by_user_id: bool = False) -> None:
+    def send(
+        self, open_id: str, card: dict, *, by_user_id: bool = False, id_type: str = ""
+    ) -> None:
+        """给一个人发卡片。`id_type` 支持 open_id / user_id / union_id。
+
+        名册里**只有 union_id**（没有 open_id），所以给管理员发通知走 union_id 那条。
+        """
+        kind = id_type or ("user_id" if by_user_id else "open_id")
+        if kind not in _ID_TYPES:
+            raise NotifyError(f"不支持的收件人标识类型 {kind!r}")
         token = self._token()
         body = {
             "receive_id": open_id,
@@ -272,7 +594,7 @@ class FeishuNotifier:
             "content": json.dumps(card, ensure_ascii=False),
         }
         try:
-            data = self._transport("POST", API_BY_USER_ID if by_user_id else API, token, body)
+            data = self._transport("POST", f"{_API_BASE}?receive_id_type={kind}", token, body)
         except NotifyError:
             raise
         except Exception as exc:  # noqa: BLE001 — 不带原始异常文本：可能带着请求头

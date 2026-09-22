@@ -1,0 +1,59 @@
+{
+  "_what": "面板「数据迁移」要的阿里云权限。挂在开通身份（DELIVERY_EXEC_ALIYUN_1704065796538912）上。",
+
+  "_why_this_shape": [
+    "迁移服务（MGW）的调用序列是：建源地址 → 校验 → 建目的地址 → 校验 → 建任务 → 启动 → 轮询。",
+    "动作名带 `Import` 中缀（`mgw:CreateImportAddress` 而不是 `mgw:CreateAddress`）——",
+    "这一点两次独立抓取的文档一致，也和 SDK 里 `import_address` / `IMPORT_JOB_*` 对得上。",
+    "",
+    "**没有删除动作。** 面板只建不删：误建一个任务的代价是它在控制台里碍眼，",
+    "误删一个在跑的迁移任务的代价是搬了一半的数据没人知道停在哪。"
+  ],
+
+  "_oss_part": [
+    "两件事要 OSS 权限，都不是「读数据」：",
+    "  ① 搬之前量体积（ListObjects）—— 量不出来的任务会被当成大任务拦下来等人确认，",
+    "     所以缺了它不会出错，只会让每一张单都要管理员点一次。",
+    "  ② 火山那条链建任务时会同步校验源桶可达（HeadBucket），缺了直接报",
+    "     `CheckTaskPermission: Need HeadBucket permission on bucket xxx`（真机踩过）。",
+    "**没有 GetObject。** 面板不读数据内容，搬运是迁移服务自己用 AliyunOSSRole 做的。"
+  ],
+
+  "_role_part": "目的地址用 RAM 角色 AliyunOSSRole，由迁移服务扮演，面板不需要 PassRole。",
+
+  "_ip": "和其余执行策略一样叠面板服务器出口 IP。AK 泄漏出去在别处也用不了。",
+
+  "Version": "1",
+  "Statement": [
+    {
+      "Action": [
+        "mgw:CreateImportAddress",
+        "mgw:VerifyImportAddress",
+        "mgw:GetImportAddress",
+        "mgw:CreateImportJob",
+        "mgw:UpdateImportJob",
+        "mgw:GetImportJob",
+        "mgw:ListImportJobHistory"
+      ],
+      "Resource": [
+        "acs:mgw:*:1704065796538912:address/*",
+        "acs:mgw:*:1704065796538912:job/*"
+      ],
+      "Effect": "Allow",
+      "Condition": { "IpAddress": { "acs:SourceIp": ["120.79.167.166"] } }
+    },
+    {
+      "_note": "量体积 + 让火山那边校验源桶可达。只读，不含 GetObject。",
+      "Action": ["oss:ListObjects", "oss:GetBucketInfo", "oss:GetBucketLocation"],
+      "Resource": ["acs:oss:*:*:*"],
+      "Effect": "Allow",
+      "Condition": { "IpAddress": { "acs:SourceIp": ["120.79.167.166"] } }
+    }
+  ],
+
+  "_verify": [
+    "挂上之后跑一次真机自检（只读，不建任何东西）：",
+    "  查一个不存在的任务 → 应该回 NoSuchImportJob / 404，而不是 AccessDenied。",
+    "挂之前的实测结果是 `AccessDenied You are forbidden to mgw:GetImportJob`。"
+  ]
+}

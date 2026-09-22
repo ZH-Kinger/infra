@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Mapping, Optional
 
 from . import platforms as platforms_mod
+from . import workspaces as workspaces_mod
 from .errors import DeliveryError
 
 SCHEMA = "wuji-request-templates@1"
@@ -30,13 +31,50 @@ KIND_CREDENTIAL = "credential"
 #: 一句话规格（「4C16G 杭州」）调不了 API：镜像、VPC、交换机、安全组、磁盘、计费方式都缺。
 #: 所以自动开的前提是模板把这些全配死成套餐，申请人只选套餐 —— 审批人批的也才是确定的东西。
 KIND_RESOURCE = "resource"
-KINDS = (KIND_ACCOUNT, KIND_PERMISSION, KIND_CREDENTIAL, KIND_RESOURCE)
+#: 在数据桶里开一个新批次的目录。**和资源开通一样停在「待开通」** ——
+#: 面板不替人建目录，它负责把「这是什么数据、放哪、谁负责」问清楚并留下台账。
+KIND_STORAGE = "storage"
+#: 把一个目录搬到另一个地方。搬运能力在别处（六条链），这里只管审批和台账。
+KIND_TRANSFER = "transfer"
+KINDS = (
+    KIND_ACCOUNT,
+    KIND_PERMISSION,
+    KIND_CREDENTIAL,
+    KIND_STORAGE,
+    KIND_TRANSFER,
+    KIND_RESOURCE,
+)
 KIND_LABELS = {
     KIND_ACCOUNT: "开账号",
     KIND_PERMISSION: "云账号权限",
     KIND_CREDENTIAL: "访问凭证",
+    KIND_STORAGE: "数据目录",
+    KIND_TRANSFER: "数据迁移",
     KIND_RESOURCE: "资源开通",
 }
+#: 停在「待开通」等人执行的那几类。
+#:
+#: 数据目录**暂时留在这里**：代码已经能建（`AliyunExecutor.make_dir`，一个 0 字节占位对象），
+#: 但执行身份还没有那两个数据桶的写权限，先不上。要上的时候把 KIND_STORAGE 从这里移走即可。
+#: 把建不了的东西直接置成「已完成」是在台账里说谎 —— 没有任何东西因为那次点击而存在
+AWAIT_FULFIL = (KIND_RESOURCE, KIND_STORAGE, KIND_TRANSFER)
+
+
+def awaits_human(tpl) -> bool:
+    """这张单审批通过之后，是面板自己做，还是停下来等人做？
+
+    **按模板判，不按类型判。** 同是「资源开通」，ECS 配了 `resource_type` + 整套
+    创建参数（镜像、交换机、安全组），面板调一次 `RunInstances` 就能开出来；
+    RDS 没配，面板建不了，只能停在「待开通」等人。
+    一刀切成「资源全部人工」的话，ECS 那份配置就永远是死的。
+    """
+    kind = str(getattr(tpl, "kind", "") or "")
+    if kind not in AWAIT_FULFIL:
+        return False
+    if kind == KIND_RESOURCE:
+        return not getattr(tpl, "resource_type", "")
+    return True
+
 
 RISKS = ("low", "medium", "high")
 
@@ -105,8 +143,21 @@ class Template:
     caps: tuple = ()
     #: credential：允许申请的桶白名单，((桶名, 地域), ...)
     buckets: tuple = ()
+    #: 并行文件系统（CPFS / vePFS）。形状见 `_filesystems()`
+    filesystems: tuple = field(default_factory=tuple, compare=False)
     #: credential：允不允许申请人把范围收窄到某个子目录
     allow_prefix: bool = True
+    #: 允许不填目录 = 把整个桶开出去。**默认不允许。**
+    #:
+    #: 不设这道闸的时候真发生过：一张「下载」单目录留空，签出来的策略里
+    #: `ListObjects` 没有 `oss:Prefix` 条件、`GetObject` 的 ARN 是 `<桶>/*` ——
+    #: 使用方能读整个 859.7 TiB 主桶的 6759 万个对象，30 天。
+    #: 而审批卡上那行 `oss://wuji-bucket-hangzhou/` 看起来和一个普通目录没两样。
+    whole_bucket: bool = False
+    #: storage：每个桶允许在哪些 stage 下建目录，`{桶名: (stage, ...)}`。
+    #: **哪个桶放哪类数据是策略，写在模板里** —— 前端只负责把它渲染成选项，
+    #: 不自己判断「ego 数据能不能放进开源桶」
+    stages: dict = field(default_factory=dict, compare=False)
     #: permission / resource：最长授权天数，0 = 不限（到期回收在后续阶段）
     max_days: int = 0
     #: resource：选项轴（空 = 面板不建，停在「待开通」等人工），以及自由填写时的提示
@@ -125,6 +176,12 @@ class Template:
     #: account：用户名规则、是否开通控制台登录（领取一次性初始密码）
     username_pattern: str = DEFAULT_USERNAME
     console_login: bool = False
+    #: account / permission：开完号（或批准加入）之后，把人放进哪个 PAI 工作空间、
+    #: 并在那儿给他建一条指向个人目录的数据集。空字典 = 这张模板不管工作空间。
+    #: 解析好的工作空间配置，**一条一个地域**。模板里写的是地域 key
+    #: （`"workspaces": ["hz"]`），加载时从 `identity/workspaces.json` 查出来。
+    #: 形状见 `workspaces._one()`。
+    workspaces: tuple = field(default_factory=tuple, compare=False)
     extra: dict = field(default_factory=dict, compare=False)
 
     @property
@@ -183,7 +240,9 @@ class Template:
                 except CatalogError:
                     continue
                 if not (value == 0 and axis.number.omit_zero):
-                    out[axis.number.param] = str(value)
+                    # 没有 param = 人工开通，这个数字不进云参数，只进摘要
+                    if axis.number.param:
+                        out[axis.number.param] = str(value)
                     out.update(dict(axis.number.with_params))
                 continue
             got = axis.choice(str(picked.get(axis.id) or ""))
@@ -217,8 +276,22 @@ class Template:
             "sts_available": bool(self.role_arn) and self.kind == KIND_CREDENTIAL,
             "caps": list(self.caps),
             "cap_labels": [CAP_LABELS[c] for c in self.caps],
-            "buckets": [{"name": n, "region": r} for n, r in self.buckets],
+            # storage 的桶要带上「这个桶能放哪几类数据」，前端据此渲染选项；
+            # 其余 kind 不带 stages，免得多一个永远是空数组的字段
+            "buckets": [
+                {
+                    "name": n,
+                    "region": r,
+                    **(
+                        {"stages": list(self.stages.get(n, ()))}
+                        if self.kind == KIND_STORAGE
+                        else {}
+                    ),
+                }
+                for n, r in self.buckets
+            ],
             "allow_prefix": self.allow_prefix if self.kind == KIND_CREDENTIAL else False,
+            "whole_bucket": self.whole_bucket if self.kind == KIND_CREDENTIAL else False,
             "max_days": self.max_days if self.kind in (KIND_PERMISSION, KIND_RESOURCE) else 0,
             # 只给前端 id 和给人看的名字。**params 绝不外传**：里面是镜像、交换机、
             # 安全组 ID，属于内网拓扑，没必要让每个申请人都看到
@@ -274,9 +347,11 @@ def _int(spec: dict, key: str, where: str, default: int, lo: int, hi: int) -> in
 #: 静默忽略正是权限事故的常见开头，所以一律当成写错、拒绝加载。
 _COMMON = {"id", "kind", "platform", "account", "title", "description", "risk", "category"}
 _BY_KIND = {
-    KIND_ACCOUNT: {"groups", "username_pattern", "console_login"},
-    KIND_PERMISSION: {"groups", "max_days"},
-    KIND_CREDENTIAL: {"role_arn", "max_hours", "caps", "buckets", "allow_prefix"},
+    KIND_ACCOUNT: {"groups", "username_pattern", "console_login", "workspaces"},
+    KIND_STORAGE: {"buckets", "stages"},
+    KIND_TRANSFER: {"buckets", "filesystems"},
+    KIND_PERMISSION: {"groups", "max_days", "workspaces"},
+    KIND_CREDENTIAL: {"role_arn", "max_hours", "caps", "buckets", "allow_prefix", "whole_bucket"},
     KIND_RESOURCE: {
         "max_days",
         "options",
@@ -288,6 +363,134 @@ _BY_KIND = {
         "region",
     },
 }
+
+
+#: 允许的 stage。**白名单，不是自由填写** —— 这一段会进 OSS key 和 RAM 策略的
+#: `oss:Prefix` 条件，一个 `*` 或 `../` 就能让一条策略覆盖到别人的数据
+STAGES = (
+    "raw",
+    "raw-ego",
+    "raw-robot",
+    "supplier",
+    "label",
+    "derived",
+    "rollout",
+    "eval",
+    "release",
+    "delivery",
+    "opensource",
+    "web",
+)
+
+
+def _stages(spec: dict, buckets: tuple, where: str) -> dict:
+    """`{"桶名": ["raw-ego", "label"]}` —— 这个桶允许在哪些 stage 下建目录。
+
+    **桶必须在 buckets 里**：写了一个不在白名单里的桶名，等于悄悄多开一个可申请的位置。
+    """
+    raw = spec.get("stages", {})
+    if not isinstance(raw, dict) or not raw:
+        raise CatalogError(f'{where}：stages 必须是非空对象，形如 {{"桶名": ["raw-ego", ...]}}')
+    known = {n for n, _ in buckets}
+    out = {}
+    for name, items in raw.items():
+        if name not in known:
+            raise CatalogError(f"{where}：stages 里的 {name!r} 不在 buckets 里")
+        if not isinstance(items, list) or not items:
+            raise CatalogError(f"{where}：stages[{name!r}] 必须是非空数组")
+        bad = [x for x in items if x not in STAGES]
+        if bad:
+            raise CatalogError(
+                f"{where}：stages[{name!r}] 里不认识的 stage {bad[0]!r}，"
+                f"只能是 {' / '.join(STAGES)}"
+            )
+        out[name] = tuple(dict.fromkeys(items))
+    missing = sorted(known - set(out))
+    if missing:
+        raise CatalogError(f"{where}：buckets 里的 {missing[0]!r} 没在 stages 里说明能放什么")
+    return out
+
+
+def _workspaces(spec, where: str, registry) -> tuple:
+    """模板里的 `"workspaces": ["hz", "sing"]` → 解析好的配置串。
+
+    **不配就是不管**（空串）—— 这是加法：没配的模板行为和以前一字不差。
+
+    为什么要有这一块
+    ────────────────
+    工作空间是 PAI 的围墙：数据集、DSW 实例、DLC 任务全是它的下级资源，
+    不在里面的人一个都看不到。原先面板只建 RAM 账号，人开完号还是进不去 ——
+    加成员、开个人目录、建数据集三件事都得管理员另外手动做一遍。
+
+    **为什么是一串不是一个**：一个人可能要同时进杭州和新加坡两个空间，
+    而数据集是工作空间的下级资源 —— 每进一个空间都要在那儿再建一条指向同一路径的
+    数据集，否则他人进去了、自己的数据却看不到。写成单个的话，多地域只能靠
+    「再提一张申请单」，而那张单子的初始化又是另一条路，迟早两条会不一样。
+    """
+    if spec in (None, [], ""):
+        return ()
+    if isinstance(spec, str):
+        spec = [spec]
+    if not isinstance(spec, list) or not all(isinstance(k, str) and k for k in spec):
+        raise CatalogError(f'{where}：workspaces 是地域 key 的字符串数组，例如 ["hz"]')
+    dup = sorted({k for k in spec if spec.count(k) > 1})
+    if dup:
+        raise CatalogError(f"{where}：workspaces 里重复了：{'、'.join(dup)}")
+    reg = registry if registry is not None else workspaces_mod.Registry()
+    out = []
+    for key in spec:
+        try:
+            out.append(reg.get(key))
+        except workspaces_mod.WorkspaceError as exc:
+            raise CatalogError(f"{where}：{exc}") from None
+    return tuple(out)
+
+
+#: 并行文件系统。**和桶分两份登记**：桶名和文件系统 id 长得完全不一样
+#: （`bmcpfs-00000ub…` / `vepfs-cnshef4…`），混在一份里的话「这个名字是桶还是文件系统」
+#: 只能靠猜，而猜错的表现是路径校验放行了一个搬不了的地址
+_FS_KEYS = {"id", "region", "cloud"}
+#: id 前缀 → 哪朵云。**不让模板自己写 cloud**，除非前缀认不出来 ——
+#: 写错了的表现是拿阿里的凭证去调火山的接口，报错指不到根因
+_FS_CLOUD = {"bmcpfs-": "aliyun", "cpfs-": "aliyun", "vepfs-": "volcano"}
+
+
+def _filesystems(spec, where: str) -> tuple:
+    """`[{"id": "bmcpfs-xxx", "region": "cn-hangzhou"}, …]` → 校验过的串。"""
+    if spec in (None, [], ""):
+        return ()
+    if not isinstance(spec, list):
+        raise CatalogError(f"{where}：filesystems 要是数组")
+    out = []
+    for i, row in enumerate(spec):
+        at = f"{where}：filesystems[{i}]"
+        if not isinstance(row, dict):
+            raise CatalogError(f"{at} 必须是对象")
+        unknown = sorted(set(row) - _FS_KEYS)
+        if unknown:
+            raise CatalogError(f"{at} 里不认识的字段 {'、'.join(unknown)}（拼错了？）")
+        fid = str(row.get("id") or "").strip()
+        if not fid:
+            raise CatalogError(f"{at} 缺 id")
+        region = str(row.get("region") or "").strip()
+        if not region:
+            # 地域推不出来（id 里不带），而调接口必须有它 —— 缺了的表现是
+            # 请求发到一个默认地域，回「文件系统不存在」
+            raise CatalogError(f"{at} 缺 region（调数据流动接口必须带地域）")
+        cloud = str(row.get("cloud") or "").strip()
+        if not cloud:
+            cloud = next((v for k, v in _FS_CLOUD.items() if fid.startswith(k)), "")
+        if cloud not in ("aliyun", "volcano"):
+            raise CatalogError(
+                f"{at}：认不出 {fid} 是哪朵云的（前缀应是 bmcpfs- / cpfs- / vepfs-），"
+                "认不出就显式写 cloud"
+            )
+        out.append({"id": fid, "region": region, "cloud": cloud})
+    names = [r["id"] for r in out]
+    dup = sorted({n for n in names if names.count(n) > 1})
+    if dup:
+        raise CatalogError(f"{where}：filesystems 里重复了：{'、'.join(dup)}")
+    return tuple(out)
 
 
 def _buckets(spec: dict, where: str) -> tuple:
@@ -449,10 +652,11 @@ def _number(raw: object, where: str) -> NumberField:
     )
     if unknown:
         raise CatalogError(f"{where}：number 里不认识的字段 {'、'.join(unknown)}")
+    # `param` 是「这个数字填进哪个云参数」。**人工开通的资源没有云参数可填** ——
+    # 那时数字只进申请单的摘要，给审批人和开通的人看。所以它是可选的。
+    # 要求必填会逼着 RDS 这种模板退化成一个自由文本框（之前就是）。
     param = str(raw.get("param") or "")
-    if not param:
-        raise CatalogError(f"{where}：number 要指定 param（这个数字填进哪个云参数）")
-    if param.lower().replace("_", "").replace(".", "") in _SPEC_FORBIDDEN:
+    if param and param.lower().replace("_", "").replace(".", "") in _SPEC_FORBIDDEN:
         raise CatalogError(f"{where}：number 不允许写进 {param}")
     extra = raw.get("with_params") or {}
     if not isinstance(extra, dict):
@@ -640,7 +844,7 @@ def _cost_centers(spec: dict, where: str) -> tuple:
     return tuple(out)
 
 
-def parse_template(spec: object, index: int) -> Template:
+def parse_template(spec: object, index: int, registry=None) -> Template:
     where = f"templates[{index}]"
     if not isinstance(spec, dict):
         raise CatalogError(f"{where} 必须是对象")
@@ -681,8 +885,12 @@ def parse_template(spec: object, index: int) -> Template:
 
     kw: dict = {}
     if kind == KIND_PERMISSION:
-        if not groups:
-            raise CatalogError(f"{where}：权限模板至少要有一个用户组")
+        # 只加工作空间的权限模板没有用户组 —— 它给的是「进得去那个 PAI 空间」，
+        # 不是 RAM 用户组。**但两者都没有就是一张什么都不做的模板**，那必须拦。
+        # **读 spec 不读 kw**：`kw["workspaces"]` 在这一段之后才赋值，读它永远是空，
+        # 这条守卫会退化成「权限模板一律必须有用户组」
+        if not groups and not spec.get("workspaces"):
+            raise CatalogError(f"{where}：权限模板至少要有一个用户组，或者配一个 workspaces")
         kw["max_days"] = _int(spec, "max_days", where, 0, 0, 3650)
     elif kind == KIND_CREDENTIAL:
         caps = spec.get("caps", [])
@@ -706,6 +914,10 @@ def parse_template(spec: object, index: int) -> Template:
         kw["caps"] = tuple(c for c in CAPS if c in caps)
         kw["buckets"] = _buckets(spec, where)
         kw["allow_prefix"] = allow_prefix
+        whole = spec.get("whole_bucket", False)
+        if not isinstance(whole, bool):
+            raise CatalogError(f"{where}：whole_bucket 必须是 true / false")
+        kw["whole_bucket"] = whole
         # 会话策略（发凭证时把角色现场收窄到单桶单目录）取证过的平台，≤12 小时走 STS，
         # 所以必须配角色；没取证过的平台一律走长期凭证，不配角色也不许配 ——
         # 不收窄就发等于把整个角色的范围交出去。这个开关在 platforms.py。
@@ -717,6 +929,15 @@ def parse_template(spec: object, index: int) -> Template:
         if not cloud.session_policy and role:
             raise CatalogError(f"{where}：{cloud.name}的凭证一律走长期路径，不要配 role_arn")
         kw["max_hours"] = _int(spec, "max_hours", where, 1, 1, MAX_CREDENTIAL_HOURS)
+    elif kind in (KIND_STORAGE, KIND_TRANSFER):
+        # 两类都只收「允许操作哪些桶」。**面板不建目录、不搬数据** ——
+        # 它把事情问清楚、走审批、留台账，执行的人照着单子做。
+        kw["buckets"] = _buckets(spec, where)
+        if kind == KIND_STORAGE:
+            kw["stages"] = _stages(spec, kw["buckets"], where)
+        else:
+            # 并行文件系统（预热 / 沉降那两条链）。和桶分两份登记 —— 见 `_filesystems`
+            kw["filesystems"] = _filesystems(spec.get("filesystems"), where)
     elif kind == KIND_RESOURCE:
         kw["max_days"] = _int(spec, "max_days", where, 0, 0, 3650)
         kw["options"] = _options(spec, where)
@@ -733,20 +954,47 @@ def parse_template(spec: object, index: int) -> Template:
             raise CatalogError(f"{where}：spec_hint 最长 {SPEC_MAX} 个字")
         rtype = _str(spec, "resource_type", where, required=False)
         region = _str(spec, "region", where, required=False)
-        if kw["options"]:
-            # 配了选项轴 = 要面板自己建。建之前必须知道建什么、建在哪
+        # 选项轴和「能不能自动建」是两件事，之前这里把它们绑死了：
+        # 配了 options 就必须有 resource_type，于是 RDS 这种面板建不了的资源
+        # 只能退化成一个自由文本框 —— 审批人看到一句话，开通的人还得回头问。
+        #
+        # 而 `flows` 里所有资源单**都**停在「待开通」（那行注释：「资源开通面板一行云都不写」），
+        # 所以 resource_type 现在根本没有被用来建任何东西。绑死它拦的是一件不会发生的事。
+        #
+        # 现在的规矩：
+        #   options  —— 收集结构化信息，谁来建都用得上，随便配
+        #   params   —— 建资源的 API 参数，**没有 resource_type 就没人会用它**，所以要求配套
+        # 选项轴里带了云参数（choices 的 params / number 的 param）却没有 resource_type，
+        # 同样是没人会读 —— 但这是**配错了**，不是「人工开通」：人工开通的模板压根不该填那些
+        if not rtype:
+            for axis in kw["options"]:
+                if axis.number is not None and (axis.number.param or axis.number.with_params):
+                    raise CatalogError(
+                        f"{where} 选项轴 {axis.id}：没有 resource_type 就没人会读 "
+                        "number.param / number.with_params，人工开通的模板把它们去掉"
+                    )
+                if any(c[2] for c in axis.choices):
+                    raise CatalogError(
+                        f"{where} 选项轴 {axis.id}：没有 resource_type"
+                        f"就没人会读 choices 的 params，"
+                        "人工开通的模板把它们留空"
+                    )
+        if kw["params"] and not rtype:
+            raise CatalogError(
+                f"{where}：params 是建资源时要传的 API 参数，"
+                f"没有 resource_type 就没有东西会读它 —— 要么去掉 params，要么补上 resource_type"
+            )
+        if rtype:
             if rtype not in RESOURCE_TYPES:
                 raise CatalogError(
-                    f"{where}：配了 options 就要指定 resource_type（目前支持 "
-                    f"{' / '.join(RESOURCE_TYPES)}）"
+                    f"{where}：resource_type 目前只支持 {' / '.join(RESOURCE_TYPES)}"
                 )
             if not _REGION_ID.match(region):
-                raise CatalogError(f"{where}：配了 options 就要指定 region（例如 cn-hangzhou）")
-        elif rtype or region or kw["params"]:
-            raise CatalogError(
-                f"{where}：没配 options 的资源模板由人工开通，"
-                f"不要填 resource_type / region / params"
-            )
+                raise CatalogError(
+                    f"{where}：配了 resource_type 就要指定 region（例如 cn-hangzhou）"
+                )
+        elif region:
+            raise CatalogError(f"{where}：没有 resource_type 就不用填 region")
         kw["resource_type"] = rtype
         kw["region"] = region
     else:
@@ -762,6 +1010,8 @@ def parse_template(spec: object, index: int) -> Template:
             raise CatalogError(f"{where}：console_login 必须是 true / false")
         kw["username_pattern"] = pattern
         kw["console_login"] = console
+    if kind in (KIND_ACCOUNT, KIND_PERMISSION):
+        kw["workspaces"] = _workspaces(spec.get("workspaces"), where, registry)
 
     return Template(
         id=tid,
@@ -788,13 +1038,13 @@ class Catalog:
         return tuple(t for t in self.templates if t.kind == kind)
 
 
-def parse(data: object) -> Catalog:
+def parse(data: object, registry=None) -> Catalog:
     if not isinstance(data, dict) or data.get("schema") != SCHEMA:
         raise CatalogError(f"模板目录 schema 必须是 {SCHEMA}")
     items = data.get("templates")
     if not isinstance(items, list):
         raise CatalogError("模板目录缺 templates 数组")
-    templates = [parse_template(spec, i) for i, spec in enumerate(items)]
+    templates = [parse_template(spec, i, registry) for i, spec in enumerate(items)]
     ids = [t.id for t in templates]
     dup = sorted({i for i in ids if ids.count(i) > 1})
     if dup:
@@ -802,12 +1052,19 @@ def parse(data: object) -> Catalog:
     return Catalog(tuple(templates))
 
 
-def load(path: Optional[str]) -> Catalog:
-    """文件不存在 = 没有可申请的模板（安全的一侧），格式错误则报错。"""
+def load(path: Optional[str], registry=None) -> Catalog:
+    """文件不存在 = 没有可申请的模板（安全的一侧），格式错误则报错。
+
+    **地域登记表默认在模板文件旁边**（`workspaces.json`），不用单独传 ——
+    多一个参数就多一处「systemd 里忘了传」的可能，而那种漏的表现是
+    所有模板的 workspaces 都解析不到，建号安静地少做三件事。
+    """
     if not path or not Path(path).exists():
         return Catalog()
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise CatalogError(f"读不了模板目录 {path}：{exc}") from exc
-    return parse(data)
+    if registry is None:
+        registry = workspaces_mod.load(workspaces_mod.beside(path))
+    return parse(data, registry)

@@ -6,7 +6,9 @@
 // **不抹地址栏**：这一页是可以反复打开的（换机器、重装、同事接手），抹掉就刷新不了。
 // 每次打开服务端都会在申请单里记一笔。
 
-const app = document.getElementById("app");
+//: **渲染时才找容器**，不在模块加载那一刻找 —— 脚本是 `type="module"`（defer），
+//: 正常情况下 DOM 已经在了，但拿一次就存下来的话，任何「加载顺序变了」
+//: 都会变成一个静默的 null，而表现是整页空白、控制台一行 replaceChildren of null
 
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
@@ -24,7 +26,7 @@ function h(tag, attrs, ...kids) {
 }
 
 function show(...nodes) {
-  app.replaceChildren(...nodes);
+  document.getElementById("app").replaceChildren(...nodes);
 }
 
 function card(title, ...body) {
@@ -35,39 +37,91 @@ function fail(message) {
   show(h("div", { class: "card empty" }, h("h2", {}, "打不开"), h("p", {}, message)));
 }
 
-function row(label, value, copyable) {
+//: 打码用的字符。**不按真实长度打**（`"•".repeat(value.length)` 会把密钥长度
+//: 泄露给肩后看屏幕的人，而长度本身就能缩小暴力破解的范围）。固定一串就够了。
+const MASK = "••••••••••••••••••••••••";
+
+function copyButton(getText, { label = "复制" } = {}) {
+  //: **每次点都重新取值**（`getText` 是函数不是字符串）—— 打码状态下复制的
+  //: 也必须是真值，否则人复制到的是一串圆点，而那要到粘进终端才发现。
   return h(
-    "div",
-    { class: "perm" },
-    h("span", { class: "muted" }, label),
-    h("code", { class: "secret-value" }, value),
-    copyable
-      ? h(
-          "button",
-          {
-            type: "button",
-            class: "btn ghost small",
-            onclick: async (e) => {
-              try {
-                await navigator.clipboard.writeText(value);
-                e.currentTarget.textContent = "已复制";
-              } catch {
-                e.currentTarget.textContent = "复制失败，请手动选中";
-              }
-            },
-          },
-          "复制",
-        )
-      : null,
+    "button",
+    {
+      type: "button",
+      class: "icon-btn",
+      title: "复制",
+      "aria-label": "复制",
+      onclick: async (e) => {
+        const btn = e.currentTarget;
+        const was = btn.textContent;
+        try {
+          await navigator.clipboard.writeText(getText());
+          btn.textContent = "已复制";
+          btn.classList.add("ok");
+        } catch {
+          //: 非 https 或者旧浏览器会没有 clipboard —— 说清楚要手动选，
+          //: 不要只变成一个没反应的按钮
+          btn.textContent = "手动选中复制";
+          btn.classList.add("bad");
+        }
+        setTimeout(() => {
+          btn.textContent = was;
+          btn.classList.remove("ok", "bad");
+        }, 1600);
+      },
+    },
+    label,
   );
 }
 
+function eyeButton(onToggle) {
+  let shown = false;
+  const btn = h(
+    "button",
+    {
+      type: "button",
+      class: "icon-btn eye",
+      title: "显示",
+      "aria-label": "显示",
+      "aria-pressed": "false",
+      onclick: () => {
+        shown = !shown;
+        btn.textContent = shown ? "🙈" : "👁";
+        btn.title = btn.ariaLabel = shown ? "隐藏" : "显示";
+        btn.setAttribute("aria-pressed", String(shown));
+        onToggle(shown);
+      },
+    },
+    "👁",
+  );
+  return btn;
+}
+
+function row(label, value, { secret = false, copyable = false } = {}) {
+  const text = String(value ?? "");
+  const box = h("code", { class: "cred-value" + (secret ? " masked" : "") },
+                secret ? MASK : text);
+  const tools = h("span", { class: "cred-tools" });
+  if (secret) {
+    tools.append(
+      eyeButton((shown) => {
+        box.textContent = shown ? text : MASK;
+        box.classList.toggle("masked", !shown);
+      }),
+    );
+  }
+  if (copyable) tools.append(copyButton(() => text));
+  return h("div", { class: "cred-row" }, h("span", { class: "cred-label" }, label), box, tools);
+}
+
 function render(c) {
+  //: AccessKeyId 不打码：它是标识不是密钥，而且人对着控制台核对用的就是它。
+  //: Secret 和 SecurityToken 默认打码 —— 这一页常常是在会议室投屏上打开的。
   const rows = [
-    ["AccessKeyId", c.access_key_id],
-    ["AccessKeySecret", c.access_key_secret],
+    ["AccessKeyId", c.access_key_id, false],
+    ["AccessKeySecret", c.access_key_secret, true],
   ];
-  if (c.security_token) rows.push(["SecurityToken", c.security_token]);
+  if (c.security_token) rows.push(["SecurityToken", c.security_token, true]);
   const until = new Date(c.expire * 1000).toLocaleString("zh-CN", { hour12: false });
   const env =
     c.platform === "volcano"
@@ -81,6 +135,13 @@ function render(c) {
         ]
           .filter(Boolean)
           .join("\n");
+  //: 终端那段里嵌着 secret，所以它也默认打码 —— 只把密钥那几行的值换掉，
+  //: 变量名留着，人一眼能看出这段是干什么的
+  const envMasked = env.replace(
+    /(SECRET_KEY|ACCESS_KEY_SECRET|SECURITY_TOKEN)=.*/g,
+    (_m, k) => `${k}=${MASK}`,
+  );
+  const pre = h("pre", { class: "snippet-body pad-block" }, envMasked);
 
   show(
     h(
@@ -91,20 +152,28 @@ function render(c) {
     ),
     card(
       "密钥",
-      ...rows.map(([k, v]) => row(k, v, true)),
+      ...rows.map(([k, v, secret]) => row(k, v, { secret, copyable: true })),
       h("div", { class: "opt-meta pad-body" }, `${until} 到期`),
     ),
     card(
       "连接信息",
-      row("权限", (c.caps || []).join("、"), false),
-      row("范围", c.scope, false),
-      row("地域", c.region, false),
-      row("外网 Endpoint", c.endpoint, false),
-      row("桶域名", c.bucket_url, false),
+      row("权限", (c.caps || []).join("、")),
+      row("范围", c.scope, { copyable: true }),
+      row("地域", c.region, { copyable: true }),
+      row("外网 Endpoint", c.endpoint, { copyable: true }),
+      row("桶域名", c.bucket_url, { copyable: true }),
     ),
     card(
       "在终端里用",
-      h("pre", { class: "snippet-body pad-block" }, env),
+      h(
+        "div",
+        { class: "cred-tools snippet-tools" },
+        eyeButton((shown) => {
+          pre.textContent = shown ? env : envMasked;
+        }),
+        copyButton(() => env, { label: "复制全部" }),
+      ),
+      pre,
       c.platform === "volcano"
         ? h(
             "ul",
@@ -154,3 +223,7 @@ async function main() {
 }
 
 main();
+
+// 测试要能单独渲染一份凭证。`main()` 在没有 hash 的时候会立刻走 fail() 分支、
+// 不发任何请求，所以导入这个模块不会有副作用。
+export { render, MASK };

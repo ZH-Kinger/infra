@@ -1,0 +1,54 @@
+{
+  "_what": "面板「数据迁移（搬进 TOS）」要的火山权限。挂在开通身份（DELIVERY_EXEC_VOLCANO_2111674479）上。",
+  "_why_list_is_needed": [
+    "`dms:ListDataMigrateTask` 看起来只是「列一下」，但它是**幂等的唯一实现**：",
+    "火山没有按任务名查的接口，建任务也不按名字判重 —— 建一个返回一个新 task_id。",
+    "所以提交前必须列出来找同名的，否则同一张申请单提两次就是两个任务同时搬同一批数据。",
+    "缺了这条权限，面板会在提交前就报错停下（不会盲目建任务），但功能等于不可用。"
+  ],
+  "_no_delete": "没有 DeleteDataMigrateTask / StopDataMigrateTask。面板只建不停不删。",
+  "_target_creds": [
+    "目的端 TOS 的 AK/SK 由面板直接传给迁移服务（协议如此，Target 结构体只有 ak/sk/bucket_name），",
+    "用的就是这把开通身份的凭证 —— 所以它还需要对目的桶的写权限。",
+    "源端如果是阿里 OSS，用的是阿里那把执行身份的 AK，见 executor-policy.aliyun-transfer.example.json。"
+  ],
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "dms:ListDataMigrateTask",
+        "dms:CreateDataMigrateTask",
+        "dms:QueryDataMigrateTask"
+      ],
+      "Resource": [
+        "*"
+      ],
+      "Condition": {
+        "IpAddress": {
+          "volc:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    }
+  ],
+  "_verify": [
+    "挂上之后：列一个不存在的任务名 → 应该正常返回（找不到就是 None），而不是 AccessDenied。",
+    "挂之前的实测结果是 `User is not authorized to perform: dms:ListDataMigrateTask`。"
+  ],
+  "_least_privilege": [
+    "两层收窄，缺一不可：",
+    "  ① 动作：只有列/建/查三个，没有停止、没有删除、没有改配置。",
+    "  ② 来源 IP：叠 `volc:SourceIp` = 面板服务器出口。AK 泄漏出去在别处用不了。",
+    "火山的全局条件键里有 volc:SourceIp（运算符 IpAddress），和阿里那份的写法对应。",
+    "**挂上之后要验两面**：从面板服务器调得通，把条件改成别的 IP 要调不通 ——",
+    "只验通的那一面，等于没验这个条件到底有没有生效。"
+  ],
+  "_no_role": [
+    "火山这边没有角色可挂：账号里的角色全是 ServiceRoleFor* 服务关联角色，",
+    "是火山自己的服务之间互访用的。面板在火山上是 IAM 用户 panel-executor + 静态 AK，",
+    "所以策略挂在用户上。（阿里那边不一样：目的 OSS 地址用的是 AliyunOSSRole 这个角色，",
+    "但那是迁移服务去扮演的，面板不碰。）"
+  ],
+  "_no_version": "火山的策略文档没有 Version 元素，官方示例全都不写。"
+}

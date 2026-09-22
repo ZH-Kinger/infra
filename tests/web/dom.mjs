@@ -65,8 +65,14 @@ class Node {
   // 在这里完全不触发，而那类断言往往是「没变化就说明对的」形态 —— 会静默通过。
   // 写新交互时把监听挂在元素自己身上，别用委托
   dispatch(t) {
-    const e = { target: this, type: t, preventDefault() {}, stopPropagation() {} };
-    for (const fn of this._listeners[t] || []) fn(e);
+    // `currentTarget` 不能少：监听挂在哪个元素上、处理器就该拿到哪个元素。
+    // 缺了它，任何「点完把按钮文字改成已复制」这类处理器在测试里都是 TypeError，
+    // 而那会让人以为是处理器写错了
+    const e = { target: this, currentTarget: this, type: t,
+                preventDefault() {}, stopPropagation() {} };
+    const out = [];
+    for (const fn of this._listeners[t] || []) out.push(fn(e));
+    return Promise.all(out);
   }
   querySelector() { return null; }
   querySelectorAll() { return []; }
@@ -85,8 +91,11 @@ globalThis.document = {
   querySelector: () => null,
   querySelectorAll: () => [],
   body: new Node("body"),
-  getElementById: () => null,
+  // **按 id 记住节点。** 原来恒返 null，于是任何「往 #app 里渲染」的页面
+  // （取件页就是）在这一层根本测不了 —— 模块一加载就拿到 null。
+  getElementById: (id) => (globalThis.__els[id] ||= new Node("main")),
 };
+globalThis.__els = {};
 globalThis.window = { location: { hash: "", pathname: "/" }, addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }) };
 globalThis.fetch = async () => { throw new Error("测试里不该发网络请求"); };
 globalThis.queueMicrotask = globalThis.queueMicrotask || ((fn) => Promise.resolve().then(fn));

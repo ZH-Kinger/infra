@@ -1,0 +1,17 @@
+{
+  "_": "地域登记表。加一个地域 = 在 workspaces 里加一条，再在模板的 workspaces 里填这个 key。真表是 identity/workspaces.json（gitignored）。格式在加载时就校验，存不存在用 `delivery requests regions --check` 真去云上探。",
+  "defaults": {
+    "roles": ["PAI.AlgoDeveloper", "PAI.AlgoOperator", "PAI.LabelManager"],
+    "bucket_prefix": "general"
+  },
+  "workspaces": {
+    "hz": {
+      "label": "杭州",
+      "id": "000000",
+      "region": "cn-hangzhou",
+      "mount": "cpfs-xxxxxxxxxxxxxxxxxxxx-vpc-xxxxxx.cn-hangzhou.cpfs.aliyuncs.com",
+      "bucket": "example-algo-dev-hz",
+      "bucket_region": "cn-hangzhou"
+    }
+  }
+}

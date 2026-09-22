@@ -165,6 +165,8 @@ def ticket_view(ticket: dict, *, viewer: Caller, links: Optional[dict] = None) -
         "updated_at": ticket.get("updated_at", ""),
         "expires_at": ticket.get("expires_at", ""),
         "result": ticket.get("result", ""),
+        # 搬运进行到哪一步。关单时前端要据此提醒「在途迁移关掉后云上任务会失败」
+        "move_stage": ticket.get("move_stage", "") if ticket.get("kind") == "transfer" else "",
         "events": events,
         "actions": {
             "withdraw": own and status == t.PENDING,
@@ -173,8 +175,19 @@ def ticket_view(ticket: dict, *, viewer: Caller, links: Optional[dict] = None) -
             and status == t.DONE
             and ticket.get("kind") == "account"
             and bool(tpl.get("console_login"))
+            # 走 SSO 的账号不显示这个入口：领到的密码登不进去，只会把人引到死路上
+            and not platforms.console_login_is_sso(
+                str(tpl.get("platform") or ""), str(tpl.get("account") or "")
+            )
             and not claimed_password,
             "retry": viewer.admin and status == t.FAILED,
+            # 号建出来了但登录名没写进公司 IAM —— 单子是 DONE、没有重试按钮，
+            # 而那个人登不进去。这是唯一能把他救回来的入口
+            "push_iam": viewer.admin
+            and status == t.DONE
+            and ticket.get("kind") == "account"
+            and bool(ticket.get("user_created"))
+            and not ticket.get("iam_written"),
             "fulfil": viewer.admin and status == t.FULFILLING and ticket.get("kind") == "resource",
             "close": viewer.admin and status in (t.FAILED, t.FULFILLING),
             # 重开 = 回到关闭前的状态接着处理，**不重新走审批**（原审批实例每次开通都会重新核对）。
@@ -374,6 +387,12 @@ class RequestsApi:
             return 200, {
                 "request": self._view(
                     flows, flows.execute(ticket_id, actor=caller.union_id), caller
+                )
+            }
+        if admin and action == "push_iam":
+            return 200, {
+                "request": self._view(
+                    flows, flows.push_iam(ticket_id, actor=caller.union_id), caller
                 )
             }
         if admin and action == "recover":

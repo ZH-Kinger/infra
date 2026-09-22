@@ -1,0 +1,37 @@
+{
+  "_note": "面板做 CPFS 预热 / 沉降所需的最小权限。真表是 identity/executor-policy.aliyun-dataflow.json（gitignored，带服务器 IP）。",
+  "_no_create_dataflow": "**刻意不给 nas:CreateDataFlow / nas:DeleteDataFlow。** CPFS 通用版的 DataFlow 绑在 Fileset 上，对一个已有数据的 Fileset 建流会把它清空、替换成 OSS 侧的内容。面板是给全公司自助用的，一个会清空目录的动作不该藏在「提交申请」后面 —— 找不到现成绑定就明说找不到，让人去控制台确认后再建。",
+  "_no_cancel": "CancelDataFlowTask 也没给：取消一个跑到一半的沉降，文件系统和对象存储会停在一个谁也说不清的中间态。要停就人工去控制台停，那时有人在看着。",
+  "_scope": "Resource 是 *：NAS 的数据流动接口按文件系统授权，而能申请哪些文件系统由模板的 filesystems 白名单挡（flows._validate_transfer）。策略这层再收一次的话，每加一个文件系统都要改两处，而漏改的表现是「提交通过了但执行时没权限」。",
+  "Version": "1",
+  "Statement": [
+    {
+      "Action": [
+        "nas:DescribeDataFlows",
+        "nas:DescribeDataFlowTasks",
+        "nas:CreateDataFlowTask"
+      ],
+      "Resource": "*",
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "面板出口IP"
+          ]
+        }
+      }
+    },
+    {
+      "_why": "建流和删流永远禁掉，不靠「没给 Allow」兜底 —— 以后有人给这把身份挂了一条更宽的策略（比如 AliyunNASFullAccess），Deny 仍然拦得住。",
+      "Action": [
+        "nas:CreateDataFlow",
+        "nas:DeleteDataFlow",
+        "nas:ModifyDataFlow",
+        "nas:DeleteFileSystem",
+        "nas:DeleteFileset"
+      ],
+      "Resource": "*",
+      "Effect": "Deny"
+    }
+  ]
+}

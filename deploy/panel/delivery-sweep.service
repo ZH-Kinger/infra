@@ -1,0 +1,24 @@
+[Unit]
+Description=Cloud panel: sync approvals, revoke expired grants
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=delivery
+WorkingDirectory=/opt/infra
+EnvironmentFile=/etc/delivery/panel.env
+Environment=PYTHONPATH=/opt/infra/src
+ExecStart=/usr/bin/python3 -m delivery.cli requests sweep \
+  --tickets identity/tickets.json --templates identity/request-templates.json \
+  --approval identity/approval.json --people identity/people.json \
+  --manual identity/manual-links.json \
+  --proposal identity/sso-map.proposal.json --policies identity/policies.json \
+  --iam-attributes identity/iam-attributes.json
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/infra/identity
+CapabilityBoundingSet=

@@ -1,0 +1,41 @@
+{
+  "_what": "第三方数据源：别人的对象存储，我们要从那儿往回搬。真表是 identity/transfer-sources.json（gitignored，含对方凭证，权限 600）。",
+
+  "_why_here_and_not_in_the_form": [
+    "搬第三方数据要对方给的 AK/SK，而面板必须能解开它（要拿去调迁移服务），",
+    "所以用不了 sealed.py 那套「密钥在链接里、服务端也解不开」的设计。",
+    "",
+    "那就只剩两条路：让申请人在表单里填，或者管理员单独登记。选了后者：",
+    "  · 第三方凭证本该管理员保管，不该让申请人转手 —— 他可能截图、贴错地方、发进群",
+    "  · 一个「服务端能解的主密钥」= 面板被攻破就全泄漏。",
+    "    现在面板连自己发出去的凭证都解不开，那是个很硬的性质，不该为这个功能破掉",
+    "",
+    "所以申请单里只有 `src://<标识>/<前缀>/`，钥匙留在这个文件里。"
+  ],
+
+  "_fields": {
+    "label": "给人看的名字，会出现在申请页的下拉里",
+    "endpoint": "**只写主机名**，不要带 http:// 或路径 —— 它会被拼进迁移服务的地址配置",
+    "bucket": "对方的桶",
+    "region": "对方的地域，拼 endpoint 用",
+    "prefix": "可选。限定只能从这个前缀往下搬，申请人越不出去",
+    "access_key_id / access_key_secret": "对方给的只读凭证",
+    "note": "哪来的、什么时候到期、到期找谁回收"
+  },
+
+  "_lifecycle": "对方的凭证通常是有期限的。到期了要**从这里删掉**，不然申请页上还挂着一个搬不动的源，而失败信息只会说 AccessDenied。",
+
+  "schema": "wuji-transfer-sources@1",
+  "sources": {
+    "example-vendor": {
+      "label": "示例供应商 OSS（上海）",
+      "endpoint": "oss-cn-shanghai.aliyuncs.com",
+      "bucket": "their-delivery-bucket",
+      "region": "cn-shanghai",
+      "prefix": "to-wuji/",
+      "access_key_id": "<对方给的 AK>",
+      "access_key_secret": "<对方给的 SK>",
+      "note": "2026-09 批次交付用，交付完回收。对接人：对方数据组"
+    }
+  }
+}

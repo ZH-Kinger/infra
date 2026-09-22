@@ -1,0 +1,18 @@
+[Unit]
+Description=Refresh migration bucket list every minute
+
+[Timer]
+OnBootSec=4min
+# **1 分钟。** 一开始写的每天一次 —— 那意味着删掉的桶要到第二天早上才从申请页消失，
+# 这段时间里有人照样能选它、提单、走完审批，最后在搬运那一步才炸，而那时审批已经过了。
+#
+# 代价很小：一轮就两次 ListBuckets（两朵云各一次），没变化时连文件都不写。
+# 真正的「打开页面就是最新的」要把列桶凭证放进 Web 进程 —— 那是面板暴露面最大的地方，
+# 为了少等一分钟不值得 —— 而且一分钟已经和人的操作节奏差不多了。
+OnUnitActiveSec=1min
+RandomizedDelaySec=10
+# Persistent=false：错过的轮次不补。下一轮马上就到，补跑只会在开机时挤一堆调用
+Persistent=false
+
+[Install]
+WantedBy=timers.target

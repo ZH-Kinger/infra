@@ -302,3 +302,220 @@ class TextAxisFrontendTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ManuallyFulfilledOptionsTests(unittest.TestCase):
+    """人工开通的资源也该能问清楚问题。
+
+    之前这条路是堵死的：配 `options` 就必须有 `resource_type`，而 `resource_type`
+    只支持 ecs —— 于是 RDS 这种面板建不了的资源只能退化成一个自由文本框，
+    审批人看到一句话，开通的人还得回头问。
+
+    而 `flows` 里**所有**资源单都停在「待开通」（「资源开通面板一行云都不写」），
+    `resource_type` 根本没被用来建任何东西。那条规则拦的是一件不会发生的事。
+    """
+
+    @staticmethod
+    def spec(**over):
+        base = {
+            "id": "rds",
+            "kind": "resource",
+            "platform": "aliyun",
+            "account": "170406579653",
+            "title": "RDS",
+            "options": [
+                {
+                    "id": "engine",
+                    "label": "引擎",
+                    "choices": [{"id": "mysql", "label": "MySQL 8.0", "params": {}}],
+                },
+                {
+                    "id": "storage",
+                    "label": "存储",
+                    "number": {"min": 20, "max": 3000, "default": 100, "unit": " GB"},
+                },
+            ],
+        }
+        base.update(over)
+        return base
+
+    def test_options_without_a_resource_type_are_allowed(self):
+        tpl = catalog_mod.parse_template(self.spec(), 0)
+        self.assertEqual(tpl.resource_type, "")
+        self.assertEqual([a.id for a in tpl.options], ["engine", "storage"])
+
+    def test_a_number_axis_needs_no_cloud_param_when_nobody_will_build_it(self):
+        tpl = catalog_mod.parse_template(self.spec(), 0)
+        self.assertEqual(tpl.options[1].number.param, "")
+        # 而且它不会往云参数里塞一个空键
+        self.assertEqual(tpl.resolved_params({}, {"storage": 200}), {})
+
+    def test_cloud_params_without_a_resource_type_are_refused_as_a_mistake(self):
+        """没有 resource_type 却填了云参数 —— 那不是「人工开通」，是配错了，
+        而错的表现是「填了但永远没人读」。"""
+        bad = self.spec(
+            options=[
+                {
+                    "id": "storage",
+                    "label": "存储",
+                    "number": {"param": "DBInstanceStorage", "min": 20, "max": 100, "default": 20},
+                },
+            ]
+        )
+        with self.assertRaises(catalog_mod.CatalogError) as caught:
+            catalog_mod.parse_template(bad, 0)
+        self.assertIn("没人会读", str(caught.exception))
+
+    def test_choice_params_without_a_resource_type_are_refused_too(self):
+        bad = self.spec(
+            options=[
+                {
+                    "id": "engine",
+                    "label": "引擎",
+                    "choices": [{"id": "mysql", "label": "MySQL", "params": {"Engine": "MySQL"}}],
+                },
+            ]
+        )
+        with self.assertRaises(catalog_mod.CatalogError):
+            catalog_mod.parse_template(bad, 0)
+
+    def test_base_params_still_require_a_resource_type(self):
+        with self.assertRaises(catalog_mod.CatalogError):
+            catalog_mod.parse_template(self.spec(params={"ZoneId": "cn-hangzhou-b"}), 0)
+
+
+class StorageAndTransferValidationTests(unittest.TestCase):
+    """数据目录 / 数据迁移的入参校验。
+
+    这两类的 payload 里全是**会进 OSS key 和 RAM 策略 `oss:Prefix` 条件**的字符串，
+    所以前端拦过一遍之后这里还要再拦一遍：前端是给人用的，不是安全边界。
+    """
+
+    @staticmethod
+    def flows_of(tpl_spec):
+
+        from delivery.flows import Flows
+
+        tpl = catalog_mod.parse_template(tpl_spec, 0)
+        f = Flows.__new__(Flows)  # 只测纯校验，不需要 store / approval
+        return f, tpl
+
+    DIR_TPL = {
+        "id": "oss-dir",
+        "kind": "storage",
+        "platform": "aliyun",
+        "account": "170406579653",
+        "title": "目录",
+        "buckets": [{"name": "wuji-data", "region": "cn-hangzhou"}],
+        "stages": {"wuji-data": ["raw", "opensource"]},
+    }
+    MOVE_TPL = {
+        "id": "oss-move",
+        "kind": "transfer",
+        "platform": "aliyun",
+        "account": "170406579653",
+        "title": "迁移",
+        "buckets": [
+            {"name": "wuji-a", "region": "cn-hangzhou"},
+            {"name": "wuji-b", "region": "cn-hangzhou"},
+            {"name": "tos-c", "region": "cn-shanghai"},
+        ],
+        "filesystems": [
+            {"id": "bmcpfs-1", "region": "cn-hangzhou"},
+            {"id": "vepfs-1", "region": "cn-shanghai"},
+        ],
+    }
+
+    def dir_ok(self, **over):
+        f, tpl = self.flows_of(self.DIR_TPL)
+        payload = {"bucket": "wuji-data", "stage": "raw", "batch": "20260920-ego-kitchen"}
+        payload.update(over)
+        return f._validate_storage(tpl, payload, "x")
+
+    def test_a_good_directory_request_yields_the_full_path(self):
+        clean, summary = self.dir_ok()
+        self.assertEqual(clean["path"], "wuji-data/raw/20260920-ego-kitchen/")
+        self.assertIn("cn-hangzhou", summary)
+
+    def test_a_bucket_outside_the_template_is_refused(self):
+        with self.assertRaises(FlowError):
+            self.dir_ok(bucket="someone-elses-bucket")
+
+    def test_a_stage_the_bucket_does_not_hold_is_refused(self):
+        """哪个桶放哪类数据是策略，写在模板里。"""
+        with self.assertRaises(FlowError):
+            self.dir_ok(stage="delivery")
+
+    def test_a_batch_id_that_could_escape_a_prefix_condition_is_refused(self):
+        """`*` 或 `../` 能让一条 RAM 策略覆盖到别人的数据。"""
+        for bad in ("../etc", "a/b", "a*b", "a b", "", "-lead", "x" * 70):
+            with self.assertRaises(FlowError, msg=bad):
+                self.dir_ok(batch=bad)
+
+    def test_open_source_data_must_declare_where_it_came_from(self):
+        """出合规问题时这是唯一能自证的东西。"""
+        with self.assertRaises(FlowError):
+            self.dir_ok(stage="opensource", license="")
+        clean, _ = self.dir_ok(stage="opensource", license="CC-BY-4.0")
+        self.assertEqual(clean["license"], "CC-BY-4.0")
+
+    def move_ok(self, **over):
+        f, tpl = self.flows_of(self.MOVE_TPL)
+        payload = {"source": "oss://wuji-a/x/", "dest": "oss://wuji-b/y/"}
+        payload.update(over)
+        return f._validate_transfer(tpl, payload, "x")
+
+    def test_a_good_move_normalises_both_sides(self):
+        clean, summary = self.move_ok()
+        self.assertEqual(clean["source"], "oss://wuji-a/x/")
+        self.assertIn("跳过同名", summary)
+
+    def test_a_bucket_outside_the_template_is_refused_on_both_sides(self):
+        for side in ("source", "dest"):
+            with self.assertRaises(FlowError, msg=side):
+                self.move_ok(**{side: "oss://not-ours/x/"})
+
+    def test_preheat_and_sink_pass_submit_when_the_filesystem_is_registered(self):
+        clean, _ = self.move_ok(dest="cpfs://bmcpfs-1/d/")
+        self.assertEqual(clean["dest"], "cpfs://bmcpfs-1/d/")
+
+    def test_an_unregistered_filesystem_is_refused_at_submit(self):
+        with self.assertRaises(FlowError):
+            self.move_ok(dest="cpfs://bmcpfs-other/d/")
+
+    def test_a_filesystem_under_the_wrong_scheme_is_refused_at_submit(self):
+        """`cpfs://vepfs-…` 会拿阿里的凭证去调火山的文件系统 —— 审批通过后执行时才炸。"""
+        with self.assertRaises(FlowError):
+            self.move_ok(dest="cpfs://vepfs-1/d/")
+
+    def test_a_chain_that_cannot_exist_is_refused_before_approval(self):
+        """cpfs→tos、vepfs→cpfs 原先能走完整个飞书审批，到执行时才被拒 ——
+        白等一轮审批，还留一张要人工处理的失败单（审计 L-1）。"""
+        for src, dst in (
+            ("cpfs://bmcpfs-1/a/", "tos://tos-c/"),
+            ("vepfs://vepfs-1/a/", "cpfs://bmcpfs-1/b/"),
+        ):
+            with self.assertRaises(FlowError, msg=f"{src}->{dst}"):
+                self.move_ok(source=src, dest=dst)
+
+    def test_paths_that_could_escape_are_refused(self):
+        for bad in (
+            "oss://wuji-a/../x/",
+            "oss://wuji-a/a//b/",
+            "oss://wuji-a/a*/",
+            "oss://wuji-a/nofinalslash",
+            "notascheme://wuji-a/x/",
+        ):
+            with self.assertRaises(FlowError, msg=bad):
+                self.move_ok(source=bad)
+
+    def test_moving_something_onto_itself_is_refused(self):
+        with self.assertRaises(FlowError):
+            self.move_ok(dest="oss://wuji-a/x/")
+
+    def test_overwrite_is_never_the_silent_default(self):
+        """覆盖不可逆，不该是默认值。"""
+        clean, _ = self.move_ok()
+        self.assertEqual(clean["overwrite"], "skip")
+        with self.assertRaises(FlowError):
+            self.move_ok(overwrite="yes-please")

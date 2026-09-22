@@ -518,5 +518,122 @@ class SweepNotifyTests(unittest.TestCase):
         self.assertEqual(tokens[0](), "tok")
 
 
+class AccountDoneCardTests(unittest.TestCase):
+    """开完号那张卡：**告诉他怎么登、把地址给他。**
+
+    原先这两样都没有 —— 卡上写死「初始密码请在 7 天内到平台领取」（SSO 开了之后
+    那是条死路，领到的密码登不进去），而且整张卡一个链接都没有，人得自己去问「在哪登」。
+    """
+
+    def _card(self, *, sso: bool, console_login: bool = True):
+        import os
+
+        from delivery import platforms
+
+        scope = "aliyun/1704065796538912"
+        self.addCleanup(os.environ.pop, platforms.ENV_SSO, None)
+        os.environ[platforms.ENV_SSO] = scope if sso else "volcano/9999"
+        ticket = {
+            "id": "REQ-1",
+            "kind": "account",
+            "template": {
+                "title": "阿里云子账号",
+                "platform": "aliyun",
+                "account": "1704065796538912",
+                "console_login": console_login,
+            },
+        }
+        return n.build_card("done", ticket, base_url="https://panel.example.com")
+
+    def _text(self, card):
+        return "".join(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
+
+    def _buttons(self, card):
+        return [
+            (a["text"]["content"], a.get("url", ""))
+            for e in card["elements"]
+            if e.get("tag") == "action"
+            for a in e["actions"]
+        ]
+
+    def test_an_sso_account_is_not_told_to_fetch_a_password(self):
+        """SSO 开着时 RAM 密码登录全局失效。还让他去领密码的话，
+        他领到一串登不进去的东西，只会以为是账号没建好。"""
+        text = self._text(self._card(sso=True))
+        self.assertNotIn("初始密码", text)
+        self.assertIn("公司账号", text)
+
+    def test_a_password_account_still_gets_the_old_instruction(self):
+        """反向锁：别为了堵 SSO 把没开 SSO 的账号也一起改了。"""
+        self.assertIn("初始密码", self._text(self._card(sso=False)))
+
+    def test_the_console_address_is_on_the_card(self):
+        """这是他最需要的一个东西，原先整张卡里一个链接都没有。"""
+        urls = dict((label, url) for label, url in self._buttons(self._card(sso=True)))
+        self.assertIn("去登录控制台", urls)
+        self.assertIn("signin.aliyun.com", urls["去登录控制台"])
+
+    def test_an_account_without_console_login_gets_no_login_button_text(self):
+        text = self._text(self._card(sso=True, console_login=False))
+        self.assertIn("只能用访问凭证", text)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class CardLinkTests(unittest.TestCase):
+    """卡片上那个按钮必须真能到「权限对账」页。
+
+    前端 `app.js:parseHash` 只认 `admin/iam` 这一个串 —— 写成别的（比如 `iam`）
+    会掉到兜底分支、落在「我的」页面上，而**按钮看起来完全正常**，
+    点了只是没到该到的地方，没有任何报错。这个错发生过一次：
+    两张卡片各写各的锚点，一张对一张错。
+    """
+
+    REPORT = {
+        "apps": [
+            {
+                "app": "aliyun-main",
+                "drift": [
+                    {
+                        "kind": "inactive",
+                        "name": "某人",
+                        "username": "A1",
+                        "union_id": "u1",
+                        "theirs": "someone@x",
+                    }
+                ],
+            }
+        ]
+    }
+
+    def _urls(self, card):
+        return [
+            a["url"]
+            for e in card["elements"]
+            if e.get("tag") == "action"
+            for a in e["actions"]
+            if a.get("url")
+        ]
+
+    def test_every_card_points_at_the_same_real_route(self):
+        base = "https://panel.example.com"
+        cards = [
+            n.drift_card(self.REPORT, base_url=base),
+            n.reclaim_card(
+                {
+                    "done": [],
+                    "held": [{"name": "某人", "app": "aliyun-main", "value": "someone@x"}],
+                },
+                base_url=base,
+            ),
+        ]
+        for card in cards:
+            for url in self._urls(card):
+                self.assertTrue(url.endswith(n.IAM_PAGE), url)
+
+    def test_without_a_base_url_there_is_no_button(self):
+        """拼不出地址时不要放一个点了没反应的按钮。"""
+        self.assertEqual(self._urls(n.drift_card(self.REPORT, base_url="")), [])
+        self.assertEqual(n.page_link(""), "")

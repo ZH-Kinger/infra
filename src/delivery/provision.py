@@ -28,7 +28,7 @@ import secrets
 import string
 import urllib.parse
 from dataclasses import dataclass
-from typing import Callable, Mapping, Optional
+from typing import Callable, Mapping, Optional, Sequence
 
 from . import grants, platforms
 from .clouds import aliyun, volcano
@@ -159,6 +159,59 @@ class AliyunExecutor:
             raise
         return True
 
+    def run_instance(self, *, region: str, params: dict, name: str) -> str:
+        """开一台 ECS，返回实例 ID。
+
+        **`Amount` 恒为 1，而且写死在这里、不从 params 取。** 模板里任何一个轴
+        都不该能决定开几台 —— 一个配错的数字轴就是一次「批了一台、开出二十台」。
+
+        `ClientToken` 用申请单号：`RunInstances` 认它做幂等，所以
+        **重试同一张单不会开出第二台**。这是这段里最重要的一行：
+        没有它的话，超时重试 = 多一台机器在那儿跑着计费，而台账上只有一条记录。
+        """
+        from .clouds import aliyun
+
+        if not region:
+            raise ProvisionError("模板没写地域，不知道在哪开")
+        # 模板里的 params 是内网拓扑（交换机、安全组、镜像），原样透传；
+        # 下面这几个由面板决定，**放在后面覆盖**，不让模板改
+        query = dict(params or {})
+        query.update(
+            RegionId=region,
+            Amount="1",
+            ClientToken=name[:64],
+            InstanceName=name[:128],
+            Description=f"cloud-panel {name}"[:256],
+        )
+        got = aliyun.call(
+            *aliyun.ecs(region),
+            "RunInstances",
+            query,
+            creds=self._creds,
+            transport=self._transport,
+        )
+        ids = (got.get("InstanceIdSets") or {}).get("InstanceIdSet") or []
+        if not isinstance(ids, list) or not ids or not str(ids[0] or ""):
+            # **没拿到实例 ID 就当失败**：机器可能已经在开了，但台账里记不下它是哪台 ——
+            # 那比不开更糟，因为没人知道去哪找它。ClientToken 保证重试拿到的是同一台
+            raise ProvisionError(f"RunInstances 没有返回实例 ID，不确认开成没有：{str(got)[:200]}")
+        return str(ids[0])
+
+    def make_dir(self, bucket: str, prefix: str, region: str) -> str:
+        """在 OSS 上建一个目录（放一个 0 字节的占位对象）。返回建好的完整路径。
+
+        **OSS 没有真目录**，前缀是虚的。这个占位对象是为了让人在控制台里看得见结构 ——
+        以及让面板能回答「这个目录建好了没有」，否则「申请通过了」和「东西真的在那儿」
+        之间没有任何可验证的东西。
+
+        幂等：同一个 key PUT 两次就是覆盖一个空对象，重试安全。
+        """
+        from .clouds import oss
+
+        key = prefix if prefix.endswith("/") else prefix + "/"
+        oss.put_folder(bucket, key, region=region, creds=self._creds, transport=self._transport)
+        return f"{bucket}/{key}"
+
     def add_to_group(self, user: str, group: str) -> None:
         self._check_account()
         if not self.user_exists(user):
@@ -278,11 +331,133 @@ class AliyunExecutor:
             return None
         return any(str(st.get("Effect") or "").lower() == "deny" for st in stmts)
 
-    def create_user(self, user: str, display_name: str) -> None:
+    def create_user(
+        self, user: str, display_name: str, *, email: str = "", phone: str = ""
+    ) -> None:
+        """建 RAM 子用户。**安全邮箱和安全手机一并写上。**
+
+        不写的话云控制台上这两栏是空的：找回密码、风险操作验证、安全提醒都没有落点，
+        而补写要管理员一个个去控制台点 —— 建号那一刻手上就有这些信息，那时写最便宜。
+
+        手机号阿里云要 `国家代码-号码` 的形式（`86-138…`）；给了裸号码就补上 `86-`。
+        """
         self._check_account()
         if self.user_exists(user):
             raise ProvisionError(f"子账号 {user} 已存在，不会接管已有账号，请换一个用户名")
-        self._call(aliyun.RAM, "CreateUser", {"UserName": user, "DisplayName": display_name[:24]})
+        params = {"UserName": user, "DisplayName": display_name[:24]}
+        if email:
+            params["Email"] = email[:128]
+        if phone:
+            params["MobilePhone"] = phone if "-" in phone else f"86-{phone}"
+        self._call(aliyun.RAM, "CreateUser", params)
+
+    def user_id(self, user: str) -> str:
+        """子账号的 UserId。PAI 的成员接口只认它，不认登录名。"""
+        self._check_account()
+        got = self._call(aliyun.RAM, "GetUser", {"UserName": user}).get("User") or {}
+        uid = str(got.get("UserId") or "")
+        if not uid:
+            raise ProvisionError(f"RAM 没返回 {user} 的 UserId，加不进工作空间")
+        return uid
+
+    def add_workspace_member(
+        self, *, region: str, workspace: str, user: str, roles: Sequence[str]
+    ) -> str:
+        """把子账号加进 PAI 工作空间，返回 MemberId。
+
+        **这一步不做等于新人开完号还是进不去 DSW/DLC** —— 工作空间是 PAI 的围墙，
+        数据集、DSW 实例、DLC 任务全是它的下级资源，不在里面的人一个都看不到。
+        原先面板只会「列成员」，加人得管理员去控制台点，每个新人都要手动做一次。
+
+        角色照现网的写法给（`PAI.AlgoDeveloper` 这种）。**不提供移除** ——
+        移出成员是收权限、可以人工做，而误移的表现是那个人突然进不去自己的空间、
+        还查不出为什么。
+        """
+        uid = self.user_id(user)
+        body = {"UserId": uid, "Roles": list(roles)}
+        got = aliyun.call_roa(
+            f"aiworkspace.{region}.aliyuncs.com",
+            "2021-02-04",
+            f"/api/v1/workspaces/{workspace}/members",
+            method="POST",
+            body={"Members": [body]},
+            creds=self._creds,
+            transport=self._transport,
+        )
+        rows = got.get("Members") or []
+        return str((rows[0] if rows else {}).get("MemberId") or "")
+
+    def create_dataset(
+        self,
+        *,
+        region: str,
+        workspace: str,
+        name: str,
+        uri: str,
+        source: str,
+        user: str,
+        labels=None,
+    ) -> str:
+        """在工作空间里登记一条数据集，返回 DatasetId。
+
+        **只登记指针，不建底层目录**：OSS 的前缀是虚的、CPFS 在挂载时自动建。
+
+        放在执行器上而不是让 flows 直接调 `assets.create_dataset` —— 后者要伸手拿
+        `ex._creds`，而那是私有属性：调用方一旦绕过执行器，`_check_account`
+        那道「这把 AK 真属于目标云账号吗」的门就被跳过了。
+        """
+        from . import assets as assets_mod
+
+        self._check_account()
+        try:
+            return assets_mod.create_dataset(
+                self._creds,
+                region=region,
+                workspace=workspace,
+                name=name,
+                uri=uri,
+                source=source,
+                user_id=self.user_id(user),
+                labels=labels,
+                transport=self._transport,
+            )
+        except Exception as exc:  # noqa: BLE001 — 只吞「已经有了」，见下
+            # **重名不是失败。** PAI 这个接口对同名数据集回的是 HTTP 400
+            # `201300003 Dataset name already existed`，而不是一个「已存在」的成功。
+            # 不吞的话，重试一张单（或者给已有账号补齐）会把它记成问题，
+            # 而 `_provision_workspace` 的 problems 一非空就返回「**他还进不去 DSW/DLC**」——
+            # 人看到这句会去查权限，实际上那条数据集一直好好地在那儿。
+            if "already existed" not in str(exc) and "已存在" not in str(exc):
+                raise
+            return ""
+
+    def enable_console(self, user: str) -> bool:
+        """开控制台登录。**已经开着就什么都不做**，返回「这次有没有真开」。
+
+        为什么要单独有这个
+        ──────────────────
+        原先只有 `reset_password` 会建登录配置，而它只在「本人领初始密码」那一刻被调。
+        企业 SSO 开了之后领密码是死路（密码登录全局失效），于是面板建的号
+        **永远没有登录配置** —— 人拿着企业账号也进不去。
+
+        **幂等很重要**：重试同一张单不能走到 `UpdateLoginProfile`，
+        那会把人家自己设过的密码重置掉。
+        """
+        self._check_account()
+        try:
+            self._call(aliyun.RAM, "GetLoginProfile", {"UserName": user})
+            return False
+        except aliyun.AliyunError as exc:
+            if "LoginProfile" not in str(exc.code or ""):
+                raise
+        # 密码是随机的、**不返回给任何人**：SSO 模式下它用不上，
+        # 这里要的只是「这个号允许登控制台」这个状态
+        self._call(
+            aliyun.RAM,
+            "CreateLoginProfile",
+            {"UserName": user, "Password": new_password(), "PasswordResetRequired": "true"},
+        )
+        return True
 
     def reset_password(self, user: str) -> str:
         self._check_account()
@@ -612,10 +787,52 @@ class VolcanoExecutor:
             if "detachconflict" not in _volcano_code(exc):
                 raise
 
-    def create_user(self, user: str, display_name: str) -> None:
+    def create_user(
+        self, user: str, display_name: str, *, email: str = "", phone: str = ""
+    ) -> None:
+        """建 IAM 子用户。安全邮箱和安全手机一并写上，理由同阿里那边。
+
+        火山的手机号字段是 `MobilePhone`，格式要求和阿里一致（`86-138…`）。
+        """
         if self.user_exists(user):
             raise ProvisionError(f"子账号 {user} 已存在，不会接管已有账号，请换一个用户名")
-        self._call(volcano.IAM, "CreateUser", {"UserName": user, "DisplayName": display_name[:64]})
+        params = {"UserName": user, "DisplayName": display_name[:64]}
+        if email:
+            params["Email"] = email[:128]
+        if phone:
+            params["MobilePhone"] = phone if "-" in phone else f"86-{phone}"
+        self._call(volcano.IAM, "CreateUser", params)
+
+    def enable_console(self, user: str) -> bool:
+        """开控制台登录。理由同阿里那个，但火山多一个显式的 `LoginAllowed` 开关 ——
+        不开的话连 SSO 都进不去（阿里那边没有这个字段）。
+
+        **幂等**：已经有登录配置就不碰，免得把人家自己设的密码重置掉。
+        """
+        self._check_account()
+        try:
+            got = self._call(volcano.IAM, "GetLoginProfile", {"UserName": user})
+            # 火山对没有登录配置的用户返回全零 stub 而不是 NotExist（bot 那边记过这个坑），
+            # 所以不能只看「有没有抛异常」，要看 LoginAllowed 到底是不是真的
+            profile = got.get("LoginProfile") or got
+            if str(profile.get("LoginAllowed", "")).lower() in ("true", "1"):
+                return False
+        except volcano.VolcanoError as exc:
+            if "notexist" not in str(exc).lower().replace(".", ""):
+                raise
+        params = {
+            "UserName": user,
+            "Password": new_password(),
+            "LoginAllowed": "true",
+            "PasswordResetRequired": "true",
+        }
+        try:
+            self._call(volcano.IAM, "CreateLoginProfile", params)
+        except volcano.VolcanoError as exc:
+            if "alreadyexist" not in str(exc).lower().replace(".", ""):
+                raise
+            self._call(volcano.IAM, "UpdateLoginProfile", params)
+        return True
 
     def reset_password(self, user: str) -> str:
         self._check_account()

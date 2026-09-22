@@ -1,0 +1,26 @@
+{
+  "_note": "面板做 vePFS 预热 / 沉降所需的最小权限。真表是 identity/executor-policy.volcano-dataflow.json（gitignored）。",
+  "_actions": "动作名是**真机反查确认的**：报错里给的是 `vepfs:DescribeDataFlowTasks on resource: trn:vepfs:cn-shanghai:<账号>:instance/<fs-id>`。之前文档里这几个一直标着「待反查」—— 猜错一个字的表现是权限挂了但照样 AccessDenied，指不到是动作名写错了。",
+  "_no_delete": "**不给删除、不给取消。** 取消一个跑到一半的沉降，文件系统和对象存储会停在一个谁也说不清的中间态；要停就人工去控制台停，那时有人在看着。",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "vepfs:DescribeFileSystems",
+        "vepfs:DescribeDataFlowTasks",
+        "vepfs:CreateDataFlowTask"
+      ],
+      "Resource": ["*"]
+    },
+    {
+      "Effect": "Deny",
+      "Action": [
+        "vepfs:DeleteFileSystem",
+        "vepfs:DeleteFileset",
+        "vepfs:CancelDataFlowTask",
+        "vepfs:ConfigDataFlowBandwidth"
+      ],
+      "Resource": ["*"]
+    }
+  ]
+}

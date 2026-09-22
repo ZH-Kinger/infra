@@ -258,6 +258,58 @@ def build_parser() -> argparse.ArgumentParser:
     )
     invc.add_argument("--skip", action="append", default=[], choices=["aliyun", "volcano"])
 
+    iamp = isub.add_parser(
+        "iam-push", help="把属性表增量直接下发到 IT 的云账号属性接口（替代人工发 CSV）"
+    )
+    iamp.add_argument("--people", default="identity/people.json")
+    iamp.add_argument("--attributes", default="identity/iam-attributes.json")
+    iamp.add_argument("--apply", action="store_true", help="真的下发。不给就是预演，只打印要发什么")
+    iamp.add_argument(
+        "--resolved",
+        action="append",
+        default=[],
+        metavar="EMAIL",
+        help="已核对无误的邮箱：上次因邮箱复用或姓名不符被跳过的行，这次正常下发",
+    )
+    iamp.add_argument(
+        "--allow-mass-remove",
+        action="store_true",
+        help="确认基线里整体消失的 union_id 确实是离职/删号，允许发 remove",
+    )
+
+    iamc = isub.add_parser(
+        "iam-reclaim", help="离职回收：删掉已离职的人的 cloud_accounts 属性（不碰云上账号）"
+    )
+    iamc.add_argument("--people", default="identity/people.json")
+    iamc.add_argument("--attributes", default="identity/iam-attributes.json")
+    iamc.add_argument("--apply", action="store_true", help="真的删。不给就是预演")
+    iamc.add_argument("--admins", default="identity/admins.json", help="通知发给这里面的管理员")
+    iamc.add_argument(
+        "--force",
+        action="store_true",
+        help=f"确认这一轮超过 {iam_sync.RECLAIM_MAX} 个人的回收是真的（默认拒绝，防名册读残）",
+    )
+
+    iamr = isub.add_parser(
+        "iam-reconcile", help="对账：IAM 侧实际的 cloud_accounts vs 名册应该是什么"
+    )
+    iamr.add_argument("--people", default="identity/people.json")
+    iamr.add_argument("--attributes", default="identity/iam-attributes.json")
+
+    iamn = isub.add_parser(
+        "iam-remind",
+        help="对账后私聊管理员：谁离职了云登录名还挂着。**只提醒不回收**（回收是人点的）",
+    )
+    iamn.add_argument("--people", default="identity/people.json")
+    iamn.add_argument("--attributes", default="identity/iam-attributes.json")
+    iamn.add_argument("--admins", default="identity/admins.json")
+    iamn.add_argument(
+        "--every-hours",
+        type=float,
+        default=24.0,
+        help="同一批人多久提醒一次。天天重复的提醒等于没有提醒",
+    )
+
     iamx = isub.add_parser(
         "iam-export", help="从人员名册导出给 WUJI IAM 导入的用户属性表（每人各云用户名）"
     )
@@ -1159,6 +1211,291 @@ def _write_iam_csv(out: Path, rows: list) -> None:
     iam_sync.write_csv(out, rows)
 
 
+def _cmd_identity_iam_push(args) -> int:
+    """算增量 → 直接调接口下发。替掉「导 CSV → 人工发给 IT → 回传结果」那一段。
+
+    **只有全部成功才推进基线。** 有失败还推进的话，基线会声称那几行已经在 IAM 里了，
+    下一轮比对就不再发它们 —— 于是永久漂移，而且没有任何地方看得出来。
+    重发一个已成功的 PUT 是幂等的（接口文档明说），所以「全失败重来」的代价只是多发几条。
+    """
+    from . import iam_api
+
+    cfg = iam_api.Config.from_env()
+    paths = iam_sync.SyncPaths(
+        people=args.people,
+        attributes=args.attributes,
+        out=iam_sync.DEFAULT_OUT,
+        sent_dir=IAM_SENT_DIR,
+    )
+    warn = lambda line: print(line, file=sys.stderr)  # noqa: E731
+    increment = iam_sync.compute(
+        paths,
+        baseline="latest",
+        allow_mass_remove=args.allow_mass_remove,
+        resolved_emails=frozenset(args.resolved),
+        warn=warn,
+    )
+    counts = increment.counts
+    print(f"增量：set {counts['set']} 条，remove {counts['remove']} 条，skip {counts['skip']} 条")
+    for note in increment.notes:
+        print(f"  ⚠ {note}")
+    if not counts["set"] and not counts["remove"]:
+        print("没有要下发的。")
+        return 0
+
+    results = iam_api.apply_rows(increment.rows, cfg=cfg, transport=None, dry_run=not args.apply)
+    ok = [r for r in results if r.ok]
+    bad = [r for r in results if not r.ok]
+    for r in results:
+        who = r.row.get("name") or r.row.get("email") or r.row.get("feishu_union_id")
+        if r.ok:
+            was = f"（原 {r.previous}）" if r.previous else ""
+            print(f"  ✓ {r.action:6} {who} {r.row.get('app')} {r.row.get('value', '')}{was}")
+        else:
+            print(f"  ✗ {r.action:6} {who} {r.row.get('app')} —— {r.code}：{r.message}")
+    if not args.apply:
+        print("\n预演结束，没有下发任何东西。确认无误后加 --apply。")
+        return 0
+
+    print(f"\n成功 {len(ok)} 条，失败 {len(bad)} 条")
+    if bad:
+        print(
+            "  **基线不推进** —— 有失败时推进会让那几行永久漏发。修掉之后重跑即可（重发是幂等的）。"
+        )
+        _iam_push_hints(bad)
+        return 1
+    archive = iam_sync.next_archive(
+        Path(IAM_SENT_DIR), pending=True, stamp=time.strftime("%Y%m%d-%H%M%S.csv")
+    )
+    _require_identity_dir(archive.resolve())
+    _require_identity_dir(archive.with_name(archive.name + ".meta.json").resolve())
+    iam_sync.record(increment, archive)
+    final = iam_sync.confirm(archive, Path(IAM_SENT_DIR))
+    print(f"  基线已推进：{final}")
+    return 0
+
+
+def _iam_push_hints(bad: list) -> None:
+    """失败的每一类都意味着有人要去做一件具体的事，说清楚是哪件。"""
+    hints = {
+        "value_taken": "这个登录名已属于另一个 IAM 用户。**一个云身份不能对应两个人** —— "
+        "先确认云上那个账号到底是谁的",
+        "inactive_user": "IAM 说这人已离职，拒绝写入。**该去云上禁用/回收那个 RAM 用户**，"
+        "而不是想办法把属性写进去",
+        "not_found": "IAM 里没有这个 union_id —— 名册和 IAM 对不上，找 IT 核对",
+        "bad_request": "我们这边生成的值不合格式，检查 iam-attributes.json 的 suffix",
+        "unauthorized": "token 不对或来源 IP 不在白名单。**不要把 token 打出来**，找 IT 重签",
+        "upstream_error": "IAM 暂时不可用，稍后重跑",
+    }
+    for code in sorted({r.code for r in bad}):
+        if code in hints:
+            print(f"    · {code}：{hints[code]}")
+
+
+def _review_paths_or_none(people: str):
+    """回收要落 review.log，而那个路径由 ReviewPaths 算（名册同目录）。
+    提案/人工记录这一轮用不到，给同目录的默认名即可。"""
+    from . import review as review_mod
+
+    base = Path(people).resolve().parent
+    return review_mod.ReviewPaths(
+        proposal=str(base / "sso-map.proposal.json"),
+        manual=str(base / "manual-links.json"),
+        people=people,
+    )
+
+
+def _cmd_identity_iam_reclaim(args) -> int:
+    """离职回收。**两个信号都指向离职才自动删**，只有一个就只报不动。"""
+    paths = iam_sync.SyncPaths(
+        people=args.people,
+        attributes=args.attributes,
+        out=iam_sync.DEFAULT_OUT,
+        sent_dir=IAM_SENT_DIR,
+    )
+    from . import notify as notify_mod
+    from . import review as review_mod
+    from . import roles as roles_mod
+
+    def _log(report: dict) -> None:
+        rp = _review_paths_or_none(args.people)
+        if rp is not None:
+            review_mod.log_iam_reclaim(
+                rp, report["done"], actor="auto:iam-reclaim", held=report["held"]
+            )
+
+    def _announce(report: dict) -> None:
+        """私聊每个管理员。**不发群** —— 这是要人去做事的通知，发群等于发给没有人。
+
+        走应用机器人（`DELIVERY_FEISHU_APP_ID/SECRET`，面板本来就有），
+        收件人用 **union_id** —— 名册里只有它，没有 open_id。
+        """
+        from .server import _tenant_token_cache
+
+        app_id = os.environ.get("DELIVERY_FEISHU_APP_ID", "")
+        secret = os.environ.get("DELIVERY_FEISHU_APP_SECRET", "")
+        base = os.environ.get("DELIVERY_BASE_URL", "")
+        admins = roles_mod.load_admins(args.admins).union_ids
+        if not (app_id and secret):
+            # **不静默**：没说一声的话，没人知道通知根本没发出去
+            print("  （没配飞书应用凭证，这次没发通知）")
+            return
+        if not admins:
+            print(f"  （{args.admins} 里没有 union_ids，没人可通知）")
+            return
+        notifier = notify_mod.FeishuNotifier(_tenant_token_cache(app_id, secret), base)
+        problems = notify_mod.notify_admins(
+            notifier, admins, notify_mod.reclaim_card(report, base_url=base)
+        )
+        print(f"  已私聊 {len(admins) - len(problems)}/{len(admins)} 位管理员")
+        for line in problems:
+            print(f"    ✗ {line}", file=sys.stderr)
+
+    report = iam_sync.reclaim_iam(
+        paths,
+        apply=args.apply,
+        force=args.force,
+        log=_log if args.apply else None,
+        announce=_announce if args.apply else None,
+    )
+    for r in report["done"]:
+        mark = "（预演）" if r.get("dry_run") else "✓"
+        was = f"，原 {r['previous']}" if r.get("previous") else ""
+        print(f"  {mark} 删属性 {r['username']} {r['name']} {r['app']} {r['value']}{was}")
+    if report["held"]:
+        print("\n  ⚠ 下面这些 IT 的 IAM 说已离职，**但我们名册里还有**，没动：")
+        for r in report["held"]:
+            print(f"    {r['username']} {r['name']} {r['app']} {r['value']}")
+        print("    两边不一致时该去问一句，不是删。确认离职后名册会自己少掉他，下一轮就自动回收。")
+    for r in report["failed"]:
+        print(f"  ✗ {r.get('username') or r.get('app')}：{r.get('error')}", file=sys.stderr)
+    if not report["done"] and not report["held"]:
+        print("没有要回收的。")
+    if not args.apply and report["done"]:
+        print("\n预演结束，什么都没删。确认后加 --apply。")
+    if report["done"] and args.apply:
+        print("\n**云上那些 RAM/IAM 用户还在。** 禁用或删除账号不自动做 —— 到云控制台处理，")
+        print("或者在面板的体检里看「已离职但云上还有号」。")
+    return 1 if (report["held"] or report["failed"]) else 0
+
+
+def _cmd_identity_iam_remind(args) -> int:
+    """对账后提醒管理员。**只提醒，不删任何东西。**
+
+    原先这件事没有任何触发器：`iam-reclaim` 只能手工跑，那条飞书私聊还只在 `--apply`
+    时才发。于是一个人离职之后云登录名一直挂着，直到某天有人恰好打开面板那一页。
+
+    **按批去重**：同一批人默认 24 小时才再提醒一次。天天重复的提醒等于没有提醒，
+    而多提醒一次的代价只是多一条消息 —— 所以去重状态读不到时**照常提醒**。
+    """
+    import hashlib
+
+    from . import iam_sync
+    from . import notify as notify_mod
+    from . import roles as roles_mod
+
+    paths = iam_sync.SyncPaths(people=args.people, attributes=args.attributes)
+    report = iam_sync.reconcile_report(paths)
+    held = iam_sync.load_snooze(paths)
+    rows = [
+        (e, d)
+        for e in report["apps"]
+        for d in e["drift"]
+        if d["kind"] == "inactive" and f"{e['app']}/{d['union_id']}" not in held
+    ]
+    if not rows:
+        print("没有「已离职但云登录名还挂着」的人")
+        return 0
+    # 同一批人只提醒一次：签名进文件，`--every-hours` 到点才再发
+    sig = hashlib.md5(  # noqa: S324 — 只做去重，不做安全
+        "|".join(sorted(f"{e['app']}/{d['union_id']}" for e, d in rows)).encode()
+    ).hexdigest()
+    if not iam_sync.claim_remind(paths, sig, hours=args.every_hours):
+        print(f"这批 {len(rows)} 人最近提醒过了，本次跳过")
+        return 0
+
+    app_id = os.environ.get("DELIVERY_FEISHU_APP_ID", "")
+    secret = os.environ.get("DELIVERY_FEISHU_APP_SECRET", "")
+    base = os.environ.get("DELIVERY_BASE_URL", "")
+    admins = roles_mod.load_admins(args.admins).union_ids
+    if not (app_id and secret):
+        print(f"★ {len(rows)} 人待回收，但没配飞书应用凭证，这次没发通知", file=sys.stderr)
+        return 1
+    if not admins:
+        print(f"★ {len(rows)} 人待回收，但 {args.admins} 里没有 union_ids", file=sys.stderr)
+        return 1
+    from .server import _tenant_token_cache
+
+    notifier = notify_mod.FeishuNotifier(_tenant_token_cache(app_id, secret), base)
+    card = notify_mod.drift_card(report, base_url=base)
+    problems = notify_mod.notify_admins(notifier, admins, card)
+    print(f"{len(rows)} 人待回收，已私聊 {len(admins) - len(problems)}/{len(admins)} 位管理员")
+    for line in problems:
+        print(f"  ✗ {line}", file=sys.stderr)
+    return 1 if problems else 0
+
+
+def _cmd_identity_iam_reconcile(args) -> int:
+    """IAM 侧实际 vs 名册。**这是以前做不到的事。**
+
+    没有这个接口时，面板只能拿自己存的基线当真相，而基线只记录「我们发过什么」，
+    不记录「IT 那边最后变成了什么」。中间任何一次人工导入出错，两边就永久漂移且无人察觉。
+
+    比对逻辑在 `iam_sync.reconcile_report`，和面板共用 —— 规则只写一份。
+    """
+    from . import iam_api
+
+    paths = iam_sync.SyncPaths(
+        people=args.people,
+        attributes=args.attributes,
+        out=iam_sync.DEFAULT_OUT,
+        sent_dir=IAM_SENT_DIR,
+    )
+    report = iam_sync.reconcile_report(paths)
+    labels = {
+        iam_api.DRIFT_INACTIVE: "已离职但云登录名还挂着 —— 去云上禁用该账号",
+        iam_api.DRIFT_DIFFERENT: "两边值不一样 —— 最危险的一类，SSO 会登进错的账号",
+        iam_api.DRIFT_LEFT: "IAM 有、名册没有",
+        iam_api.DRIFT_MISSING: "名册有、IAM 没有 —— 该发没发",
+        iam_api.DRIFT_GONE: "属性指向的云账号已不存在 —— 多半是有人在控制台直接删了，"
+        "人登不进去且属性看着是好的",
+    }
+    for entry in report["apps"]:
+        if entry["error"]:
+            print(f"\n{entry['scope']}：✗ {entry['error']}", file=sys.stderr)
+            continue
+        print(
+            f"\n{entry['app']}：IAM {entry['theirs']} 人，"
+            f"名册 {entry['compared']} 人可比对，对不上 {len(entry['drift'])} 条"
+        )
+        if entry["blind"]:
+            print(f"  ⚠ 另有 {len(entry['blind'])} 条没有 union_id，**没进比对也发不出去**：")
+            for r in entry["blind"][:10]:
+                print(f"    {r['name']} {r['email']} → {r['value']}")
+            if len(entry["blind"]) > 10:
+                print(f"    … 还有 {len(entry['blind']) - 10} 条")
+        for kind in (
+            iam_api.DRIFT_INACTIVE,
+            iam_api.DRIFT_DIFFERENT,
+            iam_api.DRIFT_GONE,
+            iam_api.DRIFT_LEFT,
+            iam_api.DRIFT_MISSING,
+        ):
+            rows = [d for d in entry["drift"] if d["kind"] == kind]
+            if not rows:
+                continue
+            print(f"  {labels[kind]}（{len(rows)}）")
+            for d in rows[:20]:
+                who = f"{d['username']} {d['name']}".strip() or d["union_id"]
+                if kind == iam_api.DRIFT_DIFFERENT:
+                    print(f"    {who}：IAM={d['theirs']}  名册={d['ours']}")
+                else:
+                    print(f"    {who}：{d['theirs'] or d['ours']}")
+            if len(rows) > 20:
+                print(f"    … 还有 {len(rows) - 20} 条")
+    return 1 if report["total"] else 0
+
+
 def _cmd_identity_iam_export(args) -> int:
     """名册 → IAM 属性表 CSV（cloud_accounts 的写入指令）。
 
@@ -1615,6 +1952,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "identity":
             if args.identity_command == "sso-map":
                 return _cmd_identity_ssomap(args)
+            if args.identity_command == "iam-push":
+                return _cmd_identity_iam_push(args)
+            if args.identity_command == "iam-reclaim":
+                return _cmd_identity_iam_reclaim(args)
+            if args.identity_command == "iam-reconcile":
+                return _cmd_identity_iam_reconcile(args)
+            if args.identity_command == "iam-remind":
+                return _cmd_identity_iam_remind(args)
             if args.identity_command == "iam-export":
                 return _cmd_identity_iam_export(args)
             if args.identity_command == "people":

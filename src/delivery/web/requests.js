@@ -8,15 +8,18 @@
 //     被转发，登录态也可能留在别人电脑上；审批实例只有申请人和审批人看得到。
 
 import { ago, api, ApiError, apiPost, copyButton, fill, fmtTime, h, mount, openDrawer, PLATFORM_NAME, platformTag, requestTitle, safeHttps } from "./core.js";
+import { directoryFields, transferFields } from "./storage.js";
 
-const KIND_ORDER = ["permission", "credential", "resource", "account"];
+const KIND_ORDER = ["permission", "credential", "storage", "transfer", "resource", "account"];
 const KIND_INFO = {
   permission: { title: "云账号权限", desc: "给你已有的子账号加上某项权限，比如 OSS 只读。" },
   credential: { title: "访问凭证", desc: "申请一份数据访问密钥。审批通过后直接发到审批评论里，到期自动失效。" },
+  storage: { title: "数据目录", desc: "在数据桶里开一个新批次的目录。按数据类型放，生命周期和权限跟着类型走。" },
+  transfer: { title: "数据迁移", desc: "把一个目录搬到另一个地方。填两个路径，走哪条链路由系统判断。" },
   resource: { title: "资源开通", desc: "ECS、RDS 这类要单独开的资源。审批通过后由管理员按流程创建。" },
   account: { title: "开账号", desc: "在还没有账号的云上开一个子账号。" },
 };
-const KIND_KEY_LABEL = { permission: "权限包", policy: "权限策略", credential: "访问凭证", resource: "资源", account: "开账号" };
+const KIND_KEY_LABEL = { permission: "权限包", policy: "权限策略", credential: "访问凭证", storage: "数据目录", transfer: "数据迁移", resource: "资源", account: "开账号" };
 const CAP_LABEL = { list: "查看清单", download: "下载", write: "上传" };
 const RISK = { low: ["低风险", "good"], medium: ["中风险", "warn"], high: ["高风险", "crit"] };
 const STATUS_TONE = {
@@ -336,6 +339,10 @@ export function requestRoutes(ctx) {
       parts.push(o.max_days ? `最长 ${o.max_days} 天` : "长期");
     } else if (o.kind === "credential") {
       parts.push(`权限 ${(o.cap_labels || []).join("、")}`, `${o.buckets.length} 个桶可选`, `最长 ${duration(o.max_hours)}`);
+    } else if (o.kind === "storage") {
+      parts.push(`${(o.buckets || []).length} 个桶可选`, "目录建好后你只读");
+    } else if (o.kind === "transfer") {
+      parts.push("填两个路径", "链路自动判断", "搬完做端到端校验");
     } else if (o.kind === "resource") {
       if (o.options.length) parts.push(o.options.map((a) => a.label).join(" / ") + " 可选");
       if (o.cost_centers.length) parts.push("需填成本归属");
@@ -359,6 +366,8 @@ export function requestRoutes(ctx) {
     const fields = [];
     const read = {};
     const checks = [];
+    //: storage / transfer 的预览文案由 storage.js 产出 —— 那边才知道路径怎么拼、走哪条链
+    let describe = null;
     const preview = h("p", { class: "preview-text" });
     const error = h("p", { class: "form-error", role: "alert", hidden: true });
 
@@ -433,6 +442,12 @@ export function requestRoutes(ctx) {
       fields.push(field("f-hours", "用多久", h("div", { class: "inline" }, amount, unit, presets), `最长 ${duration(o.max_hours)}`));
       read.hours = toHours;
       checks.push(() => (toHours() >= 1 && toHours() <= o.max_hours ? "" : [amount, `时长要在 1 小时到 ${duration(o.max_hours)} 之间。`]));
+    } else if (o.kind === "storage" || o.kind === "transfer") {
+      const part = (o.kind === "storage" ? directoryFields : transferFields)(o, { field, update: () => update() });
+      fields.push(...part.fields);
+      Object.assign(read, part.read);
+      checks.push(...part.checks);
+      describe = part.describe;
     } else if (o.kind === "resource") {
       // 能选的一律给下拉：自由填写的规格调不了云 API，审批人也判断不了批的是什么
       const picks = {};
@@ -576,7 +591,8 @@ export function requestRoutes(ctx) {
     }
     function update() {
       const p = payload();
-      if (o.kind === "permission") preview.textContent = `子账号 ${p.cloud_user || "（未选）"} 加入用户组 ${o.groups.join("、")}${p.days ? `，${p.days} 天后自动收回` : ""}。${o.state === "owned" ? "你现在已有这项权限，这次申请用于续期。" : ""}`;
+      if (describe) preview.textContent = describe(p);
+      else if (o.kind === "permission") preview.textContent = `子账号 ${p.cloud_user || "（未选）"} 加入用户组 ${o.groups.join("、")}${p.days ? `，${p.days} 天后自动收回` : ""}。${o.state === "owned" ? "你现在已有这项权限，这次申请用于续期。" : ""}`;
       else if (o.kind === "credential") {
         const who = p.subject || "你自己";
         const scope = p.prefix ? `${p.bucket}/${p.prefix}` : `${p.bucket} 整个桶`;
@@ -843,8 +859,23 @@ export function requestRoutes(ctx) {
     if (r.actions.fulfil) actions.append(fulfilAction(r));
     if (r.actions.withdraw) actions.append(simpleAction("撤回申请", `/api/requests/${encodeURIComponent(r.id)}/withdraw`, "撤回后飞书里的审批也会撤销。确定撤回？", admin, true));
     if (r.actions.retry) actions.append(simpleAction("重试开通", `/api/admin/requests/${encodeURIComponent(r.id)}/retry`, "会先重新核对飞书审批，通过后再开通。确定重试？", admin));
+    // 号建出来了但登录名没写进公司 IAM —— 单子是「已完成」、没有重试按钮，而那个人登不进去。
+    // 不给这个入口的话，唯一的补救是全量 iam-push，而那条路会连带触发删除闸门
+    if (r.actions.push_iam) actions.append(simpleAction("补写登录名到公司 IAM", `/api/admin/requests/${encodeURIComponent(r.id)}/push_iam`, "子账号已建好，但登录名没写进公司 IAM —— 他现在登不进去。只补这一步，不碰云上账号。确定补写？", admin));
     if (r.actions.recover) actions.append(simpleAction("标记为失败", `/api/admin/requests/${encodeURIComponent(r.id)}/recover`, "这张单子长时间没有进展。标记为失败后可以核对云上状态再重试。确定？", admin, true));
-    if (r.actions.close) actions.append(simpleAction("关闭申请", `/api/admin/requests/${encodeURIComponent(r.id)}/close`, "关闭后这张单子不会再开通。确定关闭？", admin, true));
+    //: 在途的迁移单关掉之后云上会怎样，**要分情况说**（审计 R4 / 三审）：
+    //:   · 跨云（oss ↔ tos）：源端那把钥匙下一轮会被撤掉，对方云上的任务接着跑、然后全部 403
+    //:   · 同云迁移、CPFS/vePFS 预热沉降：没有钥匙要撤，云上任务会**照常跑完** ——
+    //:     关单只是面板不再跟进。说成「会失败停下」的话，人会以为关单就能止损
+    const scheme = (uri) => String(uri || "").split("://")[0];
+    const pair = `${scheme(r.payload?.source)}->${scheme(r.payload?.dest)}`;
+    const crossCloud = pair === "oss->tos" || pair === "tos->oss";
+    const closeTip = r.kind !== "transfer" || r.move_stage !== "running"
+      ? "关闭后这张单子不会再开通。确定关闭？"
+      : crossCloud
+        ? "这张跨云迁移正在搬。关闭后面板不再跟进；源端钥匙下一轮会被撤掉，云上那个任务会因此失败停下（控制台里会留一条失败记录）。确定关闭？"
+        : "这张迁移正在搬。关闭后面板不再跟进，但**云上的任务会照常跑完** —— 要真停下得去控制台手动停。确定关闭？";
+    if (r.actions.close) actions.append(simpleAction("关闭申请", `/api/admin/requests/${encodeURIComponent(r.id)}/close`, closeTip, admin, true));
     if (r.actions.reopen) actions.append(simpleAction("重新打开", `/api/admin/requests/${encodeURIComponent(r.id)}/reopen`, "放回关闭前的状态接着处理。原来那张飞书审批继续有效，不用重新审批。确定重新打开？", admin));
     if (r.actions.revoke) actions.append(simpleAction("作废凭证", `/api/${admin ? "admin/" : ""}requests/${encodeURIComponent(r.id)}/revoke`, "查看地址立刻失效，云上的子账号、密钥和策略一并删除。使用方要重新申请。确定作废？", admin, true));
     const hint = nextStep(r, admin);
@@ -891,6 +922,7 @@ export function requestRoutes(ctx) {
       case "fulfilling":
         return admin ? "审批已通过。按 IaC 流程创建好之后，点「登记开通结果」把实例信息填进台账。" : "审批已通过，等管理员开通。开通后这里会更新。";
       case "done":
+        if (r.actions.push_iam) return `子账号已建好，但登录名没写进公司 IAM —— **${who}现在登不进去**。管理员点「补写登录名到公司 IAM」即可。`;
         if (r.actions.password) return `子账号已开通。${who}可以领取一次性初始密码，首次登录必须修改。`;
         if (r.kind === "credential") return r.expires_at ? `凭证已签发，查看地址在飞书审批的评论里，${fmtTime(r.expires_at)} 到期。` : "凭证已签发，查看地址在飞书审批的评论里。";
         return r.expires_at ? `已开通，${fmtTime(r.expires_at)} 到期后自动收回。需要继续用请在到期前重新申请。` : "已开通。";

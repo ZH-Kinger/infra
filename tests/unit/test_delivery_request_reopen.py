@@ -48,7 +48,7 @@ RESOURCE["templates"].append(
 #: 长期凭证模板：>12 小时走「建子账号 + 长期 AK」，这条路才会写 `cred_user`
 LONG_CRED = json.loads(json.dumps(TEMPLATES))
 LONG_CRED["templates"][1]["max_hours"] = 24
-LONG = {"bucket": BUCKET, "hours": 24}
+LONG = {"bucket": BUCKET, "prefix": "batch/", "hours": 24}
 
 ADMIN = Caller("on_admin", "管理员", "admin@wuji.tech", "ou_admin", "u_admin", True)
 LI = Caller("on_li", "李四", "li.si@wuji.tech", "ou_li", "", False)

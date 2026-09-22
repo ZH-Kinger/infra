@@ -1,0 +1,39 @@
+# 云权限面板：对账后提醒管理员「谁离职了云登录名还挂着」
+#
+# **只提醒，不回收。** 回收是人在面板上点的（有确认按钮和「稍后处理」），
+# 因为删属性不可逆，而「他到底离没离职」的判据来自 IT 的 Authentik ——
+# 接口抖一下就可能把在职的人判成离职。
+#
+# 原先这件事没有任何触发器：iam-reclaim 只能手工跑，那条飞书私聊还只在 --apply
+# 时才发。于是人离职之后云登录名一直挂着，直到某天有人恰好打开面板那一页。
+[Unit]
+Description=Cloud panel: remind admins about departed people whose cloud logins are still attached
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=delivery
+WorkingDirectory=/opt/infra
+EnvironmentFile=/etc/delivery/panel.env
+Environment=PYTHONPATH=/opt/infra/src
+ExecStart=/usr/bin/python3 -m delivery.cli identity iam-remind \
+  --people identity/people.json --attributes identity/iam-attributes.json \
+  --admins identity/admins.json --every-hours 24
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# 去重状态写在 identity/ 下
+ReadWritePaths=/opt/infra/identity
+TimeoutStartSec=5min
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+LockPersonality=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
