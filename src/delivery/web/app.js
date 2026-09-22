@@ -10,6 +10,7 @@ import { renderAssets } from "./assets.js";
 import { renderHealth } from "./health.js";
 import { renderHygiene } from "./hygiene.js";
 import { renderIam } from "./iam.js";
+import { renderOffline } from "./offline.js";
 import { accessRoutes } from "./access.js";
 import { permissionRoutes } from "./permissions.js";
 import { requestRoutes } from "./requests.js";
@@ -170,6 +171,7 @@ function parseHash() {
   if (path === "admin/health") return { page: "admin-health", space: "admin" };
   if (path === "admin/hygiene") return { page: "admin-hygiene", space: "admin" };
   if (path === "admin/iam") return { page: "admin-iam", space: "admin" };
+  if (path === "admin/offline") return { page: "admin-offline", space: "admin" };
   if (path === "assets") return { page: "assets", space: "user" };
   if (path === "access") return { page: "access", space: "user" };
   if (path === "admin") return { page: "admin", space: "admin" };
@@ -228,6 +230,10 @@ function route() {
   if (page === "admin-iam") {
     markTab("admin-iam");
     return renderIam({ load });
+  }
+  if (page === "admin-offline") {
+    markTab("admin-offline");
+    return renderOffline({ load });
   }
   if (page === "admin-policies") {
     markTab("admin-policies");

@@ -410,6 +410,50 @@ def _gone(status: Mapping) -> str:
     return ""
 
 
+#: 名下有云账号的人里，按公司邮箱/union_id 在通讯录里对上的少于这个比例，
+#: 就当这份通讯录没拉全，不据此判断谁不在了。拉一半就判，等于把半个公司报成离职
+MIN_STAFF_MATCH = 0.8
+
+
+class DirectoryIncomplete(Exception):
+    """通讯录看起来没拉全，不能拿它判断谁不在了。"""
+
+
+def missing_from_directory(people: Iterable, staff: Optional[Mapping]) -> list:
+    """名下有云账号、但按 union_id 和公司邮箱在飞书通讯录里**都**找不到的人。
+
+    为什么不只按 union_id 查
+    ────────────────────────
+    按 union_id 查在职状态的前提是名册里有 union_id，而没登录过面板的人就没有。
+    这批人以前**从来没被检查过**：体检不报他，离职提醒也不发，人走了几个月云账号还挂着
+    （王昱然就是这样发现的）。`staff` 是 `directory.staff_index` 的结果，只含在职的人、
+    按公司邮箱建索引，所以不需要 union_id 也能对。
+
+    飞书对「已离职」和「不在应用可见范围内」给的是同一个结果，所以这里只能说「找不到」，
+    结论要人确认。
+
+    `staff` 为空或对上的人太少 → 抛 `DirectoryIncomplete`，调用方跳过这一类。
+    """
+    if not staff:
+        raise DirectoryIncomplete("通讯录是空的")
+    emails = {str(k).strip().lower() for k in staff}
+    uids = {str(v.get("union_id") or "") for v in staff.values()} - {""}
+    holders = [p for p in people if p.accounts and p.email]
+
+    def present(p) -> bool:
+        return p.email.strip().lower() in emails or (bool(p.union_id) and p.union_id in uids)
+
+    # 完整性按**所有**有邮箱的人算（样本大，才看得出通讯录是不是没拉全）……
+    found = sum(1 for p in holders if present(p))
+    if holders and found < len(holders) * MIN_STAFF_MATCH:
+        raise DirectoryIncomplete(
+            f"名下有云账号的 {len(holders)} 人里只对上 {found} 人，通讯录多半没拉全"
+        )
+    # ……但**只报没有 union_id 的人**。有 union_id 的人按在职状态查（更准）；
+    # 拿邮箱去判他们，挂在根部门下、或者邮箱不是飞书企业邮箱的在职的人会被天天报离职
+    return [p for p in holders if not p.union_id and not present(p)]
+
+
 def _owner_of(person) -> str:
     if person is None:
         return ""
@@ -468,6 +512,7 @@ def build(
     *,
     directory_uids: Optional[set] = None,
     statuses: Optional[Mapping] = None,
+    staff: Optional[Mapping] = None,
     services: Optional[Iterable] = None,
     datasets: Optional[Iterable] = None,
     buckets: Optional[Iterable] = None,
@@ -487,6 +532,7 @@ def build(
     """
     report = Report(stale_days=stale_days, unused_days=unused_days)
     now = now if now is not None else time.time()
+    people = list(people)
     known_services = {str(x or "").lower() for x in (services or ())} - {""}
 
     # **在权限快照那道门之前算**：数据集来自资产快照，是另一个文件。
@@ -525,6 +571,14 @@ def build(
         report.skipped.append(
             f"权限快照不完整（{'、'.join(snapshot.incomplete[:3])}），本次只看采到的部分"
         )
+
+    # 按公司邮箱对通讯录：覆盖名册里没有 union_id、按状态查不了的那批人
+    not_found: set = set()
+    if staff is not None:
+        try:
+            not_found = {p.key for p in missing_from_directory(people, staff)}
+        except DirectoryIncomplete as exc:
+            report.skipped.append(f"按公司邮箱对通讯录没做成：{exc}")
 
     by_account: dict = {}
     for person in people:
@@ -580,6 +634,20 @@ def build(
                     )
                 )
 
+        elif person.key in not_found:
+            report.unknown.append(
+                Finding(
+                    kind="unknown",
+                    platform=user.platform,
+                    account=user.account,
+                    subject=user.name,
+                    owner=owner,
+                    why="按 union_id 和公司邮箱在飞书通讯录里都找不到"
+                    "（已离职，或不在应用可见范围内）",
+                    detail=manual or (f"{len(user.keys or ())} 把 AK" if user.keys else "没有 AK"),
+                )
+            )
+
         for k in user.stale_keys(days=stale_days, now=now):
             report.rotate.append(
                 Finding(
@@ -608,9 +676,9 @@ def build(
                 )
             )
 
-    if statuses is None and directory_uids is None:
+    if statuses is None and directory_uids is None and staff is None:
         report.skipped.append("没查飞书在职状态，这次不判断谁离职了")
-    elif statuses is not None and not statuses:
+    elif statuses is not None and not statuses and staff is None:
         # **查了、但一个人都查不成**（名册里没有 union_id —— 没登录过面板的人就是这样）。
         # 不说的话：`render()` 打出「没有发现需要处理的」、`_hygiene` 退出码 0、
         # `summary()["incomplete"]` 为 False —— 定时任务据此判定「一切正常」，

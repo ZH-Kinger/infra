@@ -211,3 +211,66 @@ class EntryPointOrderTests(unittest.TestCase):
                 if isinstance(n, (ast.FunctionDef, ast.ClassDef))
             ]
             self.assertEqual(after, [], f"{mod.__name__} 入口之后还定义了 {after}")
+
+
+class JiuzhangNamingTests(unittest.TestCase):
+    """九章的命名：主账号名是 `wuji`，用户的登录名是 `wuji-<用户名>`。
+
+    两个坑都是真踩过的：
+      · 把控制台「用户名」那一列（`wangzihan`）当成了登录名
+      · 改成 `wuji-wangzihan` 之后，`wuji-` 恰好也是服务号前缀，18 个人全被当成了服务号
+    """
+
+    TABLE = {
+        "accounts": [
+            {
+                "platform": "jiuzhang",
+                "account": "wuji",
+                "as_of": "2026-09-22",
+                "login_prefix": "wuji-",
+                "users": [
+                    {
+                        "name": "wuji-wangzihan",
+                        "display_name": "王 梓涵",
+                        "email": "wang.zihan@wuji.tech",
+                        "status": "正常",
+                    }
+                ],
+            }
+        ]
+    }
+
+    def test_the_login_name_is_kept_whole(self):
+        rows = off.parse(self.TABLE)
+        self.assertEqual(
+            (rows[0]["account"], rows[0]["users"][0]["name"]), ("wuji", "wuji-wangzihan")
+        )
+
+    def test_the_bare_user_name_is_refused(self):
+        bad = json_copy(self.TABLE)
+        bad["accounts"][0]["users"][0]["name"] = "wangzihan"
+        with self.assertRaises(off.OfflineError):
+            off.parse(bad)
+
+    def test_a_listed_person_is_confirmed_not_taken_for_a_service_account(self):
+        """名单本身就是确认，不能再拿启发式去猜。"""
+        got = propose(off.cloud_accounts(off.parse(self.TABLE)), domain="wuji.tech").to_dict()
+        self.assertEqual(got["services"], [], "被当成了服务号")
+        link = got["people"][0]["links"][0]
+        self.assertEqual((link["name"], link["status"]), ("wuji-wangzihan", "confirmed"))
+
+    def test_other_platforms_still_go_through_the_usual_checks(self):
+        """只放过管理员名单。阿里、火山上 `wuji-` 开头的号照旧按服务号处理。"""
+        from delivery.identity.ssomap import CloudAccount, EmailClaim
+
+        acc = CloudAccount(
+            "aliyun/1", "wuji-bot", "", (EmailClaim("x@wuji.tech", "ram_email", True),)
+        )
+        got = propose([acc], domain="wuji.tech").to_dict()
+        self.assertEqual(len(got["services"]), 1)
+
+
+def json_copy(x):
+    import json
+
+    return json.loads(json.dumps(x))

@@ -56,6 +56,7 @@ from . import assets as assets_mod
 from . import health as health_mod
 from . import notify as notify_mod
 from . import nudge as nudge_mod
+from . import offline_accounts as offline_mod
 from . import people as people_mod
 from . import platforms as platforms_mod
 from . import policies as policies_mod
@@ -317,6 +318,46 @@ class _Pending:
     verifier: str
     redirect_uri: str
     created: float = field(default_factory=time.time)
+
+
+def _offline_view(backend) -> dict:
+    """管理后台「人工登记」页：每个登记的账号、截至哪天、几个人、最近几次谁改的。
+
+    **读原始文件**（不是快照）：页面上要看的是「登记表里现在写着什么」，
+    快照要等下一轮刷新才会跟上。
+    """
+    path = offline_mod.beside(backend.inventory_path)
+    try:
+        raw = offline_mod.read_raw(path)
+        rows = offline_mod.parse(raw)
+    except (offline_mod.OfflineError, ValueError, OSError) as exc:
+        return {"accounts": [], "error": str(exc)[:300]}
+    history = {
+        (a.get("platform"), a.get("account")): list(a.get("history") or [])
+        for a in raw.get("accounts") or []
+    }
+    today = time.time()
+    out = []
+    for acc in rows:
+        try:
+            age = int((today - time.mktime(time.strptime(acc["as_of"], "%Y-%m-%d"))) // 86400)
+        except ValueError:
+            age = None
+        out.append(
+            {
+                "platform": acc["platform"],
+                "platform_name": platforms_mod.name_of(acc["platform"]),
+                "account": acc["account"],
+                "login_prefix": acc.get("login_prefix") or "",
+                "source": acc["source"],
+                "as_of": acc["as_of"],
+                "age_days": age,
+                "stale": age is None or age > offline_mod.STALE_DAYS,
+                "users": acc["users"],
+                "history": history.get((acc["platform"], acc["account"]), [])[-5:][::-1],
+            }
+        )
+    return {"accounts": out, "stale_days": offline_mod.STALE_DAYS}
 
 
 @dataclass
@@ -648,6 +689,7 @@ _STATIC = {
     "/health.js": ("health.js", "text/javascript; charset=utf-8"),
     "/hygiene.js": ("hygiene.js", "text/javascript; charset=utf-8"),
     "/iam.js": ("iam.js", "text/javascript; charset=utf-8"),
+    "/offline.js": ("offline.js", "text/javascript; charset=utf-8"),
     "/storage.js": ("storage.js", "text/javascript; charset=utf-8"),
 }
 #: 页面只加载同源资源。前端不拼 innerHTML，这条 CSP 是第二道闸。
@@ -658,6 +700,8 @@ _CSP = (
 _ADMIN_PEOPLE = "/api/admin/people/"
 _ADMIN_REVIEW = "/api/admin/review"
 _ADMIN_ASSET_OWNER = "/api/admin/assets/owner"
+#: 没有采集接口的平台（九章）的人工登记：看、粘贴名单预览、保存。见 offline_accounts
+_ADMIN_OFFLINE = "/api/admin/offline-accounts"
 _ADMIN_REVOKE = "/api/admin/access/revoke"
 _ADMIN_POLICY_RULES = "/api/admin/policies/rules"
 #: 飞书审批回调。**免登录**（飞书不带用户身份），鉴权靠 Verification Token
@@ -1557,6 +1601,10 @@ def make_handler(
                 if self._require(admin=True) is None:
                     return None
                 return self._json(200, self._hygiene(backend))
+            if path == _ADMIN_OFFLINE:
+                if self._require(admin=True) is None:
+                    return None
+                return self._json(200, _offline_view(backend))
             if path == _ADMIN_POLICY_RULES:
                 if self._require(admin=True) is None:
                     return None
@@ -1600,7 +1648,7 @@ def make_handler(
                     return "跨站请求被拒绝"
             return None
 
-        def _json_body(self, *, allow_empty: bool = False):
+        def _json_body(self, *, allow_empty: bool = False, max_body: int = _REVIEW_MAX_BODY):
             """读 JSON 请求体。返回 (dict, None) 或 (None, 已发送的错误响应)。"""
             try:
                 length = int(self.headers.get("Content-Length") or 0)
@@ -1608,7 +1656,7 @@ def make_handler(
                 length = -1
             if length == 0 and allow_empty:
                 return {}, None
-            if length <= 0 or length > _REVIEW_MAX_BODY:
+            if length <= 0 or length > max_body:
                 return None, self._json(400, {"error": "请求体为空或过大"})
             try:
                 payload = json.loads(self.rfile.read(length).decode())
@@ -1636,6 +1684,7 @@ def make_handler(
             snapshot = backend.snapshot()
             roster = backend.people().people
             statuses, status_error = None, ""
+            staff = None
             asked = missing_uid = 0
             if want_status and app_id and app_secret:
                 try:
@@ -1649,6 +1698,14 @@ def make_handler(
                     # 那时只剩页面上一句没人会转述的提示，服务端一点痕迹都不留
                     print(f"[hygiene] 查在职状态失败：{type(exc).__name__}: {exc}", file=sys.stderr)
                     status_error = str(exc) or exc.__class__.__name__
+
+            staff_error = ""
+            if want_status and app_id and app_secret:
+                try:
+                    staff = _staff(app_id, app_secret)
+                except Exception as exc:  # noqa: BLE001 — 同上：查询故障不该让整页打不开
+                    print(f"[hygiene] 拉通讯录失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+                    staff_error = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
 
             # 数据集在**资产**快照里（另一个文件）。读不了就传 None，
             # hygiene 会记一笔跳过 —— 传空列表等于断言「一条被遗弃的都没有」
@@ -1666,6 +1723,7 @@ def make_handler(
                 snapshot,
                 roster,
                 statuses=statuses,
+                staff=staff,
                 datasets=(snap_assets or {}).get("datasets"),
                 buckets=(snap_assets or {}).get("buckets"),
                 registered=_reg[0],
@@ -1683,6 +1741,10 @@ def make_handler(
             out["captured_at"] = snapshot.captured_at if snapshot else ""
             if asset_error:
                 out["skipped"] = [f"资产快照读不了：{asset_error}"] + list(out.get("skipped") or [])
+            if staff_error:
+                out["skipped"] = [
+                    f"通讯录没拉成，名册里没有 union_id 的人这次没查：{staff_error}"
+                ] + list(out.get("skipped") or [])
             return out
 
         def _requests(self, method: str, path: str, body):
@@ -2196,6 +2258,100 @@ def make_handler(
             except Exception:  # noqa: BLE001
                 return None
 
+        def _offline_accounts(self):
+            """人工登记：`action=preview` 只解析、只算差异；`action=save` 才写。
+
+            **保存前一定能先看到差异** —— 整体替换的语义下，粘漏一段就是一批人从名册里消失。
+            """
+            session = self._require(admin=True)
+            if session is None:
+                return None
+            refused = self._same_origin_json()
+            if refused:
+                return self._json(403, {"error": refused})
+            # 整页名单：九章一行 ~130 字节，默认的 4KB 只够 30 人
+            payload, sent = self._json_body(max_body=_OFFLINE_MAX_BODY)
+            if payload is None:
+                return sent
+            path = offline_mod.beside(backend.inventory_path)
+            if not path:
+                return self._json(404, {"error": "服务端没有配置权限快照路径，不知道登记表放哪"})
+            platform = str(payload.get("platform") or "").strip()
+            account = str(payload.get("account") or "").strip()
+            prefix = str(payload.get("login_prefix") or "").strip()
+            users, warnings = offline_mod.parse_paste(
+                str(payload.get("text") or ""), login_prefix=prefix
+            )
+            try:
+                # 平台 / 账号 / 前缀按登记表自己的规则先校验一遍（阿里、火山不许人工登记）
+                offline_mod.parse(
+                    {
+                        "accounts": [
+                            {
+                                "platform": platform,
+                                "account": account,
+                                "as_of": "2000-01-01",
+                                "login_prefix": prefix,
+                                "users": users,
+                            }
+                        ]
+                    }
+                )
+            except offline_mod.OfflineError as exc:
+                return self._json(400, {"error": str(exc)})
+            try:
+                current = next(
+                    (
+                        a
+                        for a in offline_mod.read_raw(path).get("accounts") or []
+                        if a.get("platform") == platform and a.get("account") == account
+                    ),
+                    {},
+                )
+            except (OSError, ValueError) as exc:
+                return self._json(500, {"error": f"登记表读不了：{exc}"})
+            stored = str(current.get("login_prefix") or "")
+            if stored and prefix != stored:
+                # 前缀一清空，解析就回到「用户名当登录名」，整份名单被换成另一套名字
+                return self._json(
+                    400,
+                    {
+                        "error": f"这个账号登记的登录名前缀是 {stored}，"
+                        "要改前缀请先在服务器上改登记表"
+                    },
+                )
+            change = offline_mod.diff(current.get("users") or [], users)
+            if payload.get("action") != "save":
+                return self._json(
+                    200,
+                    {
+                        "users": users,
+                        "warnings": warnings,
+                        "diff": change,
+                        "before": len(current.get("users") or []),
+                    },
+                )
+            try:
+                done = offline_mod.save_account(
+                    path,
+                    platform=platform,
+                    account=account,
+                    login_prefix=prefix,
+                    users=users,
+                    source=str(payload.get("source") or "控制台导出，管理员粘贴"),
+                    as_of=time.strftime("%Y-%m-%d", time.localtime()),
+                    actor=f"admin:{session.user.name or session.user.union_id}",
+                    allow_mass_remove=bool(payload.get("allow_mass_remove")),
+                )
+            except offline_mod.OfflineError as exc:
+                return self._json(409, {"error": str(exc)})
+            except (OSError, ValueError) as exc:
+                print(f"[offline] 保存失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+                return self._json(500, {"error": f"保存失败：{type(exc).__name__}"})
+            return self._json(
+                200, {"saved": True, "diff": done, "total": len(users), "warnings": warnings}
+            )
+
         def _asset_owner(self):
             """管理员把一个资源指给某人（email 留空＝取消指派）。
 
@@ -2310,6 +2466,8 @@ def make_handler(
                 return self._policy_rules()
             if path == _ADMIN_ASSET_OWNER:
                 return self._asset_owner()
+            if path == _ADMIN_OFFLINE:
+                return self._offline_accounts()
             if path == _ADMIN_REVOKE:
                 return self._revoke_access()
             if path == _ADMIN_REVIEW:
@@ -2437,6 +2595,8 @@ def _tenant_token_cache(app_id: str, app_secret: str) -> Callable[[], str]:
 #: 飞书在职状态的缓存时长。查一次是几十个串行请求，管理员连点几下不该每次都打一遍；
 #: 而离职这种事以天计，十分钟的滞后没有任何影响
 _STATUS_TTL = 600.0
+#: 人工登记整页名单的请求体上限
+_OFFLINE_MAX_BODY = 256 * 1024
 _status_cache: dict = {"key": None, "at": 0.0, "value": None}
 _status_lock = threading.Lock()
 
@@ -2464,6 +2624,25 @@ def _employment_statuses(roster, app_id: str, app_secret: str) -> tuple:
     with _status_lock:
         _status_cache.update(key=ckey, at=time.time(), value=value)
     return dict(value), len(uids), missing
+
+
+_staff_cache: dict = {"key": None, "at": 0.0, "value": None}
+
+
+def _staff(app_id: str, app_secret: str) -> dict:
+    """在职的人，按公司邮箱索引（`directory.staff_index`）。缓存同 `_employment_statuses`。
+
+    名册里没有 union_id 的人按状态查不了，只能按邮箱对 —— 不对的话这批人永远不会被报出来。
+    """
+    from .identity import directory
+
+    with _status_lock:
+        if _staff_cache["key"] == app_id and time.time() - _staff_cache["at"] < _STATUS_TTL:
+            return dict(_staff_cache["value"])
+    value = directory.staff_index(app_id, app_secret)
+    with _status_lock:
+        _staff_cache.update(key=app_id, at=time.time(), value=value)
+    return dict(value)
 
 
 def serve(

@@ -156,6 +156,11 @@ def is_service(
     return lowered.startswith(prefixes) or lowered in names
 
 
+def _listed(acc) -> bool:
+    """这个账号是不是来自管理员直接给的名单。"""
+    return any(getattr(c, "source", "") == SOURCE_ADMIN_EXPORT for c in acc.emails)
+
+
 def propose(
     accounts: Iterable[CloudAccount],
     *,
@@ -168,7 +173,11 @@ def propose(
     people_accounts: list = []
     services: list = []
     for acc in accounts:
-        if is_service(acc.name, extra_prefixes=service_prefixes, extra_names=service_names):
+        # **管理员给的名单本身就是确认**（九章那份：谁的登录名对应谁的邮箱，一行一人）。
+        # 不能再拿启发式去猜：`wuji-` 恰好也是服务号前缀，一猜就把 18 个人全当成了服务号
+        if not _listed(acc) and is_service(
+            acc.name, extra_prefixes=service_prefixes, extra_names=service_names
+        ):
             services.append(acc)
         else:
             people_accounts.append(acc)
@@ -204,7 +213,12 @@ def propose(
         cands = candidates(addr.split("@", 1)[0])
         rule = acc.name.lower() in cands
         evidence = [f"邮箱 {addr} 来自{claim.describe()}"]
-        if rule:
+        if claim.source == SOURCE_ADMIN_EXPORT:
+            # 名单里一行就是一次确认：登录名和邮箱由管理员成对给出，
+            # 用户名推不推得出来（`wuji-huangzenan` 推不出）不影响结论
+            status = STATUS_CONFIRMED
+            evidence.append("管理员提供的名单，一行一人")
+        elif rule:
             evidence.append("用户名可由邮箱推出")
             if claim.trusted:
                 status = STATUS_CONFIRMED

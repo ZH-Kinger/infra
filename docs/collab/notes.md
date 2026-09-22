@@ -101,3 +101,4 @@ tester 报了 1 个阻塞 bug + 3 个缺口 + 2 个 nit，全部已修：
 [2026-09-22 DEV] 上面各轮的 Medium / Low 已修（遗留的两条小瑕疵除外）。新建 wuji-provider-hz / wuji-processed-hz / wuji-processed-sing 三个桶；wuji-bucket-hangzhou 不配旧版本清理（用户决定）。九章 18 人按邮箱关联进名册，账号 ID 暂填 wuji，待确认。
 
 [2026-09-22] [AUDITOR] infra 告警兜底（OnFailure + 私聊管理员 + 退出码 3）：闸门通过。退出码 3 不会掩盖崩溃（告警送到才返回 3，送不到返回 1 触发 OnFailure）；_admin_alert 断网时最坏耗时约「管理员数 × 15 秒」，建议循环前先取一次 token 快速失败；moves/sweep/buckets/iam-remind 也该接上 OnFailure。
+- [2026-09-22] [AUDITOR] infra delivery: directory-departure check + 九章 manual registration page passed audit; deferred M-4 per-person snooze, M-7 check prod offline-accounts.json format before first panel save, L-12/13/14.

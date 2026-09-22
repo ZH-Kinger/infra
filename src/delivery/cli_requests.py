@@ -954,6 +954,7 @@ def _hygiene(args) -> int:
         print(f"人员名册读不了：{exc}", file=sys.stderr)
 
     statuses = None
+    staff = None
     if args.check_status:
         from .identity import directory
 
@@ -969,6 +970,11 @@ def _hygiene(args) -> int:
         except DeliveryError as exc:
             # 查不了就不判离职，别硬算 —— 见 hygiene.build 的说明
             print(f"查不了在职状态，本次不判断离职：{exc}", file=sys.stderr)
+        try:
+            # 名册里没有 union_id 的人按上面查不了 —— 按公司邮箱对一遍通讯录兜住
+            staff = directory.staff_index(app_id, secret)
+        except (DeliveryError, OSError, ValueError) as exc:
+            print(f"按公司邮箱对通讯录没做成：{exc}", file=sys.stderr)
 
     from .cli import _load_service_names
 
@@ -990,6 +996,7 @@ def _hygiene(args) -> int:
         snap,
         roster,
         statuses=statuses,
+        staff=staff,
         datasets=datasets,
         buckets=cloud_buckets,
         cpfs_dirs=_dirs[0],

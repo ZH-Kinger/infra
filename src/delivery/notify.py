@@ -429,6 +429,56 @@ def drift_card(report: Mapping, *, base_url: str = "") -> dict:
     }
 
 
+def not_found_card(people, *, base_url: str = "") -> dict:
+    """名下有云账号、在飞书通讯录里却找不到的人，私聊管理员。**只提醒，不停号。**
+
+    `drift_card` 只管 IT 的 IAM 里标了离职、按 union_id 对得上的人。名册里没有 union_id、
+    或者 IAM 里压根没他属性的人（九章这种没接 SSO 的平台只有这一种），那张卡永远不会提到他。
+    """
+    from . import platforms
+
+    rows = list(people)
+    lines = []
+    for p in rows[:8]:
+        accs = "、".join(f"{platforms.name_of(r.platform)} {r.name}" for r in p.accounts)
+        lines.append(f"{p.name} {p.email}：{_clip(accs, 120)}")
+    if len(rows) > 8:
+        lines.append(f"…还有 {len(rows) - 8} 人")
+    lines.append(
+        "飞书对「已离职」和「不在应用可见范围内」给的是同一个结果。确认离职后到各云控制台停用账号，"
+        "九章在九章控制台停，停完到面板「人工登记」重新保存一次名单。"
+    )
+    elements: list = [
+        {"tag": "div", "text": {"tag": "plain_text", "content": line}} for line in lines
+    ]
+    link = page_link(base_url, "#admin/hygiene")
+    if link:
+        elements.append(
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "type": "primary",
+                        "text": {"tag": "plain_text", "content": "看体检清单"},
+                        "url": link,
+                    }
+                ],
+            }
+        )
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": "orange",
+            "title": {
+                "tag": "plain_text",
+                "content": f"{len(rows)} 人在通讯录里找不到，云账号还在",
+            },
+        },
+        "elements": elements,
+    }
+
+
 def reclaim_text(report: Mapping, *, base_url: str = "") -> str:
     """离职回收的结果，发到管理员群（`alerts` 那个签名机器人，文本通道）。
 

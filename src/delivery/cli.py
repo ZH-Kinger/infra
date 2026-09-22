@@ -1392,16 +1392,32 @@ def _cmd_identity_iam_remind(args) -> int:
     原先这件事没有任何触发器：`iam-reclaim` 只能手工跑，那条飞书私聊还只在 `--apply`
     时才发。于是一个人离职之后云登录名一直挂着，直到某天有人恰好打开面板那一页。
 
+    提醒两类人，各发一张卡：
+      · IT 的 IAM 标了离职、云登录名还挂着的（按 union_id 对）；
+      · 名下有云账号、按 union_id 和公司邮箱在飞书通讯录里都找不到的。第一类只覆盖
+        有 union_id、IAM 里有属性的人，名册里没 union_id 的、只有九章账号的都漏掉了。
+
     **按批去重**：同一批人默认 24 小时才再提醒一次。天天重复的提醒等于没有提醒，
     而多提醒一次的代价只是多一条消息 —— 所以去重状态读不到时**照常提醒**。
     """
     import hashlib
 
-    from . import iam_sync
+    from . import hygiene, iam_sync
     from . import notify as notify_mod
+    from . import people as people_mod
     from . import roles as roles_mod
+    from .identity import directory
+
+    def sig_of(keys) -> str:
+        return hashlib.md5("|".join(sorted(keys)).encode()).hexdigest()  # noqa: S324 — 只做去重
 
     paths = iam_sync.SyncPaths(people=args.people, attributes=args.attributes)
+    app_id = os.environ.get("DELIVERY_FEISHU_APP_ID", "")
+    secret = os.environ.get("DELIVERY_FEISHU_APP_SECRET", "")
+    base = os.environ.get("DELIVERY_BASE_URL", "")
+    failed = False
+    cards = []
+
     report = iam_sync.reconcile_report(paths)
     held = iam_sync.load_snooze(paths)
     rows = [
@@ -1412,34 +1428,58 @@ def _cmd_identity_iam_remind(args) -> int:
     ]
     if not rows:
         print("没有「已离职但云登录名还挂着」的人")
-        return 0
-    # 同一批人只提醒一次：签名进文件，`--every-hours` 到点才再发
-    sig = hashlib.md5(  # noqa: S324 — 只做去重，不做安全
-        "|".join(sorted(f"{e['app']}/{d['union_id']}" for e, d in rows)).encode()
-    ).hexdigest()
-    if not iam_sync.claim_remind(paths, sig, hours=args.every_hours):
+    elif not iam_sync.claim_remind(
+        paths, sig_of(f"{e['app']}/{d['union_id']}" for e, d in rows), hours=args.every_hours
+    ):
         print(f"这批 {len(rows)} 人最近提醒过了，本次跳过")
-        return 0
+    else:
+        cards.append((f"{len(rows)} 人待回收", notify_mod.drift_card(report, base_url=base)))
 
-    app_id = os.environ.get("DELIVERY_FEISHU_APP_ID", "")
-    secret = os.environ.get("DELIVERY_FEISHU_APP_SECRET", "")
-    base = os.environ.get("DELIVERY_BASE_URL", "")
+    if not (app_id and secret):
+        print("★ 没配飞书应用凭证，「通讯录里找不到」这一类本次没查", file=sys.stderr)
+    else:
+        try:
+            roster = people_mod.load(args.people).people
+            gone = hygiene.missing_from_directory(roster, directory.staff_index(app_id, secret))
+        except (DeliveryError, hygiene.DirectoryIncomplete, OSError, ValueError) as exc:
+            # **不静默**：这一类没查成就是没查成，别让人以为「没有人离职」
+            print(f"★ 按公司邮箱对通讯录没做成，这一类本次没有结论：{exc}", file=sys.stderr)
+            failed = True
+            gone = []
+        if not gone:
+            if not failed:
+                print("没有「通讯录里找不到、云账号还在」的人")
+        elif not iam_sync.claim_remind(
+            paths, "dir:" + sig_of(p.key for p in gone), hours=args.every_hours
+        ):
+            print(f"通讯录里找不到的 {len(gone)} 人最近提醒过了，本次跳过")
+        else:
+            for p in gone:
+                print(f"  通讯录里找不到：{p.name} {p.email}")
+            cards.append(
+                (f"{len(gone)} 人通讯录里找不到", notify_mod.not_found_card(gone, base_url=base))
+            )
+
+    if not cards:
+        return 1 if failed else 0
+    what = "；".join(label for label, _ in cards)
     admins = roles_mod.load_admins(args.admins).union_ids
     if not (app_id and secret):
-        print(f"★ {len(rows)} 人待回收，但没配飞书应用凭证，这次没发通知", file=sys.stderr)
+        print(f"★ {what}，但没配飞书应用凭证，这次没发通知", file=sys.stderr)
         return 1
     if not admins:
-        print(f"★ {len(rows)} 人待回收，但 {args.admins} 里没有 union_ids", file=sys.stderr)
+        print(f"★ {what}，但 {args.admins} 里没有 union_ids", file=sys.stderr)
         return 1
     from .server import _tenant_token_cache
 
     notifier = notify_mod.FeishuNotifier(_tenant_token_cache(app_id, secret), base)
-    card = notify_mod.drift_card(report, base_url=base)
-    problems = notify_mod.notify_admins(notifier, admins, card)
-    print(f"{len(rows)} 人待回收，已私聊 {len(admins) - len(problems)}/{len(admins)} 位管理员")
+    problems = []
+    for _label, card in cards:
+        problems += notify_mod.notify_admins(notifier, admins, card)
+    print(f"{what}，已私聊 {len(admins)} 位管理员（失败 {len(problems)} 次）")
     for line in problems:
         print(f"  ✗ {line}", file=sys.stderr)
-    return 1 if problems else 0
+    return 1 if (problems or failed) else 0
 
 
 def _cmd_identity_iam_reconcile(args) -> int:
