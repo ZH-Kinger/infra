@@ -50,12 +50,13 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import access as access_mod
-from . import alerts, iam_sync, inventory
+from . import alerts, iam_api, iam_sync, inventory
 from . import approval_hook as hook_mod
 from . import assets as assets_mod
 from . import health as health_mod
 from . import notify as notify_mod
 from . import nudge as nudge_mod
+from . import offboard as offboard_mod
 from . import offline_accounts as offline_mod
 from . import people as people_mod
 from . import platforms as platforms_mod
@@ -1808,6 +1809,15 @@ def make_handler(
                     # 做成「点一下才有」就意味着没人点
                     out["reconcile"] = iam_sync.cached_reconcile(paths)
                     out["snoozed"] = sorted(iam_sync.load_snooze(paths))
+                    try:
+                        out["offboard"] = offboard_mod.pending(
+                            offboard_mod.path_beside(paths.people)
+                        )
+                    except DeliveryError as exc:
+                        # 离职记录坏了（常见是被 root 写过、属主变了）不该让整页打不开
+                        print(f"[offboard] {exc}", file=sys.stderr)
+                        out["offboard"] = []
+                        out["offboard_error"] = str(exc).splitlines()[0]
                     return out
 
                 return self._iam_result(_preview)
@@ -1841,27 +1851,104 @@ def make_handler(
                         actor=who.user.union_id,
                     )
                 )
-            if op == "reclaim":
-                # 管理员确认某人离职 → 删他的 cloud_accounts 属性。
-                # **服务端重新读一次 IAM 核对**，不信请求里说的「他离职了」
-                rp = backend.review_paths()
+            rp = backend.review_paths()
+            actor = f"admin:{who.user.union_id}"
+            ob_path = offboard_mod.path_beside(paths.people)
 
+            def _olog(op_, rows_, actor_):
+                if rp is not None:
+                    review_mod.log_offboard(rp, op_, rows_, actor=actor_)
+
+            def _executor(platform, account):
+                return executor_from_env(platform, account)
+
+            if op == "reclaim":
+                # 管理员确认某人离职 → 删他的 cloud_accounts 属性，**再删云上的号**。
+                # **服务端重新读一次 IAM 核对**，不信请求里说的「他离职了」
                 def _log(rows):
                     if rp is not None:
-                        review_mod.log_iam_reclaim(rp, rows, actor=f"admin:{who.user.union_id}")
+                        review_mod.log_iam_reclaim(rp, rows, actor=actor)
 
-                return self._iam_result(
-                    lambda: iam_sync.confirm_reclaim(
+                def _reclaim():
+                    row = iam_sync.confirm_reclaim(
                         paths,
                         str(body.get("union_id") or ""),
                         str(body.get("app") or ""),
                         actor=who.user.union_id,
                         log=_log,
                     )
+                    scope = next((k for k, v in iam_api.APPS.items() if v == row["app"]), "")
+                    platform, _, account = scope.partition("/")
+                    user = offboard_mod.cloud_user(row.get("previous") or row.get("value"))
+                    if not (platform and account and user):
+                        return dict(row, cloud="没认出云上的用户名，云账号没动")
+                    if offboard_mod.PROTECTED.match(user):
+                        return dict(row, cloud=f"{user} 受保护，云账号没动")
+                    # **删之前核对归属**：IAM 里的属性值可能被导错成别人的登录名。
+                    # 只有名册里这个人名下确认的号才删；对不上就只记下来等人看
+                    person = next(
+                        (
+                            x
+                            for x in backend.people().people
+                            if x.union_id and x.union_id == row.get("union_id")
+                        ),
+                        None,
+                    )
+                    owned = {
+                        (pl, acc, u.lower()): u
+                        for pl, acc, u in (offboard_mod.targets_of(person) if person else ())
+                    }
+                    real = owned.get((platform, account, user.lower()))
+                    try:
+                        key = offboard_mod.ensure_record(
+                            ob_path,
+                            platform=platform,
+                            account=account,
+                            user=real or user,
+                            person=row.get("name", ""),
+                            union_id=row.get("union_id", ""),
+                            signal="管理员确认离职"
+                            if real
+                            else "管理员确认离职，但名册里这个号不归他（没删）",
+                            verified=real is not None,
+                        )
+                        if real is None:
+                            return dict(
+                                row,
+                                cloud=f"名册里 {user} 不在他名下，云账号没删。"
+                                "去「待确认删除」核对后再删",
+                            )
+                        state = offboard_mod.load(ob_path).get(key, {}).get("state")
+                        if state == offboard_mod.DELETED:
+                            return dict(row, cloud=f"云账号 {real} 之前已经删掉了")
+                        offboard_mod.decide(
+                            ob_path, key, "delete", _executor, actor=actor, log=_olog
+                        )
+                    except DeliveryError as exc:
+                        # 登录名已经删了，这一步失败要说清楚，别让人以为全做完了
+                        return dict(row, cloud=f"云账号 {real or user} 没删成：{exc}")
+                    return dict(row, cloud=f"云账号 {real} 已删除，数据没动")
+
+                return self._iam_result(_reclaim)
+            if op in ("offboard_delete", "offboard_restore"):
+                # 只认离职记录里有的号 —— 请求里给不了任意用户名
+                action = "delete" if op == "offboard_delete" else "restore"
+                return self._iam_result(
+                    lambda: offboard_mod.decide(
+                        ob_path,
+                        str(body.get("key") or ""),
+                        action,
+                        _executor,
+                        actor=actor,
+                        log=_olog,
+                    )
                 )
             return self._json(
                 400,
-                {"error": "op 只能是 export、confirm、discard、reconcile、reclaim 或 snooze"},
+                {
+                    "error": "op 只能是 export、confirm、discard、reconcile、reclaim、snooze、"
+                    "offboard_delete 或 offboard_restore"
+                },
             )
 
         def _feishu_approval(self):

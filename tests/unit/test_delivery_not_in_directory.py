@@ -118,7 +118,9 @@ class CardTests(unittest.TestCase):
         text = json.dumps(card, ensure_ascii=False)
         self.assertIn("王昱然", text)
         self.assertIn("九章 wuji-gone", text)
-        self.assertIn("#admin/hygiene", text)
+        # 按钮改成去 IAM 页确认删除（离职停号那一节在那里）
+        self.assertIn("#admin/iam", text)
+        self.assertIn("确认删除", text)
         self.assertIn("1 人", card["header"]["title"]["content"])
 
 
@@ -150,6 +152,8 @@ class RemindTests(unittest.TestCase):
                 "delivery.people.load", return_value=SimpleNamespace(people=[STAY, GONE, *PEERS])
             ),
             mock.patch("delivery.identity.directory.staff_index", return_value=staff),
+            # 强信号那一路会按 union_id 查在职状态：不 mock 就真去打飞书
+            mock.patch("delivery.identity.directory.status_of", return_value={}),
             mock.patch(
                 "delivery.roles.load_admins", return_value=SimpleNamespace(union_ids={"on_admin"})
             ),
@@ -165,6 +169,10 @@ class RemindTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(len(sent), 1)
             self.assertIn("王昱然", json.dumps(sent[0], ensure_ascii=False))
+            # 他名下只有九章号：九章没有接口，不进离职停号记录（只能提醒人去控制台）
+            from delivery import offboard
+
+            self.assertEqual(offboard.load(offboard.path_beside(str(Path(tmp, "people.json")))), {})
             _code, again = self._run(tmp, STAFF)
             self.assertEqual(again, [])
 

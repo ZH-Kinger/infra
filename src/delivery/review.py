@@ -527,6 +527,30 @@ def log_iam_reclaim(paths: ReviewPaths, rows, *, actor: str, held=()) -> None:
         )
 
 
+def log_offboard(paths: ReviewPaths, op: str, rows, *, actor: str) -> None:
+    """离职停用 / 删号 / 恢复，一个号一行。和离职回收同一份日志。
+
+    `keys` 是停用时禁掉的 AK 编号：恢复只能照着它开回去。
+    """
+    paths.log.parent.mkdir(parents=True, exist_ok=True)
+    for r in rows:
+        _safe_append(
+            paths.log,
+            {
+                "op": op,
+                "actor": actor,
+                "platform": r.get("platform", ""),
+                "account": r.get("account", ""),
+                "user": r.get("user", ""),
+                "name": r.get("person", ""),
+                "union_id": r.get("union_id", ""),
+                "why": r.get("signal", ""),
+                "login": r.get("login", False),
+                "keys": list(r.get("keys") or []),
+            },
+        )
+
+
 def add_link(paths: ReviewPaths, email: str, account: str, *, actor: str) -> None:
     """开账号申请执行成功后：把新账号人工对应给申请人。名册在下一次刷新时生效。
 

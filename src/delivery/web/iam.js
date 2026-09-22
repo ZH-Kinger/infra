@@ -18,7 +18,7 @@ const FILE = API + "/file";
 //: 对账的四类差异。**顺序就是严重程度** —— 最上面那两类是「现在就有人登错号 / 离职的人还有权限」，
 //: 下面两类只是两边没同步。合成一类的话，最要紧的会被淹在一堆「少一条多一条」里
 const DRIFT = [
-  ["inactive", "已离职，云登录名还挂着", "crit", "点「确认离职」删掉登录名，再去云上禁用账号"],
+  ["inactive", "已离职，云登录名还挂着", "crit", "点「确认离职」删掉登录名和云上的账号，数据不动"],
   ["different", "两边值不一样", "crit", "SSO 会用 IAM 那一边的值。确认哪个对，然后下发"],
   ["missing", "名册有，IAM 没有", "warn", "下发一次"],
   ["left", "IAM 有，名册没有", "", "先在名册这边确认这个人的情况"],
@@ -85,6 +85,8 @@ function page(data, ui) {
     nodes.push(h("div", { class: "banner crit" }, h("b", {}, "算不出这次的增量"), h("p", {}, data.blocked)));
   }
 
+  if (data.offboard_error) nodes.push(h("div", { class: "banner warn" }, `离职记录读不了：${data.offboard_error}`));
+  if ((data.offboard || []).length) nodes.push(offboardSection(data.offboard));
   nodes.push(reconcileSection(ui, data));
   nodes.push(baselineCard(data, pending));
 
@@ -460,6 +462,56 @@ function reconcileSection(ui, data) {
   );
 }
 
+// 离职的人的云账号：检测到离职已自动停用（关登录、禁 AK）的，和通讯录里找不到、
+// 等人判断的。「确认删除」删云上的号，**不删任何数据**；「恢复」把停用时关掉的开回去，
+// 之后不再自动停这个号。
+const CLOUD = { aliyun: "阿里", volcano: "火山" };
+
+function offboardSection(items) {
+  const rows = items.map((r) => {
+    const out = h("span", { class: "hint" });
+    const del = h("button", { type: "button", class: "btn tiny", hidden: !!r.unverified }, "确认删除");
+    const keep = h("button", { type: "button", class: "btn tiny ghost" },
+      r.state === "disabled" ? "恢复" : "没离职");
+    const act = async (op, ask) => {
+      if (!window.confirm(ask)) return;
+      del.disabled = true;
+      keep.disabled = true;
+      try {
+        await apiPost(API, { op, key: `${r.platform}/${r.account}/${r.user}` });
+        del.remove();
+        keep.remove();
+        out.replaceChildren(h("span", { class: "good-text" },
+          op === "offboard_delete" ? "已删除云账号，数据没动" : "已恢复"));
+      } catch (e) {
+        del.disabled = false;
+        keep.disabled = false;
+        out.replaceChildren(h("span", { class: "recon-bad" }, e.message));
+      }
+    };
+    del.addEventListener("click", () => act("offboard_delete",
+      `删除 ${r.person} 的${CLOUD[r.platform] || r.platform}账号 ${r.user}？\n\n`
+      + "会删掉这个云账号本身（先移出用户组、摘掉策略、删 AK）。他在桶里的文件、数据集、实例都不动。删了不能恢复。"));
+    keep.addEventListener("click", () => act("offboard_restore",
+      r.state === "disabled"
+        ? `恢复 ${r.user}？会把停用时关掉的登录和 AK 开回去，之后不再自动停这个号。`
+        : `${r.person} 没离职？这条会从待确认里拿掉。`));
+    const state = r.state === "disabled" ? h("span", { class: "pill warn" }, "已停用") : h("span", { class: "pill" }, "未停用");
+    return h("div", { class: "recon-row" },
+      h("div", {}, h("b", {}, r.person || r.user), " ", state, " ",
+        h("code", {}, `${CLOUD[r.platform] || r.platform} ${r.user}`)),
+      h("div", { class: "hint" }, `${r.signal || ""} · ${fmtTime(r.at)}`),
+      r.left ? h("div", { class: "recon-bad" }, `上次没删干净：${r.left.join("；")}`) : null,
+      r.incomplete ? h("div", { class: "recon-bad" }, `停用没做完，下一轮会再试：${r.incomplete}`) : null,
+      r.unverified ? h("div", { class: "recon-bad" }, "名册里这个号不归他，面板不删。核实后到云控制台处理。") : null,
+      h("span", { class: "recon-act" }, del, keep, out));
+  });
+  return h("section", { class: "group" },
+    h("div", { class: "group-label" }, `离职人员的云账号，待确认删除 ${items.length}`),
+    h("p", { class: "hint pad" }, "检测到离职会自动停用（关登录、禁 AK）。通讯录里找不到的只提醒，不自动停。确认后删号，数据一律不动。"),
+    ...rows);
+}
+
 // 「确认离职」= 管理员用自己这一下顶替「名册里也没有」那个信号。
 // **服务端会重新读一次 IAM 核对**，所以这个按钮不能凭空删掉一个在职的人。
 function reclaimButton(d) {
@@ -468,8 +520,8 @@ function reclaimButton(d) {
   btn.addEventListener("click", async () => {
     if (!window.confirm(
       `确认 ${d.name || d.username} 已离职？\n\n`
-      + `删掉他在 ${d.app} 的登录名 ${d.theirs}，之后他无法用企业账号登录这朵云。\n`
-      + `云上的 RAM/IAM 账号保持原样，需要你去控制台禁用。`
+      + `删掉他在 ${d.app} 的登录名 ${d.theirs}，并删除云上的账号。\n`
+      + `他在桶里的文件、数据集、实例都不动。删了不能恢复。`
     )) return;
     btn.disabled = true;
     btn.textContent = "回收中…";
@@ -477,7 +529,7 @@ function reclaimButton(d) {
       const r = await apiPost(API, { op: "reclaim", union_id: d.union_id, app: d.app });
       btn.remove();
       out.replaceChildren(h("span", { class: "good-text" },
-        `已删除${r.previous ? ` ${r.previous}` : ""}。云上账号还在，去控制台禁用。`));
+        `已删除登录名${r.previous ? ` ${r.previous}` : ""}。${r.cloud || ""}`));
     } catch (e) {
       btn.disabled = false;
       btn.textContent = "确认离职，回收";

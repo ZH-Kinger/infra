@@ -429,6 +429,57 @@ def drift_card(report: Mapping, *, base_url: str = "") -> dict:
     }
 
 
+def offboard_card(report: Mapping, *, base_url: str = "") -> dict:
+    """自动停用了谁、为什么没停，私聊管理员。**删号要管理员到面板上确认。**"""
+    from . import platforms
+
+    def who(r):
+        cloud = platforms.name_of(r.get("platform", ""))
+        return f"{r.get('person', '')} · {cloud} {r.get('user', '')}"
+
+    lines = []
+    for r in (report.get("done") or [])[:10]:
+        lines.append(f"已停用 {who(r)}（{r.get('signal', '')}）")
+    for r in (report.get("failed") or [])[:5]:
+        lines.append(f"停用失败 {who(r)}：{_clip(r.get('error'), 80)}")
+    for r in (report.get("suspects") or [])[:10]:
+        lines.append(f"待确认 {who(r)}：{r.get('signal', '')}")
+    held = report.get("held") or []
+    if held:
+        lines.append(
+            f"这一轮有 {len(held)} 人被判离职，超过自动停用的上限，一个都没停："
+            + "、".join(held[:10])
+            + "。多半是接口出了问题，先核实。"
+        )
+    lines.append("停用只关登录、禁 AK，可以恢复。到面板确认后才删号，数据一律不动。")
+    elements: list = [
+        {"tag": "div", "text": {"tag": "plain_text", "content": _clip(line, _LINE_MAX)}}
+        for line in lines
+    ]
+    link = page_link(base_url)
+    if link:
+        elements.append(
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "type": "primary",
+                        "text": {"tag": "plain_text", "content": "去确认"},
+                        "url": link,
+                    }
+                ],
+            }
+        )
+    done = len(report.get("done") or [])
+    title = f"已停用 {done} 个离职人员的云账号，待确认删除" if done else "离职停号需要你看一下"
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "orange", "title": {"tag": "plain_text", "content": title}},
+        "elements": elements,
+    }
+
+
 def not_found_card(people, *, base_url: str = "") -> dict:
     """名下有云账号、在飞书通讯录里却找不到的人，私聊管理员。**只提醒，不停号。**
 
@@ -445,13 +496,13 @@ def not_found_card(people, *, base_url: str = "") -> dict:
     if len(rows) > 8:
         lines.append(f"…还有 {len(rows) - 8} 人")
     lines.append(
-        "飞书对「已离职」和「不在应用可见范围内」给的是同一个结果。确认离职后到各云控制台停用账号，"
-        "九章在九章控制台停，停完到面板「人工登记」重新保存一次名单。"
+        "飞书对「已离职」和「不在应用可见范围内」给的是同一个结果，所以没有自动停用。"
+        "确认离职的话到面板点「确认删除」；九章要在九章控制台停，停完到「人工登记」重新保存名单。"
     )
     elements: list = [
         {"tag": "div", "text": {"tag": "plain_text", "content": line}} for line in lines
     ]
-    link = page_link(base_url, "#admin/hygiene")
+    link = page_link(base_url)
     if link:
         elements.append(
             {
@@ -460,7 +511,7 @@ def not_found_card(people, *, base_url: str = "") -> dict:
                     {
                         "tag": "button",
                         "type": "primary",
-                        "text": {"tag": "plain_text", "content": "看体检清单"},
+                        "text": {"tag": "plain_text", "content": "去确认"},
                         "url": link,
                     }
                 ],

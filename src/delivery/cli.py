@@ -1387,7 +1387,8 @@ def _cmd_identity_iam_reclaim(args) -> int:
 
 
 def _cmd_identity_iam_remind(args) -> int:
-    """对账后提醒管理员。**只提醒，不删任何东西。**
+    """对账后提醒管理员，并**自动停用**确认离职的人的云账号（可恢复）。**从不删号、不碰数据**
+    —— 删号要管理员在面板上确认，见 offboard.py。
 
     原先这件事没有任何触发器：`iam-reclaim` 只能手工跑，那条飞书私聊还只在 `--apply`
     时才发。于是一个人离职之后云登录名一直挂着，直到某天有人恰好打开面板那一页。
@@ -1402,9 +1403,10 @@ def _cmd_identity_iam_remind(args) -> int:
     """
     import hashlib
 
-    from . import hygiene, iam_sync
+    from . import hygiene, iam_sync, offboard, provision
     from . import notify as notify_mod
     from . import people as people_mod
+    from . import review as review_mod
     from . import roles as roles_mod
     from .identity import directory
 
@@ -1435,17 +1437,105 @@ def _cmd_identity_iam_remind(args) -> int:
     else:
         cards.append((f"{len(rows)} 人待回收", notify_mod.drift_card(report, base_url=base)))
 
+    try:
+        roster = people_mod.load(args.people).people
+    except DeliveryError as exc:
+        print(f"★ 名册读不了，本次不判断谁离职：{exc}", file=sys.stderr)
+        roster, failed = None, True
+
+    # ── 强信号：IT 的 IAM 标了离职，或飞书状态是已离职 → 自动停用（可恢复），等人确认删号
+    statuses = None
+    if roster is not None and app_id and secret:
+        try:
+            statuses = directory.status_of(
+                [p.union_id for p in roster if p.union_id], app_id, secret
+            )
+        except (DeliveryError, OSError, ValueError) as exc:
+            print(f"★ 飞书在职状态没查成，这一路本次不判断：{exc}", file=sys.stderr)
+            failed = True
+    if roster is not None:
+        rp = _review_paths_or_none(args.people)
+
+        def _olog(op, rows_, actor):
+            if rp is not None:
+                review_mod.log_offboard(rp, op, rows_, actor=actor)
+
+        # 飞书那一路**只认「已离职」**（offboard.resigned）。冻结 / 退出企业只提醒
+        cands = offboard.strong_candidates(roster, drift_rows=rows, statuses=statuses)
+        weak = offboard.weak_statuses(roster, statuses)
+        if weak:
+            try:
+                added = offboard.note_suspects(offboard.path_beside(args.people), weak)
+            except (DeliveryError, OSError, ValueError) as exc:
+                print(f"★ 离职待确认没记上：{exc}", file=sys.stderr)
+                failed, added = True, []
+            for r in added:
+                print(f"  待确认（没停用）{r['platform']}/{r['user']}：{r['signal']}")
+            if added:
+                # 只有新记下的才发：记录本身就是去重
+                cards.append(
+                    (
+                        f"{len(added)} 个号待确认",
+                        notify_mod.offboard_card(
+                            {"done": [], "failed": [], "held": [], "suspects": added},
+                            base_url=base,
+                        ),
+                    )
+                )
+        rep = None
+        if cands:
+            try:
+                rep = offboard.auto_disable(
+                    offboard.path_beside(args.people),
+                    cands,
+                    lambda platform, account: provision.executor_from_env(platform, account),
+                    log=_olog,
+                )
+            except (DeliveryError, OSError, ValueError) as exc:
+                # 离职记录坏了也别吞掉其余提醒：「登录名还挂着」那张卡照发
+                print(f"★ 自动停用没做成：{exc}", file=sys.stderr)
+                failed = True
+        if rep is not None:
+            for r in rep["done"]:
+                print(f"  已停用 {r['platform']}/{r['user']}（{r['person']}，{r['signal']}）")
+            for r in rep["failed"]:
+                print(f"  ✗ 停用失败 {r['platform']}/{r['user']}：{r['error']}", file=sys.stderr)
+            if rep["held"]:
+                print(f"★ {len(rep['held'])} 人超过自动停用上限，一个都没停", file=sys.stderr)
+            failed = failed or bool(rep["failed"])
+            # 停了号每次都说；只有「没停成 / 被上限拦下」的，同一批 24 小时说一次
+            stuck = sorted(
+                [f"f:{r['platform']}/{r['user']}" for r in rep["failed"]]
+                + [f"h:{n}" for n in rep["held"]]
+            )
+            if rep["done"] or (
+                stuck
+                and iam_sync.claim_remind(paths, "off:" + sig_of(stuck), hours=args.every_hours)
+            ):
+                cards.append(
+                    (
+                        f"停用 {len(rep['done'])} 个号",
+                        notify_mod.offboard_card(rep, base_url=base),
+                    )
+                )
+
+    # ── 弱信号：通讯录里找不到 → 只记下来等人确认，不自动停
     if not (app_id and secret):
         print("★ 没配飞书应用凭证，「通讯录里找不到」这一类本次没查", file=sys.stderr)
-    else:
+    elif roster is not None:
         try:
-            roster = people_mod.load(args.people).people
             gone = hygiene.missing_from_directory(roster, directory.staff_index(app_id, secret))
         except (DeliveryError, hygiene.DirectoryIncomplete, OSError, ValueError) as exc:
             # **不静默**：这一类没查成就是没查成，别让人以为「没有人离职」
             print(f"★ 按公司邮箱对通讯录没做成，这一类本次没有结论：{exc}", file=sys.stderr)
             failed = True
             gone = []
+        if gone:
+            try:
+                offboard.note_suspects(offboard.path_beside(args.people), gone)
+            except (DeliveryError, OSError, ValueError) as exc:
+                print(f"★ 离职待确认没记上：{exc}", file=sys.stderr)
+                failed = True
         if not gone:
             if not failed:
                 print("没有「通讯录里找不到、云账号还在」的人")

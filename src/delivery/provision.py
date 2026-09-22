@@ -118,6 +118,15 @@ class LongTermCredential:
         return f"LongTermCredential(user={self.user!r}, ak=…{self.access_key_id[-4:]}, sk=<hidden>)"
 
 
+class PartialDisable(ProvisionError):
+    """停用做了一半：登录关了（或禁了几把 AK）之后出错。`partial` 是已经做成的部分 ——
+    不记下来的话，下一轮看到登录已经关着会记成「没关过」，恢复时登录就回不来了。"""
+
+    def __init__(self, message: str, partial: dict):
+        super().__init__(message)
+        self.partial = partial
+
+
 class AliyunExecutor:
     platform = "aliyun"
 
@@ -470,6 +479,120 @@ class AliyunExecutor:
                 raise
             self._call(aliyun.RAM, "UpdateLoginProfile", params)
         return password
+
+    # ── 离职：停用 → 管理员确认 → 删号。**只动账号，不动任何数据** ──────────
+    #
+    # 停用 = 关控制台登录 + 把 AK 设成 Inactive，两样都能恢复。删号要管理员在面板上确认。
+    # 谁能被停由 offboard 模块决定（只停名册里确认归属某个人的号）；云上的策略另有一层
+    # Deny 护住服务号和面板自己的三个身份。
+
+    def disable_user(self, user: str) -> dict:
+        """关登录、禁 AK。返回 `{"login": 这次关没关, "keys": [这次禁掉的 AK]}`，恢复时照着开回去。
+
+        阿里云没有「禁止登录」开关，关登录就是删登录配置。恢复时重建一份（随机密码，
+        SSO 下用不上），见 `enable_console`。
+        """
+        self._check_account()
+        closed = False
+        try:
+            self._call(aliyun.RAM, "GetLoginProfile", {"UserName": user})
+            self._call(aliyun.RAM, "DeleteLoginProfile", {"UserName": user})
+            closed = True
+        except aliyun.AliyunError as exc:
+            if exc.code == "EntityNotExist.User":
+                return {"login": False, "keys": [], "gone": True}
+            if "LoginProfile" not in str(exc.code or ""):
+                raise
+        keys = []
+        try:
+            body = self._call(aliyun.RAM, "ListAccessKeys", {"UserName": user})
+            for k in (body.get("AccessKeys") or {}).get("AccessKey") or []:
+                if str(k.get("Status") or "") == "Active":
+                    kid = str(k.get("AccessKeyId") or "")
+                    self._call(
+                        aliyun.RAM,
+                        "UpdateAccessKey",
+                        {"UserName": user, "UserAccessKeyId": kid, "Status": "Inactive"},
+                    )
+                    keys.append(kid)
+        except Exception as exc:
+            if closed or keys:
+                raise PartialDisable(f"停用没做完：{exc}", {"login": closed, "keys": keys}) from exc
+            raise
+        return {"login": closed, "keys": keys}
+
+    def enable_user(self, user: str, *, login: bool, keys) -> None:
+        """撤销停用：把 `disable_user` 这次关掉的东西开回去，别的不碰。"""
+        self._check_account()
+        for kid in keys or ():
+            try:
+                self._call(
+                    aliyun.RAM,
+                    "UpdateAccessKey",
+                    {"UserName": user, "UserAccessKeyId": kid, "Status": "Active"},
+                )
+            except aliyun.AliyunError as exc:
+                # 删号删到一半 AK 已经没了：开不回来，也不该卡住其余的
+                if "NotExist" not in str(exc.code or ""):
+                    raise
+        if login:
+            self.enable_console(user)
+
+    def delete_user(self, user: str) -> list:
+        """删号：删 AK → 出组 → 摘策略 → 解 MFA → 删登录配置 → 删用户。返回没删掉的东西。
+
+        阿里云不许删还挂着 AK / 组 / 策略 / MFA 的用户，所以要先清干净。
+        **只动账号本身**：他在桶里的文件、建的数据集、实例一样不碰。
+        """
+        self._check_account()
+        left = []
+
+        def step(label, fn):
+            try:
+                fn()
+            except aliyun.AliyunError as exc:
+                if "NotExist" not in str(exc.code or ""):
+                    left.append(f"{label}：{exc.code}")
+
+        try:
+            body = self._call(aliyun.RAM, "ListAccessKeys", {"UserName": user})
+        except aliyun.AliyunError as exc:
+            if exc.code == "EntityNotExist.User":
+                return []  # 已经没了（比如有人在控制台删过），目标达成
+            raise
+        for k in (body.get("AccessKeys") or {}).get("AccessKey") or []:
+            kid = str(k.get("AccessKeyId") or "")
+            step(
+                f"删 AccessKey …{kid[-4:]}",
+                lambda kid=kid: self._call(
+                    aliyun.RAM, "DeleteAccessKey", {"UserName": user, "UserAccessKeyId": kid}
+                ),
+            )
+        pols, groups = self.attached(user)
+        for g in groups:
+            step(
+                f"移出用户组 {g}",
+                lambda g=g: self._call(
+                    aliyun.RAM, "RemoveUserFromGroup", {"UserName": user, "GroupName": g}
+                ),
+            )
+        for pol in pols:
+            step(
+                f"摘策略 {pol['PolicyName']}",
+                lambda pol=pol: self._call(
+                    aliyun.RAM,
+                    "DetachPolicyFromUser",
+                    _aliyun_policy_params(user, pol["PolicyType"], pol["PolicyName"]),
+                ),
+            )
+        step("解绑 MFA", lambda: self._call(aliyun.RAM, "UnbindMFADevice", {"UserName": user}))
+        step(
+            "删登录配置",
+            lambda: self._call(aliyun.RAM, "DeleteLoginProfile", {"UserName": user}),
+        )
+        if not left:
+            step("删用户", lambda: self._call(aliyun.RAM, "DeleteUser", {"UserName": user}))
+        return left
 
     # ── 长期凭证：建号 + 时间窗策略 + 长期 AK；到期删干净 ──────────────────
     #
@@ -850,6 +973,132 @@ class VolcanoExecutor:
                 raise
             self._call(volcano.IAM, "UpdateLoginProfile", params)
         return password
+
+    # ── 离职：停用 → 管理员确认 → 删号。**只动账号，不动任何数据** ──────────
+    # 与阿里那边同一套（见 AliyunExecutor.disable_user）。火山有显式的 LoginAllowed 开关，
+    # 关登录不用删登录配置，恢复也不用重设密码。
+
+    def disable_user(self, user: str) -> dict:
+        self._check_account()
+        closed = False
+        try:
+            got = self._call(volcano.IAM, "GetLoginProfile", {"UserName": user})
+            profile = got.get("LoginProfile") or got
+            # 没有登录配置时火山回全零 stub，LoginAllowed 是 false —— 那就没什么可关的
+            if str(profile.get("LoginAllowed", "")).lower() in ("true", "1"):
+                self._call(
+                    volcano.IAM,
+                    "UpdateLoginProfile",
+                    {"UserName": user, "LoginAllowed": "false"},
+                )
+                closed = True
+        except volcano.VolcanoError as exc:
+            if _volcano_user_missing(exc):
+                return {"login": False, "keys": [], "gone": True}
+            if "notexist" not in _volcano_code(exc):
+                raise
+        keys = []
+        try:
+            body = self._call(volcano.IAM, "ListAccessKeys", {"UserName": user})
+            for k in body.get("AccessKeyMetadata") or []:
+                if str(k.get("Status") or "").lower() == "active":
+                    kid = str(k.get("AccessKeyId") or "")
+                    self._call(
+                        volcano.IAM,
+                        "UpdateAccessKey",
+                        {"UserName": user, "AccessKeyId": kid, "Status": "inactive"},
+                    )
+                    keys.append(kid)
+        except Exception as exc:
+            if closed or keys:
+                raise PartialDisable(f"停用没做完：{exc}", {"login": closed, "keys": keys}) from exc
+            raise
+        return {"login": closed, "keys": keys}
+
+    def enable_user(self, user: str, *, login: bool, keys) -> None:
+        self._check_account()
+        for kid in keys or ():
+            try:
+                self._call(
+                    volcano.IAM,
+                    "UpdateAccessKey",
+                    {"UserName": user, "AccessKeyId": kid, "Status": "active"},
+                )
+            except volcano.VolcanoError as exc:
+                if "notexist" not in _volcano_code(exc):
+                    raise
+        if login:
+            self._call(
+                volcano.IAM, "UpdateLoginProfile", {"UserName": user, "LoginAllowed": "true"}
+            )
+
+    def delete_user(self, user: str) -> list:
+        """删 AK → 出组 → 摘策略 → 删登录配置 → 删用户。返回没删掉的东西。**不碰数据。**"""
+        self._check_account()
+        left = []
+
+        def step(label, fn):
+            try:
+                fn()
+            except volcano.VolcanoError as exc:
+                if "notexist" not in _volcano_code(exc):
+                    left.append(f"{label}：{exc}")
+
+        try:
+            body = self._call(volcano.IAM, "ListAccessKeys", {"UserName": user})
+        except volcano.VolcanoError as exc:
+            if _volcano_user_missing(exc):
+                return []  # 已经没了，目标达成
+            raise
+        for k in body.get("AccessKeyMetadata") or []:
+            kid = str(k.get("AccessKeyId") or "")
+            if not kid:
+                continue
+            if str(k.get("Status") or "").lower() == "active":
+                # 火山不许删启用中的 AK（AccessKeyCanNotDelete），先禁再删。
+                # 没被自动停过的号（弱信号、管理员直接确认的）AK 都还开着
+                step(
+                    f"禁用 AccessKey …{kid[-4:]}",
+                    lambda kid=kid: self._call(
+                        volcano.IAM,
+                        "UpdateAccessKey",
+                        {"UserName": user, "AccessKeyId": kid, "Status": "inactive"},
+                    ),
+                )
+            step(
+                f"删 AccessKey …{kid[-4:]}",
+                lambda kid=kid: self._call(
+                    volcano.IAM, "DeleteAccessKey", {"UserName": user, "AccessKeyId": kid}
+                ),
+            )
+        pols, groups = self.attached(user)
+        for g in groups:
+            step(
+                f"移出用户组 {g}",
+                lambda g=g: self._call(
+                    volcano.IAM, "RemoveUserFromGroup", {"UserName": user, "UserGroupName": g}
+                ),
+            )
+        for pol in pols:
+            step(
+                f"摘策略 {pol['PolicyName']}",
+                lambda pol=pol: self._call(
+                    volcano.IAM,
+                    "DetachUserPolicy",
+                    {
+                        "UserName": user,
+                        "PolicyName": pol["PolicyName"],
+                        "PolicyType": pol["PolicyType"],
+                    },
+                ),
+            )
+        step(
+            "删登录配置",
+            lambda: self._call(volcano.IAM, "DeleteLoginProfile", {"UserName": user}),
+        )
+        if not left:
+            step("删用户", lambda: self._call(volcano.IAM, "DeleteUser", {"UserName": user}))
+        return left
 
     # ── 长期凭证：建号 + 时间窗策略 + 长期 AK；到期删干净 ──────────────────
     #

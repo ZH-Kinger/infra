@@ -102,3 +102,4 @@ tester 报了 1 个阻塞 bug + 3 个缺口 + 2 个 nit，全部已修：
 
 [2026-09-22] [AUDITOR] infra 告警兜底（OnFailure + 私聊管理员 + 退出码 3）：闸门通过。退出码 3 不会掩盖崩溃（告警送到才返回 3，送不到返回 1 触发 OnFailure）；_admin_alert 断网时最坏耗时约「管理员数 × 15 秒」，建议循环前先取一次 token 快速失败；moves/sweep/buckets/iam-remind 也该接上 OnFailure。
 - [2026-09-22] [AUDITOR] infra delivery: directory-departure check + 九章 manual registration page passed audit; deferred M-4 per-person snooze, M-7 check prod offline-accounts.json format before first panel save, L-12/13/14.
+- [2026-09-22] [AUDITOR] infra 离职停号复审：闸门通过。H-1/M-1/M-2 与 L-1~L-4/L-6/L-7 确认修复；遗留 Low：火山 disable 的 gone 判定建议再用 GetUser 复核、超限和冻结产生的待确认记录不会自动清、L-5/L-8、iam-remind 仍未接 OnFailure。（火山保护 Deny 已补 RemoveUserFromGroup/DetachUserPolicy）

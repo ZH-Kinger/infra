@@ -1,0 +1,84 @@
+{
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iam:AddUserToGroup",
+        "iam:AttachUserPolicy",
+        "iam:CreateLoginProfile",
+        "iam:CreateUser",
+        "iam:DetachUserPolicy",
+        "iam:GetUser",
+        "iam:GetUserGroup",
+        "iam:ListAttachedUserGroupPolicies",
+        "iam:ListAttachedUserPolicies",
+        "iam:ListGroups",
+        "iam:ListGroupsForUser",
+        "iam:ListPolicies",
+        "iam:ListUserGroupsForUser",
+        "iam:ListUsers",
+        "iam:ListUsersForGroup",
+        "iam:RemoveUserFromGroup",
+        "iam:UpdateLoginProfile"
+      ],
+      "Resource": [
+        "*"
+      ]
+    },
+    {
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateAccessKey",
+        "iam:ListSecretKeys",
+        "iam:CreatePolicy",
+        "iam:DeletePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:AttachRolePolicy",
+        "iam:CreateUserGroup",
+        "iam:DeleteUserGroup"
+      ],
+      "Resource": [
+        "*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetLoginProfile",
+        "iam:DeleteLoginProfile",
+        "iam:ListAccessKeys",
+        "iam:UpdateAccessKey",
+        "iam:DeleteAccessKey",
+        "iam:DeleteUser"
+      ],
+      "Resource": [
+        "*"
+      ]
+    },
+    {
+      "Effect": "Deny",
+      "Action": [
+        "iam:GetLoginProfile",
+        "iam:DeleteLoginProfile",
+        "iam:ListAccessKeys",
+        "iam:UpdateAccessKey",
+        "iam:DeleteAccessKey",
+        "iam:DeleteUser",
+        "iam:UpdateLoginProfile",
+        "iam:RemoveUserFromGroup",
+        "iam:DetachUserPolicy"
+      ],
+      "Resource": [
+        "trn:iam::2111674479:user/panel-*",
+        "trn:iam::2111674479:user/tempak*",
+        "trn:iam::2111674479:user/finance",
+        "trn:iam::2111674479:user/wuji-*",
+        "trn:iam::2111674479:user/Data-tran",
+        "trn:iam::2111674479:user/power-*",
+        "trn:iam::2111674479:user/rl-*"
+      ]
+    }
+  ]
+}

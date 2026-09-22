@@ -1,0 +1,210 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Action": [
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*",
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    },
+    {
+      "Action": [
+        "ram:GetUser",
+        "ram:CreateUser",
+        "ram:ListPoliciesForUser",
+        "ram:ListGroupsForUser"
+      ],
+      "Resource": "acs:ram:*:1704065796538912:user/*",
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    },
+    {
+      "Action": [
+        "ram:CreateLoginProfile",
+        "ram:UpdateLoginProfile"
+      ],
+      "Resource": "acs:ram:*:1704065796538912:user/*",
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    },
+    {
+      "Action": [
+        "ram:AttachPolicyToUser",
+        "ram:DetachPolicyFromUser"
+      ],
+      "Resource": [
+        "acs:ram:*:1704065796538912:user/*",
+        "acs:ram:*:system:policy/*",
+        "acs:ram:*:1704065796538912:policy/*"
+      ],
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    },
+    {
+      "Action": [
+        "sts:AssumeRole"
+      ],
+      "Resource": [
+        "acs:ram::1704065796538912:role/panel-oss-list",
+        "acs:ram::1704065796538912:role/panel-oss-download",
+        "acs:ram::1704065796538912:role/panel-oss-write"
+      ],
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ram:AddUserToGroup",
+        "ram:RemoveUserFromGroup"
+      ],
+      "Resource": [
+        "acs:ram:*:1704065796538912:user/*",
+        "acs:ram:*:1704065796538912:group/wuji_*"
+      ],
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    },
+    {
+      "Action": [
+        "ram:AttachPolicyToUser"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "acs:ram:*:system:policy/AdministratorAccess",
+        "acs:ram:*:system:policy/AliyunRAM*",
+        "acs:ram:*:system:policy/AliyunSTS*",
+        "acs:ram:*:system:policy/AliyunIMS*",
+        "acs:ram:*:system:policy/AliyunKMS*",
+        "acs:ram:*:system:policy/AliyunResourceDirectory*",
+        "acs:ram:*:system:policy/AliyunResourceManager*",
+        "acs:ram:*:system:policy/AliyunBSS*",
+        "acs:ram:*:system:policy/AliyunCloudSSO*",
+        "acs:ram:*:system:policy/AliyunIDaaS*",
+        "acs:ram:*:system:policy/AliyunActionTrail*"
+      ]
+    },
+    {
+      "Action": [
+        "ram:CreateUser",
+        "ram:CreateLoginProfile",
+        "ram:UpdateLoginProfile",
+        "ram:AttachPolicyToUser",
+        "ram:DetachPolicyFromUser",
+        "ram:AddUserToGroup",
+        "ram:RemoveUserFromGroup",
+        "ram:GetLoginProfile",
+        "ram:DeleteLoginProfile",
+        "ram:ListAccessKeys",
+        "ram:UpdateAccessKey",
+        "ram:DeleteAccessKey",
+        "ram:UnbindMFADevice",
+        "ram:DeleteUser"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "acs:ram:*:1704065796538912:user/Data-tran",
+        "acs:ram:*:1704065796538912:user/finance",
+        "acs:ram:*:1704065796538912:user/power-application-user",
+        "acs:ram:*:1704065796538912:user/rl-lakefs",
+        "acs:ram:*:1704065796538912:user/wuji-ci",
+        "acs:ram:*:1704065796538912:user/wuji-rl-acr",
+        "acs:ram:*:1704065796538912:user/wuji-rl-dataset",
+        "acs:ram:*:1704065796538912:user/wuji-rl-read",
+        "acs:ram:*:1704065796538912:user/tempak*"
+      ]
+    },
+    {
+      "Action": [
+        "ram:CreateUser",
+        "ram:CreateLoginProfile",
+        "ram:UpdateLoginProfile",
+        "ram:AttachPolicyToUser",
+        "ram:DetachPolicyFromUser",
+        "ram:AddUserToGroup",
+        "ram:RemoveUserFromGroup",
+        "ram:GetLoginProfile",
+        "ram:DeleteLoginProfile",
+        "ram:ListAccessKeys",
+        "ram:UpdateAccessKey",
+        "ram:DeleteAccessKey",
+        "ram:UnbindMFADevice",
+        "ram:DeleteUser"
+      ],
+      "Effect": "Deny",
+      "Resource": [
+        "acs:ram:*:1704065796538912:user/panel-collector",
+        "acs:ram:*:1704065796538912:user/panel-executor",
+        "acs:ram:*:1704065796538912:user/panel-issuer"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ram:GetPolicy",
+        "ram:GetPolicyVersion"
+      ],
+      "Resource": [
+        "acs:ram:*:1704065796538912:policy/*",
+        "acs:ram:*:system:policy/*"
+      ]
+    },
+    {
+      "Action": [
+        "ram:GetLoginProfile",
+        "ram:DeleteLoginProfile",
+        "ram:ListAccessKeys",
+        "ram:UpdateAccessKey",
+        "ram:DeleteAccessKey",
+        "ram:UnbindMFADevice",
+        "ram:DeleteUser"
+      ],
+      "Resource": "acs:ram:*:1704065796538912:user/*",
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    }
+  ]
+}
