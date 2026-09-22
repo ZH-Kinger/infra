@@ -6,11 +6,15 @@
 Description=Cloud permission panel data refresh
 Wants=network-online.target
 After=network-online.target
+# 进程自己发不出告警的情况（崩溃、超时被杀、导入失败）由这个单元兜底，私聊管理员。
+# **必须写在 [Unit] 段**：原先那行注释掉的 OnFailure 写在 [Service] 里，取消注释也不生效
+OnFailure=delivery-unit-failed@%n.service
 
 [Service]
 Type=oneshot
 # 75 = 上一次还在跑，本次跳过，不算失败
-SuccessExitStatus=75
+#  3 = 跑完了、发现了问题、告警已经送到。算正常结束 —— 否则 OnFailure 会就同一件事再发一条
+SuccessExitStatus=3 75
 User=delivery
 WorkingDirectory=/opt/infra
 # 只读云凭证、飞书通讯录应用、告警机器人；文件权限 600
@@ -37,5 +41,3 @@ CapabilityBoundingSet=
 LockPersonality=true
 RestrictSUIDSGID=true
 SystemCallArchitectures=native
-# 超时被杀、Python 崩溃这类进程自己发不出告警的情况，交给另一个单元兜底（自行实现）
-# OnFailure=delivery-refresh-failed.service

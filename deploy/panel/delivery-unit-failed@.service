@@ -1,0 +1,32 @@
+# 定时任务的兜底告警：某个单元异常退出时私聊管理员（%i = 挂掉的单元名）
+#
+# 为什么要有：定时任务的告警是任务自己在跑完之后发的。崩溃、超时被杀、依赖导入失败这几种情况，
+# 进程拿不到报告，也就发不出告警 —— 一个每小时跑一次的任务可以连着挂好几天没人知道。
+#
+# 用法：在要兜底的单元 [Unit] 段加  OnFailure=delivery-unit-failed@%n.service
+# 发送走面板自己的飞书应用（refresh.env 里的 DELIVERY_FEISHU_APP_ID/SECRET），不依赖群机器人 webhook。
+[Unit]
+Description=Cloud panel: tell admins that %i failed
+
+[Service]
+Type=oneshot
+User=delivery
+WorkingDirectory=/opt/infra
+EnvironmentFile=/etc/delivery/refresh.env
+Environment=PYTHONPATH=/opt/infra/src:/opt/infra/vendor
+ExecStart=/usr/bin/python3 -m delivery.cli unit-failed --unit %i
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+TimeoutStartSec=2min
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+LockPersonality=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native

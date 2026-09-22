@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delivery import inventory
+from delivery import cli, inventory
 from delivery import people as people_mod
 from delivery.alerts import AlertError, send_feishu, send_feishu_card, sign
 from delivery.refresh import RefreshReport, brief, diff_snapshots, next_baseline, run
@@ -492,7 +492,7 @@ class CliRefreshTests(unittest.TestCase):
         )
         self.snapshot = _snap([("aliyun", "100", "lisi", [])], errors=[("volcano", "default")])
         code, _ = self._main()
-        self.assertEqual(code, 1)
+        self.assertEqual(code, cli.EXIT_REPORTED)
         self.assertEqual(len(self.sent), 1)
         self.assertIn("volcano/default：超时", self.sent[0])
         self.assertEqual(
@@ -503,7 +503,7 @@ class CliRefreshTests(unittest.TestCase):
     def test_corrupt_previous_people_alerts_and_keeps_file(self):
         (self.id_dir / "people.json").write_text("{broken", encoding="utf-8")
         code, _ = self._main()
-        self.assertEqual(code, 1)
+        self.assertEqual(code, cli.EXIT_REPORTED)
         self.assertIn("上一份名册读不了", self.sent[0])
         self.assertEqual((self.id_dir / "people.json").read_text(encoding="utf-8"), "{broken")
 
@@ -512,14 +512,14 @@ class CliRefreshTests(unittest.TestCase):
             (self.id_dir / "people.json").write_text(bad, encoding="utf-8")
             self.sent.clear()
             code, _ = self._main()
-            self.assertEqual(code, 1, bad)
+            self.assertEqual(code, cli.EXIT_REPORTED, bad)
             self.assertIn("上一份名册读不了", self.sent[0])
             self.assertEqual((self.id_dir / "people.json").read_text(encoding="utf-8"), bad)
 
     def test_corrupt_previous_baseline_alerts(self):
         (self.id_dir / "inventory.baseline.json").write_text("{broken", encoding="utf-8")
         code, _ = self._main()
-        self.assertEqual(code, 1)
+        self.assertEqual(code, cli.EXIT_REPORTED)
         self.assertIn("上一份比对基线读不了", self.sent[0])
 
     def test_second_run_reports_new_high_risk(self):
@@ -545,10 +545,12 @@ class CliRefreshTests(unittest.TestCase):
         self.assertIn("告警发送失败", out)
 
     def test_attention_without_alert_config_fails(self):
+        """没有 webhook、也没有飞书应用凭证：告警哪儿都送不到，必须以失败退出，
+        让 OnFailure 兜底去接。（环境变量是清空过的，这里不会真的发消息。）"""
         self.snapshot = _snap([], errors=[("aliyun", "ALIYUN")])
         code, out = self._main(alert=False)
         self.assertEqual(code, 1)
-        self.assertIn("没设置", out)
+        self.assertIn("告警没发出去", out)
 
     def test_no_alert_flag(self):
         self.snapshot = _snap([], errors=[("aliyun", "ALIYUN")])
@@ -559,7 +561,7 @@ class CliRefreshTests(unittest.TestCase):
     def test_guard_failure_is_alerted(self):
         outside = Path(tempfile.mkdtemp()) / "people.json"
         code, _ = self._main("--people", str(outside))
-        self.assertEqual(code, 1)
+        self.assertEqual(code, cli.EXIT_REPORTED)
         self.assertIn("刷新中断", self.sent[0])
 
     def test_concurrent_run_skipped(self):

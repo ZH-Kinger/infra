@@ -374,10 +374,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     cli_requests.add_parsers(commands)
 
+    uf = commands.add_parser(
+        "unit-failed", help="systemd OnFailure 兜底：定时任务异常退出时私聊管理员"
+    )
+    uf.add_argument("--unit", required=True, help="挂掉的单元名（systemd 传 %%i）")
+    uf.add_argument("--admins", default="identity/admins.json")
+
     rf = commands.add_parser(
         "refresh", help="定时任务：采集权限快照、生成映射提案、重建人员名册，异常时飞书告警"
     )
     rf.add_argument("--inventory", default="identity/inventory.json")
+    rf.add_argument("--admins", default="identity/admins.json", help="没配 webhook 时告警私聊谁")
     rf.add_argument("--proposal", default="identity/sso-map.proposal.json")
     rf.add_argument("--people", default="identity/people.json")
     rf.add_argument("--manual", default="identity/manual-links.json")
@@ -1778,6 +1785,59 @@ def _request_paths(args) -> dict:
     return out
 
 
+#: 刷新跑完了、发现了问题、告警已经送到。和「进程崩了、告警没发出去」（1）分开，
+#: 这样 systemd 的 OnFailure 兜底只在后一种情况触发。见 deploy/panel/delivery-refresh.service
+EXIT_REPORTED = 3
+
+
+def _admin_alert(title: str, text: str, admins_path: str = "") -> str:
+    """私聊管理员一张告警卡。返回没发出去的原因（空串 = 发出去了）。
+
+    用的是面板自己的飞书应用（`DELIVERY_FEISHU_APP_ID/SECRET`），不依赖群机器人 webhook ——
+    定时任务的环境文件里本来就有它（拉通讯录要用）。
+    """
+    from . import notify as notify_mod
+    from . import roles as roles_mod
+
+    app_id = os.environ.get("DELIVERY_FEISHU_APP_ID", "")
+    secret = os.environ.get("DELIVERY_FEISHU_APP_SECRET", "")
+    if not (app_id and secret):
+        return "没配 DELIVERY_FEISHU_APP_ID / DELIVERY_FEISHU_APP_SECRET"
+    try:
+        admins = roles_mod.load_admins(admins_path or "identity/admins.json").union_ids
+    except Exception as exc:  # noqa: BLE001
+        return f"读不了管理员名单：{type(exc).__name__}"
+    if not admins:
+        return "管理员名单里没有 union_id"
+    from .server import _tenant_token_cache
+
+    notifier = notify_mod.FeishuNotifier(_tenant_token_cache(app_id, secret), "")
+    failed = notify_mod.notify_admins(notifier, admins, notify_mod.alert_card(title, text))
+    if failed and len(failed) >= len(set(admins)):
+        return "；".join(failed)[:300]
+    return ""
+
+
+def _cmd_unit_failed(args) -> int:
+    """systemd 的 OnFailure 兜底：定时任务**自己没来得及发告警**就结束了。
+
+    崩溃、超时被杀、依赖导入失败 —— 这几种情况进程拿不到报告，也就发不出告警。
+    不兜底的话，一个每小时跑一次的任务可以连着挂好几天没人知道。
+    """
+    unit = str(args.unit or "").strip() or "（未知单元）"
+    text = (
+        f"{unit} 异常退出，没来得及出报告（崩溃 / 超时被杀 / 依赖导入失败）。\n"
+        f"看日志：journalctl -u {unit} -n 80 --no-pager\n"
+        "修好之前，这个任务管的数据不会更新。"
+    )
+    why = _admin_alert(f"定时任务异常退出：{unit}", text, args.admins)
+    if why:
+        print(f"兜底告警没发出去：{why}", file=sys.stderr)
+        return 1
+    print(f"已私聊管理员：{unit} 异常退出")
+    return 0
+
+
 def _cmd_refresh(args) -> int:
     """定时任务入口：快照 → 提案 → 名册，有异常或变化就发飞书告警。"""
     from . import alerts, refresh
@@ -1798,17 +1858,26 @@ def _cmd_refresh(args) -> int:
     code = 0 if report.ok else 1
     if not report.needs_attention or args.no_alert:
         return code
+    sent = False
     alert_conf = alerts.from_env(os.environ)
-    if alert_conf is None:
-        print(f"  ⚠ 需要告警但没设置 {alerts.ENV_WEBHOOK}（不需要告警加 --no-alert）")
-        return 1
-    try:
-        alerts.send_feishu(text, webhook=alert_conf[0], secret=alert_conf[1])
-        print("已发送飞书告警")
-    except alerts.AlertError as exc:
-        print(f"  ⚠ {exc}")
-        return 1
-    return code
+    if alert_conf is not None:
+        try:
+            alerts.send_feishu(text, webhook=alert_conf[0], secret=alert_conf[1])
+            print("已发送飞书告警")
+            sent = True
+        except alerts.AlertError as exc:
+            print(f"  ⚠ {exc}")
+    if not sent:
+        # **没配群机器人 webhook 时私聊管理员。** 原先这里只打一行「没设置 webhook」就退出 ——
+        # 线上一直没配，所以刷新出的每一个问题都只进了日志，从来没有人被通知过
+        why = _admin_alert("云权限面板数据刷新异常", text, getattr(args, "admins", ""))
+        if why:
+            print(f"  ⚠ 告警没发出去：{why}")
+            return 1
+        print("已私聊管理员")
+    # 跑完了、有问题、告警**已经送到** → 退出码 3，单元里声明成正常结束。
+    # 仍然返回 1 的话，OnFailure 兜底会再私聊一遍「服务失败」—— 同一件事收两条
+    return EXIT_REPORTED if code else 0
 
 
 def _read_previous(path: str, what: str, errors: list, parse) -> Optional[dict]:
@@ -1874,8 +1943,8 @@ def _refresh_locked(args, report) -> Optional[int]:
         try:
             offline_rows = offline_mod.load(offline_mod.beside(args.inventory))
         except offline_mod.OfflineError as exc:
+            # 报告由外层 `_cmd_refresh` 统一打印、统一告警 —— 这里再打一遍，日志里就是两份
             report.problems.append(str(exc))
-            print(report.render())
             return 1
 
         def collect_proposal() -> dict:
@@ -2013,6 +2082,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
         if args.command == "inventory":
             return _cmd_inventory_collect(args)
+        if args.command == "unit-failed":
+            return _cmd_unit_failed(args)
         if args.command == "refresh":
             return _cmd_refresh(args)
         if args.command in (

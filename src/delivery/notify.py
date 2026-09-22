@@ -355,6 +355,25 @@ def notify_admins(notifier, union_ids, card: dict) -> list:
     return problems
 
 
+def alert_card(title: str, text: str) -> dict:
+    """定时任务出问题时私聊管理员的卡片。正文就是报告原文，一行一段。
+
+    **报告可能很长**（「另有 N 条，见面板」之前能列十几行），卡片上截到 30 行 ——
+    全文在 journal 里，卡片要做的只是让人知道出事了、大概是什么事。
+    """
+    lines = [ln for ln in str(text or "").splitlines() if ln.strip()]
+    if len(lines) > 30:
+        lines = lines[:30] + [f"…还有 {len(lines) - 30} 行，见服务器日志"]
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "red", "title": {"tag": "plain_text", "content": _clip(title, 60)}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "plain_text", "content": _clip(ln, _LINE_MAX)}}
+            for ln in lines or ["（没有更多信息）"]
+        ],
+    }
+
+
 def drift_card(report: Mapping, *, base_url: str = "") -> dict:
     """对账发现「人走了但云登录名还挂着」时，私聊管理员。**只提醒，不回收。**
 

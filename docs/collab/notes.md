@@ -99,3 +99,5 @@ tester 报了 1 个阻塞 bug + 3 个缺口 + 2 个 nit，全部已修：
 [2026-09-22] [AUDITOR] infra 九章人工登记修复（M-A, L-a~L-d）：闸门通过。L-d 登记表权限不对就整轮不刷新，这个取舍可以接受——每轮都会发飞书告警，快照和名册保持不动；遗留：失败时报告在日志里打印两次，refresh 单元的 OnFailure 兜底还没启用（老问题）。
 
 [2026-09-22 DEV] 上面各轮的 Medium / Low 已修（遗留的两条小瑕疵除外）。新建 wuji-provider-hz / wuji-processed-hz / wuji-processed-sing 三个桶；wuji-bucket-hangzhou 不配旧版本清理（用户决定）。九章 18 人按邮箱关联进名册，账号 ID 暂填 wuji，待确认。
+
+[2026-09-22] [AUDITOR] infra 告警兜底（OnFailure + 私聊管理员 + 退出码 3）：闸门通过。退出码 3 不会掩盖崩溃（告警送到才返回 3，送不到返回 1 触发 OnFailure）；_admin_alert 断网时最坏耗时约「管理员数 × 15 秒」，建议循环前先取一次 token 快速失败；moves/sweep/buckets/iam-remind 也该接上 OnFailure。
