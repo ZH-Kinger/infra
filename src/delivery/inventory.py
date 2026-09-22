@@ -168,6 +168,9 @@ class Snapshot:
     #: 采集时出过问题的账号。**不是空列表就说明这份快照不完整**，
     #: 展示层必须显示出来——否则「某人没有权限」和「这个账号没采到」长得一样。
     incomplete: tuple = field(default=())
+    #: 人工登记的账号（`平台/账号` → {source, as_of}）。**不是云上实时采集的**，会过时 ——
+    #: 页面要标出来，体检要在它太旧时提醒「可能漏报」。见 offline_accounts
+    offline: dict = field(default_factory=dict, compare=False)
 
     @property
     def complete(self) -> bool:
@@ -269,6 +272,7 @@ def parse(data: Mapping) -> Snapshot:
         raise InventoryError("快照缺少 `accounts` 数组")
 
     users, groups, incomplete = [], [], []
+    offline: dict = {}
     for idx, acc in enumerate(accounts):
         if not isinstance(acc, dict):
             raise InventoryError(f"accounts[{idx}] 必须是对象")
@@ -279,6 +283,11 @@ def parse(data: Mapping) -> Snapshot:
         if acc.get("error"):
             incomplete.append(f"{platform}/{account}：{acc['error']}")
             continue
+        if acc.get("as_of"):
+            offline[f"{platform}/{account}"] = {
+                "source": str(acc.get("source") or "人工登记"),
+                "as_of": str(acc["as_of"]),
+            }
         for u in acc.get("users") or []:
             if not isinstance(u, dict) or not u.get("name"):
                 raise InventoryError(f"{platform}/{account} 的 users 里有缺 `name` 的条目")
@@ -312,6 +321,7 @@ def parse(data: Mapping) -> Snapshot:
         users=tuple(users),
         groups=tuple(groups),
         incomplete=tuple(incomplete),
+        offline=offline,
     )
 
 

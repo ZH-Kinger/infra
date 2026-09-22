@@ -3,7 +3,8 @@
 // 安全约定：接口返回的字段只经 textContent / 属性赋值进入 DOM，绝不拼 innerHTML。
 
 export const PLATFORM_CLASS = { aliyun: "aliyun", volcano: "volcano" };
-export const PLATFORM_NAME = { aliyun: "阿里云", volcano: "火山引擎" };
+//: 九章没有采集接口、账号是人工登记的（见 offline_accounts），不是可申请的平台，但名册和体检里会出现
+export const PLATFORM_NAME = { aliyun: "阿里云", volcano: "火山引擎", jiuzhang: "九章" };
 
 export function h(tag, props, ...children) {
   const el = document.createElement(tag);

@@ -331,6 +331,8 @@ label.perm:hover{background:var(--surface-2)}
 .perm.off .perm-name, .perm.off .opt-desc{color:var(--ink-3)}
 .perm-check{display:flex; align-items:center}
 .check{width:1.05rem; height:1.05rem; margin:0; accent-color:var(--accent); cursor:pointer}
+/* 一行一个复选框 + 说明（「新增数据类型」选桶那一栏） */
+.check-row{display:flex; align-items:center; gap:.5rem; padding:.3rem 0; font-size:.875rem; cursor:pointer}
 .perm-glyph{display:inline-flex; align-items:center; justify-content:center; width:1.05rem; height:1.05rem;
   border-radius:50%; font-size:.6875rem; font-weight:700; background:var(--surface-2); color:var(--ink-3)}
 .perm-glyph.owned{background:var(--good-soft); color:var(--good)}
@@ -567,6 +569,14 @@ dl.kv dd{margin:0; display:flex; gap:.5rem; align-items:center; min-width:0}
 
 /* 查看凭证页。CSP 是 style-src 'self'（没有 unsafe-inline）—— 内联 style= 会被浏览器
    直接丢掉，样式静默失效。这一页是外部合作方唯一会看到的界面，别在那边写内联样式 */
+/* 卡片里的说明文字、筛选条。**这个 class 用了 10 处却一直没定义**，
+   于是那些段落没有任何内边距，字直接贴着卡片边框。左右和卡片其余内容一样留 var(--gutter) */
+.pad{margin:0; padding:.6rem var(--gutter)}
+.pad + .pad{padding-top:0}
+.card > .pad:last-child{padding-bottom:1rem}
+/* 并排的几个控制台链接之间留空，不然读起来是「…换 →去阿里云…」连成一串 */
+.pad .linkbtn{margin-left:.75rem; white-space:nowrap}
+.pad .linkbtn:first-of-type{margin-left:.35rem}
 .pad-body{padding:.8rem 1.25rem 0}
 .pad-block{margin:.8rem 1.25rem}
 .pad-notes{margin:0 1.25rem 1rem}

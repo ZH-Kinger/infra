@@ -36,7 +36,7 @@ export const STAGE_META = {
 };
 
 //: 这些 stage 的数据是花钱买来的或者人工做出来的，manifest 里缺了来源信息就没法自证
-const NEEDS_LICENSE = new Set(["opensource", "web"]);
+const NEEDS_LICENSE = new Set(["opensource", "web", "public-datasets", "internet"]);
 
 export function tierPill(tier) {
   const t = TIERS[tier];
@@ -51,6 +51,10 @@ export function tierPill(tier) {
 // 而那一段单独校验。这样拼出来的 ID 不可能含 `/`、`*`、`..` 或空格。
 
 const SCENE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+//: 词表类型中间那几层（供应商、来源、版本……）每一段的规则，和后端 flows._BATCH 一致
+const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
+//: 词表里「批次」那一层的名字（datatypes.BATCH）。它有专门的输入：日期 + 场景 + 序号
+const BATCH_LAYER = "批次ID";
 
 export function batchId(date, source, scene, seq) {
   const day = (date || "").replaceAll("-", "");
@@ -68,6 +72,10 @@ export function directoryFields(o, { field, update }) {
 
   const buckets = o.buckets || [];
   const bucketOf = (name) => buckets.find((b) => b.name === name) || {};
+  //: 词表里的类型（identity/data-types.json）。有它就按它登记的层级逐层问；
+  //: 没有的是老分类，走下面写死的 STAGE_META
+  const typeOf = (id) => (o.types || {})[id];
+  const labelOf = (id) => (typeOf(id) || {}).label || (STAGE_META[id] || {}).label || id;
 
   // ① 桶
   const bucket = h("select", { id: "f-bucket", class: "input" },
@@ -82,22 +90,49 @@ export function directoryFields(o, { field, update }) {
   function fillStages() {
     const allowed = bucketOf(bucket.value).stages || [];
     stage.replaceChildren(
-      ...allowed.map((id) => h("option", { value: id }, (STAGE_META[id] || {}).label || id)),
+      ...allowed.map((id) => h("option", { value: id }, `${labelOf(id)}（${id}）`)),
     );
     showStage();
   }
   function showStage() {
+    const t = typeOf(stage.value);
     const meta = STAGE_META[stage.value];
     stageHint.replaceChildren(
-      meta ? h("span", {}, `${meta.keep}。删除只有管理员能做。`) : h("span", {}, "选一类数据"),
+      t ? h("span", {}, `目录层级：${stage.value}/${t.layers.map((x) => `<${x}>`).join("/")}/`)
+        : meta ? h("span", {}, `${meta.keep}。删除只有管理员能做。`) : h("span", {}, "选一类数据"),
     );
+    fillLayers();
   }
+
+  // ②′ 词表类型的中间几层（批次 ID 以外的）：每层一个输入框。
+  //     **每一段单独填、单独校验**，不给一个能写 `/` 的整串 —— `a/../b` 能让路径跳出它那一层
+  const layersBox = h("div", { class: "field" });
+  let segInputs = [];
+  function fillLayers() {
+    const t = typeOf(stage.value);
+    const middle = t ? t.layers.filter((x) => x !== BATCH_LAYER) : [];
+    segInputs = middle.map((name, i) => {
+      const el = h("input", { id: `f-seg-${i}`, class: "input", maxlength: "63", autocomplete: "off",
+        spellcheck: "false", placeholder: name, "aria-label": name });
+      el.addEventListener("input", () => { el.classList.remove("invalid"); update(); });
+      return el;
+    });
+    layersBox.replaceChildren(
+      ...(segInputs.length ? [h("label", { for: "f-seg-0" }, middle.join(" / ")),
+        h("div", { class: "inline" }, ...segInputs),
+        h("div", { class: "hint" }, "字母、数字、点、下划线和横线，字母或数字开头")] : []),
+    );
+    layersBox.hidden = !segInputs.length;
+    if (batchRow) batchRow.hidden = Boolean(t) && t.layers[t.layers.length - 1] !== BATCH_LAYER;
+  }
+  let batchRow = null;
   bucket.addEventListener("change", () => { fillStages(); update(); });
   stage.addEventListener("change", () => { showStage(); update(); });
   fields.push(h("div", { class: "field" },
     h("label", { for: "f-stage" }, "这是什么数据"),
     stage, stageHint));
   read.stage = () => stage.value;
+  fields.push(layersBox);
 
   // ③ 批次 ID：三段拼，只有「场景」是人填的
   const iso = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10);
@@ -106,25 +141,39 @@ export function directoryFields(o, { field, update }) {
   const scene = h("input", { id: "f-scene", class: "input", maxlength: "32", autocomplete: "off", spellcheck: "false", placeholder: "kitchen" });
   const seq = h("input", { class: "input narrow", type: "number", inputmode: "numeric", min: "1", max: "99", placeholder: "序号", "aria-label": "序号（可选）" });
   const idPreview = h("code", { class: "path-preview" });
+  //: 批次 ID 里的「来源」段：老分类由 stage 决定；词表类型的来源已经是单独一层目录，
+  //: 不再往批次 ID 里重复一遍
+  const sourceOf = () => (typeOf(stage.value) ? "" : (STAGE_META[stage.value] || {}).source);
   const showId = () => {
-    const meta = STAGE_META[stage.value] || {};
-    idPreview.textContent = batchId(date.value, meta.source, scene.value.trim().toLowerCase(), seq.value) || "（还没填完）";
+    idPreview.textContent = batchId(date.value, sourceOf(), scene.value.trim().toLowerCase(), seq.value) || "（还没填完）";
   };
   for (const el of [date, scene, seq]) {
     el.addEventListener("input", () => { el.classList.remove("invalid"); showId(); update(); });
   }
-  fields.push(h("div", { class: "field" },
+  batchRow = h("div", { class: "field" },
     h("label", { for: "f-scene" }, "批次"),
     h("div", { class: "inline" }, date, scene, seq),
     h("div", { class: "hint" },
       h("span", {}, "采集日期 + 场景（英文小写，如 kitchen、pickplace）。同一天同场景有多批才填序号。"),
       h("div", { class: "id-line" }, "批次 ID ", idPreview)),
-  ));
-  read.batch = () => batchId(date.value, (STAGE_META[stage.value] || {}).source, scene.value.trim().toLowerCase(), seq.value);
-  checks.push(() => (SCENE.test(scene.value.trim().toLowerCase())
+  );
+  fields.push(batchRow);
+  read.batch = () => batchId(date.value, sourceOf(), scene.value.trim().toLowerCase(), seq.value);
+  //: 词表类型按层提交：中间几层 + 最后的批次 ID（如果这个类型有批次这一层）
+  read.segments = () => {
+    const t = typeOf(stage.value);
+    if (!t) return undefined;
+    const vals = segInputs.map((el) => el.value.trim());
+    return t.layers[t.layers.length - 1] === BATCH_LAYER ? [...vals, read.batch()] : vals;
+  };
+  checks.push(() => {
+    const bad = segInputs.find((el) => !SEGMENT.test(el.value.trim()));
+    return bad ? [bad, `「${bad.placeholder}」要填，只能用字母、数字、点、下划线和横线，字母或数字开头。`] : "";
+  });
+  checks.push(() => (batchRow.hidden || SCENE.test(scene.value.trim().toLowerCase())
     ? ""
     : [scene, scene.value.trim() ? "场景只能用小写字母、数字和横线，字母或数字开头。" : "请填一下场景，比如 kitchen。"]));
-  checks.push(() => (date.value && date.value <= today ? "" : [date, "采集日期不能晚于今天。"]));
+  checks.push(() => (batchRow.hidden || (date.value && date.value <= today) ? "" : [date, "采集日期不能晚于今天。"]));
 
   // ④ 许可证 / 来源 —— 只对开源和互联网数据要，而且是硬要求
   const license = h("input", { id: "f-license", class: "input", maxlength: "80", autocomplete: "off", placeholder: "例如 CC-BY-4.0，或抓取来源站点" });
@@ -158,16 +207,97 @@ export function directoryFields(o, { field, update }) {
   bucket.addEventListener("change", () => { licenseRow.hidden = !NEEDS_LICENSE.has(stage.value); });
   update_();
 
+  const pathOf = (p) => {
+    if (!p.bucket || !p.stage) return "";
+    const tail = Array.isArray(p.segments) ? p.segments : [p.batch];
+    return `${p.bucket}/${p.stage}/${tail.map((x) => x || "…").join("/")}/`;
+  };
   function describe(p) {
-    const meta = STAGE_META[p.stage] || {};
     if (!p.bucket || !p.stage) return "选完桶和数据类型就能看到完整路径。";
-    const path = `${p.bucket}/${p.stage}/${p.batch || "（批次未填完）"}/`;
-    return `建目录 ${path}，同时写入 _manifest.json（来源、负责人、QC 状态）。`
-      + `${meta.keep}。写入身份是${meta.writer}，你本人对它只读 —— `
-      + `要往里放数据走「访问凭证」申请，或者由流程写入。`;
+    const meta = STAGE_META[p.stage];
+    const tail = meta ? `${meta.keep}。写入身份是${meta.writer}，` : "这个目录由流程写入，";
+    return `建目录 ${pathOf(p)}，同时写入 _manifest.json（来源、负责人、QC 状态）。`
+      + `${tail}你本人对它只读 —— 要往里放数据走「访问凭证」申请，或者由流程写入。`;
   }
 
-  return { fields, read, checks, describe, pathOf: (p) => (p.bucket && p.stage ? `${p.bucket}/${p.stage}/${p.batch || ""}` : "") };
+  return { fields, read, checks, describe, pathOf };
+}
+
+// ── 新增数据类型 ───────────────────────────────────────────────────────────
+//
+// 规范要求：所有桶的一级目录只能从一张词表里取，**新增要审批**。
+// 审批通过后后端直接写进 identity/data-types.json，「新建数据目录」里就能选到它。
+
+const TYPE_KEY = /^[a-z][a-z0-9-]{1,31}$/;
+//: 这些名字在规范里有固定含义（和 datatypes.RESERVED 一致）。拿 tmp 当类型的话，
+//: tmp/ 下的数据会被 7 天清理规则一起删掉
+const RESERVED = new Set(["general", "tmp", "staging", "qc", "_misc", "_staging"]);
+
+export function splitLayers(text) {
+  return String(text || "").split(/[\s,，/、]+/).map((x) => x.trim()).filter(Boolean);
+}
+
+export function datatypeFields(o, { field, update }) {
+  const fields = [];
+  const read = {};
+  const checks = [];
+  const known = o.types || {};
+
+  const key = h("input", { id: "f-dt-key", class: "input", maxlength: "32", autocomplete: "off", spellcheck: "false", placeholder: "例如 sim-data" });
+  fields.push(field("f-dt-key", "英文名（就是一级目录名）", key,
+    `小写字母、数字和横线。已有：${Object.keys(known).join("、") || "（还没有）"}`));
+  read.key = () => key.value.trim();
+  checks.push(() => {
+    const v = key.value.trim();
+    if (!TYPE_KEY.test(v)) return [key, "英文名只能用小写字母、数字和横线，字母开头，2～32 个字符。"];
+    if (RESERVED.has(v)) return [key, `${v} 是规范里有固定含义的目录名，不能当数据类型。`];
+    if (known[v]) return [key, `已经有 ${v}（${known[v].label}）了。`];
+    return "";
+  });
+
+  const label = h("input", { id: "f-dt-label", class: "input", maxlength: "20", autocomplete: "off", placeholder: "例如 仿真数据" });
+  fields.push(field("f-dt-label", "中文名", label, "申请页上给人看的名字"));
+  read.label = () => label.value.trim();
+  checks.push(() => (label.value.trim() ? "" : [label, "中文名要填。"]));
+
+  const layers = h("input", { id: "f-dt-layers", class: "input", autocomplete: "off", value: "来源 批次ID" });
+  const preview = h("code", { class: "path-preview" });
+  const show = () => { preview.textContent = `${key.value.trim() || "<英文名>"}/${splitLayers(layers.value).map((x) => `<${x}>`).join("/")}/`; };
+  fields.push(h("div", { class: "field" },
+    h("label", { for: "f-dt-layers" }, "下面几层"),
+    layers,
+    h("div", { class: "hint" }, "用空格或逗号隔开，最多 4 层；有批次的话「批次ID」放最后。",
+      h("div", { class: "id-line" }, "目录长这样 ", preview))));
+  read.layers = () => splitLayers(layers.value);
+  checks.push(() => {
+    const got = splitLayers(layers.value);
+    if (!got.length || got.length > 4) return [layers, "层级要有 1～4 层。"];
+    if (new Set(got).size !== got.length) return [layers, "层名重复了。"];
+    if (got.includes("批次ID") && got[got.length - 1] !== "批次ID") return [layers, "「批次ID」只能是最后一层。"];
+    return "";
+  });
+
+  const boxes = (o.buckets || []).map((b) => {
+    const box = h("input", { type: "checkbox", class: "check", value: b.name, id: `f-dt-b-${b.name}` });
+    box.addEventListener("change", update);
+    return { box, row: h("label", { class: "check-row", for: `f-dt-b-${b.name}` }, box, `${b.name}（${b.region}）`) };
+  });
+  fields.push(h("div", { class: "field" }, h("label", {}, "用在哪些桶"), ...boxes.map((x) => x.row),
+    h("div", { class: "hint" }, "同一个类型在所有桶里层级都一样，搬运才能只换桶名。")));
+  read.buckets = () => boxes.filter((x) => x.box.checked).map((x) => x.box.value);
+  checks.push(() => (boxes.some((x) => x.box.checked) ? "" : [boxes[0]?.box, "至少选一个桶。"]));
+
+  for (const el of [key, label, layers]) {
+    el.addEventListener("input", () => { el.classList.remove("invalid"); show(); update(); });
+  }
+  show();
+
+  function describe(p) {
+    if (!p.key) return "填完英文名就能看到目录的样子。";
+    return `审批通过后 ${p.key}/${(p.layers || []).map((x) => `<${x}>`).join("/")}/ 会加入数据类型词表，`
+      + `${(p.buckets || []).join("、") || "（还没选桶）"} 的「新建数据目录」里就能选它。`;
+  }
+  return { fields, read, checks, describe };
 }
 
 // ── 数据迁移 ───────────────────────────────────────────────────────────────

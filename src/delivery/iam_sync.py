@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import iam_export
+from . import platforms as platforms_mod
 from .errors import DeliveryError
 
 #: 发给 IT 的属性表存档目录（identity/ 整体 gitignore）
@@ -217,6 +218,10 @@ def build_rows(index, specs: dict) -> list:
 
         by_scope: dict = {}
         for ref in person.accounts:
+            # 人工登记的平台（九章）不走公司 SSO，属性表里没它的位置。不跳过的话每个人
+            # 多出一行「未配置应用标识」的 skip，每次导出发给 IT 的增量里都带着这堆噪音
+            if ref.scope.split("/", 1)[0] not in platforms_mod.IDS:
+                continue
             by_scope.setdefault(ref.scope, []).append(ref.name)
         for scope, names in sorted(by_scope.items()):
             spec = specs.get(scope)

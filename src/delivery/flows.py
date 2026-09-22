@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Mapping, Optional, Sequence
 
 from . import catalog as catalog_mod
+from . import datatypes as datatypes_mod
 from . import grants as grants_mod
 from . import notify as notify_mod
 from . import platforms as platforms_mod
@@ -355,6 +356,11 @@ def password_claims(ticket: dict) -> int:
     return events.count("password_issued") - events.count("password_failed")
 
 
+#: 这几类数据必须写明许可证或来源站点。出合规问题时那是唯一能自证的东西。
+#: 旧分类（opensource / web）和词表里的新名字（public-datasets / internet）都算
+_NEEDS_LICENSE = frozenset({"opensource", "web", "public-datasets", "internet"})
+
+
 class Flows:
     def __init__(
         self,
@@ -459,9 +465,10 @@ class Flows:
                 elif created is not None:
                     username = (created.get("payload") or {}).get("username", "")
                     state, note = "owned", f"子账号 {username} 已开通，名册刷新后显示"
-            elif tpl.kind in catalog_mod.AWAIT_FULFIL:
+            elif tpl.kind in catalog_mod.AWAIT_FULFIL or tpl.kind == catalog_mod.KIND_DATATYPE:
                 # 面板不创建资源 / 不建目录 / 不搬数据：既不需要开通身份，
-                # 也不要求申请人先有子账号。拿这个当门槛只会把提需求的人挡在外面
+                # 也不要求申请人先有子账号。拿这个当门槛只会把提需求的人挡在外面。
+                # 「新增数据类型」同理：它只改一个词表文件，不碰云（审计 L-3）
                 pass
             elif self._executor_ready is not None and not self._executor_ready(
                 tpl.platform, tpl.account
@@ -864,6 +871,8 @@ class Flows:
             return self._validate_storage(tpl, payload, where)
         if tpl.kind == catalog_mod.KIND_TRANSFER:
             return self._validate_transfer(tpl, payload, where)
+        if tpl.kind == catalog_mod.KIND_DATATYPE:
+            return self._validate_datatype(tpl, payload, where)
         username = str(payload.get("username") or "").strip()
         if not re.fullmatch(tpl.username_pattern, username) or not _SAFE_USERNAME.match(username):
             raise FlowError(
@@ -1004,26 +1013,78 @@ class Flows:
         stage = str(payload.get("stage") or "").strip()
         if stage not in tpl.stages.get(bucket, ()):
             raise FlowError(f"{bucket} 不放这一类数据")
-        batch = str(payload.get("batch") or "").strip()
-        if not self._BATCH.match(batch):
-            raise FlowError(
-                "批次 ID 只能用字母、数字、点、下划线和横线，字母或数字开头，最长 63 位"
-            )
+        meta = tpl.types.get(stage)
+        if meta:
+            # 词表里的类型：层级由词表定，**每一层都要填**。少一层或多一层，
+            # 同一个类型在不同桶里深度就不一样了，「只换桶名」的搬运不再成立
+            parts = self._segments(meta, payload)
+            batch = parts[-1] if meta["layers"][-1] == datatypes_mod.BATCH else ""
+        else:
+            batch = str(payload.get("batch") or "").strip()
+            if not self._BATCH.match(batch):
+                raise FlowError(
+                    "批次 ID 只能用字母、数字、点、下划线和横线，字母或数字开头，最长 63 位"
+                )
+            parts = [batch]
         license_ = str(payload.get("license") or "").strip()[:80]
-        if stage in ("opensource", "web") and not license_:
+        if stage in _NEEDS_LICENSE and not license_:
             # 出合规问题时这是唯一能自证的东西
             raise FlowError("开源和互联网数据必须写明许可证或来源站点")
         size = str(payload.get("size") or "").strip()[:20]
-        path = f"{bucket}/{stage}/{batch}/"
+        path = f"{bucket}/{stage}/" + "".join(f"{x}/" for x in parts)
         clean = {
             "bucket": bucket,
             "stage": stage,
             "batch": batch,
+            "segments": parts,
             "license": license_,
             "size": size,
             "path": path,
         }
         return clean, f"{path}（{allowed[bucket]}）" + (f"，约 {size}" if size else "")
+
+    def _segments(self, meta: dict, payload: dict) -> list:
+        """按词表登记的层级，把申请里每一层的值取出来、逐段校验。
+
+        **每一段单独校验，不接受带 `/` 的整串**：一个 `a/../b` 能让路径跳出它该在的那一层，
+        而拼出来的路径会进 OSS key、进 RAM 策略的 `oss:Prefix` 条件。
+        """
+        raw = payload.get("segments")
+        layers = meta["layers"]
+        if not isinstance(raw, list) or len(raw) != len(layers):
+            raise FlowError(f"「{meta['label']}」要依次填：{' / '.join(layers)}")
+        out = []
+        for name, value in zip(layers, raw):
+            got = str(value or "").strip()
+            if not self._BATCH.match(got):
+                raise FlowError(
+                    f"「{name}」只能用字母、数字、点、下划线和横线，字母或数字开头，最长 63 位"
+                )
+            out.append(got)
+        return out
+
+    def _validate_datatype(self, tpl: catalog_mod.Template, payload: dict, where: str) -> tuple:
+        """新增数据类型。**写进词表之前先按词表自己的规则校验一遍** ——
+        审批通过后才发现层名不合法，这张单子就只能失败，白走一轮审批。"""
+        catalog = self._catalog()
+        try:
+            key = datatypes_mod.check_key(payload.get("key"), where)
+            layers = datatypes_mod.check_layers(payload.get("layers"), where)
+        except datatypes_mod.DataTypeError as exc:
+            raise FlowError(str(exc)) from None
+        if key in catalog.datatypes.types:
+            raise FlowError(f"词表里已经有 {key!r}（{catalog.datatypes.types[key]['label']}）了")
+        label = re.sub(r"\s+", " ", str(payload.get("label") or "")).strip()
+        if not label or len(label) > 20:
+            raise FlowError("中文名要填，最多 20 个字")
+        allowed = [n for n, _ in tpl.buckets]
+        buckets = [str(b) for b in payload.get("buckets") or [] if str(b) in allowed]
+        if not buckets:
+            raise FlowError("至少选一个桶 —— 不属于任何桶的类型没人用得上")
+        reason = re.sub(r"\s+", " ", str(payload.get("note") or "")).strip()[:200]
+        clean = {"key": key, "label": label, "layers": layers, "buckets": buckets, "note": reason}
+        shape = "/".join(f"<{x}>" for x in layers)
+        return clean, f"新增数据类型 {key}（{label}）：{key}/{shape}/，用在 {'、'.join(buckets)}"
 
     def _validate_transfer(self, tpl: catalog_mod.Template, payload: dict, where: str) -> tuple:
         """数据迁移。两个路径各自过格式白名单，桶必须在模板里。
@@ -1882,6 +1943,28 @@ class Flows:
             #     return f"已建好 {ex.make_dir(payload['bucket'], …, region)}"
             # 并把 KIND_STORAGE 从 catalog.AWAIT_FULFIL 里移走
             return f"审批通过：建 {payload['path']}，等人按规范创建后回来登记"
+        if tpl.kind == catalog_mod.KIND_DATATYPE:
+            # **审批通过就写进词表**，不停在「待开通」：这一步只是改一个文件，
+            # 没有需要人去云上做的事。写之前 append 会整张表再校验一遍、同名不覆盖
+            catalog = self._catalog()
+            if not catalog.datatypes_path:
+                raise FlowError("找不到数据类型词表的位置，没法写", 500)
+            try:
+                datatypes_mod.append(
+                    catalog.datatypes_path,
+                    key=payload["key"],
+                    label=payload["label"],
+                    layers=payload["layers"],
+                    buckets=payload["buckets"],
+                    note=payload.get("note", ""),
+                )
+            except datatypes_mod.DataTypeError as exc:
+                raise FlowError(str(exc), 409) from None
+            shape = "/".join(f"<{x}>" for x in payload["layers"])
+            return (
+                f"已加入数据类型词表：{payload['key']}/{shape}/（{payload['label']}），"
+                f"「新建数据目录」里 {'、'.join(payload['buckets'])} 现在能选它了"
+            )
         if tpl.kind == catalog_mod.KIND_TRANSFER:
             return (
                 f"审批通过：{payload['source']} → {payload['dest']}，等人发起搬运后回来登记任务号"

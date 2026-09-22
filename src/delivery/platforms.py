@@ -179,6 +179,9 @@ ALL = (ALIYUN, VOLCANO)
 BY_ID = {p.id: p for p in ALL}
 IDS = tuple(p.id for p in ALL)
 NAMES = {p.id: p.name for p in ALL}
+#: 没有采集接口、账号靠人工登记的平台（见 offline_accounts）。**只有显示名**：
+#: 它们不是可申请的平台，不进 ALL / IDS —— 放进去的话申请模板、凭证发放都会以为能用
+NAMES.update({"jiuzhang": "九章"})
 
 
 def get(platform: str) -> Platform:

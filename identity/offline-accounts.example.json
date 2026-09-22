@@ -1,0 +1,21 @@
+{
+  "_": "没有采集接口的平台，账号靠人工登记。每轮刷新合进快照和名册。**不登记手机号**。规则见 src/delivery/offline_accounts.py。",
+  "accounts": [
+    {
+      "platform": "jiuzhang",
+      "account": "wuji",
+      "source": "九章控制台导出（示例）",
+      "users": [
+        {
+          "name": "zhangsan",
+          "login": "wuji-zhangsan",
+          "display_name": "张三",
+          "email": "zhang.san@example.com",
+          "status": "正常",
+          "created": "2026-01-01 00:00:00"
+        }
+      ],
+      "as_of": "2026-01-01"
+    }
+  ]
+}

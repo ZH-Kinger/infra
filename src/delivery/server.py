@@ -57,6 +57,7 @@ from . import health as health_mod
 from . import notify as notify_mod
 from . import nudge as nudge_mod
 from . import people as people_mod
+from . import platforms as platforms_mod
 from . import policies as policies_mod
 from . import review as review_mod
 from . import revoke as revoke_mod
@@ -907,9 +908,18 @@ class Backend:
         return out
 
     def catalog(self):
-        return self._cached(
-            "catalog", self._stamp(self.templates_path), lambda: load_catalog(self.templates_path)
+        # **三个文件一起看修改时间**：模板、旁边的数据类型词表、地域登记表。
+        # 只看模板的话，「新增数据类型」审批通过、词表写好了，服务里的缓存却不失效 ——
+        # 申请页选不到新类型，查重也还用旧表，而单子上写着「现在能选它了」（审计 M-1）
+        from . import datatypes as datatypes_mod
+        from . import workspaces as workspaces_mod
+
+        stamp = self._stamp(
+            self.templates_path,
+            datatypes_mod.beside(self.templates_path),
+            workspaces_mod.beside(self.templates_path),
         )
+        return self._cached("catalog", stamp, lambda: load_catalog(self.templates_path))
 
     def approval(self) -> Optional[FeishuApproval]:
         def build():
@@ -1063,7 +1073,9 @@ def make_handler(
     downloads_dir: str = "",
 ):
     """proxy 不为空即代理登录模式：只认 oauth2-proxy 注入的请求头，飞书登录路由关闭。"""
-    backend = backend or Backend(platforms={p.id: p.display for p in registry})
+    backend = backend or Backend(
+        platforms={**platforms_mod.NAMES, **{p.id: p.display for p in registry}}
+    )
 
     def _claim_resources(platform: str, account: str, ids: list, email: str) -> None:
         """资源登记完把实例指给申请人。**开通那一刻是唯一确定主人的时机**，错过只能靠猜。
@@ -2501,7 +2513,7 @@ def serve(
         bindings_path=bindings_path,
         admins_path=admins_path,
         labels_path=labels_path,
-        platforms={p.id: p.display for p in registry},
+        platforms={**platforms_mod.NAMES, **{p.id: p.display for p in registry}},
         proposal_path=proposal_path,
         manual_path=manual_path,
         tickets_path=tickets_path,

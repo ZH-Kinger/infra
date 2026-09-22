@@ -33,11 +33,14 @@ STATUS_BLOCKED = "blocked"
 SOURCE_RAM_EMAIL = "ram_email"  # RAM 用户基本信息里的邮箱，由管理员或审批建号流程写入
 SOURCE_SECURITY_EMAIL = "security_email"  # 阿里云安全邮箱（IMS），有已验证/未验证之分
 SOURCE_IAM_EMAIL = "iam_email"  # 火山 IAM 用户邮箱，有 EmailIsVerify
+#: 没有采集接口的平台（九章），邮箱来自控制台导出、由管理员录入 —— 见 offline_accounts
+SOURCE_ADMIN_EXPORT = "admin_export"
 
 _SOURCE_LABEL = {
     SOURCE_RAM_EMAIL: "RAM 用户邮箱字段",
     SOURCE_SECURITY_EMAIL: "安全邮箱",
     SOURCE_IAM_EMAIL: "IAM 用户邮箱",
+    SOURCE_ADMIN_EXPORT: "控制台导出（管理员录入）",
 }
 
 
@@ -59,7 +62,8 @@ class EmailClaim:
 
     def describe(self) -> str:
         label = _SOURCE_LABEL.get(self.source, self.source)
-        if self.source == SOURCE_RAM_EMAIL:
+        # 这两类没有「本人验证」这回事，由管理员写入 —— 再挂一个「（已验证）」是在编造状态
+        if self.source in (SOURCE_RAM_EMAIL, SOURCE_ADMIN_EXPORT):
             return label
         return f"{label}（{'已验证' if self.verified else '未验证'}）"
 

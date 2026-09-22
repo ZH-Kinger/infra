@@ -8,18 +8,19 @@
 //     被转发，登录态也可能留在别人电脑上；审批实例只有申请人和审批人看得到。
 
 import { ago, api, ApiError, apiPost, copyButton, fill, fmtTime, h, mount, openDrawer, PLATFORM_NAME, platformTag, requestTitle, safeHttps } from "./core.js";
-import { directoryFields, transferFields } from "./storage.js";
+import { datatypeFields, directoryFields, transferFields } from "./storage.js";
 
-const KIND_ORDER = ["permission", "credential", "storage", "transfer", "resource", "account"];
+const KIND_ORDER = ["permission", "credential", "storage", "transfer", "resource", "account", "datatype"];
 const KIND_INFO = {
-  permission: { title: "云账号权限", desc: "给你已有的子账号加上某项权限，比如 OSS 只读。" },
+  permission: { title: "云账号权限", desc: "给你已有的子账号加上某项权限，比如 OSS 只读，或者加入某个地域的 PAI 工作空间。" },
   credential: { title: "访问凭证", desc: "申请一份数据访问密钥。审批通过后直接发到审批评论里，到期自动失效。" },
   storage: { title: "数据目录", desc: "在数据桶里开一个新批次的目录。按数据类型放，生命周期和权限跟着类型走。" },
   transfer: { title: "数据迁移", desc: "把一个目录搬到另一个地方。填两个路径，走哪条链路由系统判断。" },
   resource: { title: "资源开通", desc: "ECS、RDS 这类要单独开的资源。审批通过后由管理员按流程创建。" },
   account: { title: "开账号", desc: "在还没有账号的云上开一个子账号。" },
+  datatype: { title: "数据类型", desc: "给数据桶加一种新的一级目录。所有桶共用一张词表，新增要审批。" },
 };
-const KIND_KEY_LABEL = { permission: "权限包", policy: "权限策略", credential: "访问凭证", storage: "数据目录", transfer: "数据迁移", resource: "资源", account: "开账号" };
+const KIND_KEY_LABEL = { permission: "权限包", policy: "权限策略", credential: "访问凭证", storage: "数据目录", transfer: "数据迁移", resource: "资源", account: "开账号", datatype: "数据类型" };
 const CAP_LABEL = { list: "查看清单", download: "下载", write: "上传" };
 const RISK = { low: ["低风险", "good"], medium: ["中风险", "warn"], high: ["高风险", "crit"] };
 const STATUS_TONE = {
@@ -442,8 +443,9 @@ export function requestRoutes(ctx) {
       fields.push(field("f-hours", "用多久", h("div", { class: "inline" }, amount, unit, presets), `最长 ${duration(o.max_hours)}`));
       read.hours = toHours;
       checks.push(() => (toHours() >= 1 && toHours() <= o.max_hours ? "" : [amount, `时长要在 1 小时到 ${duration(o.max_hours)} 之间。`]));
-    } else if (o.kind === "storage" || o.kind === "transfer") {
-      const part = (o.kind === "storage" ? directoryFields : transferFields)(o, { field, update: () => update() });
+    } else if (o.kind === "storage" || o.kind === "transfer" || o.kind === "datatype") {
+      const make = { storage: directoryFields, transfer: transferFields, datatype: datatypeFields }[o.kind];
+      const part = make(o, { field, update: () => update() });
       fields.push(...part.fields);
       Object.assign(read, part.read);
       checks.push(...part.checks);

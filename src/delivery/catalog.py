@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Optional
 
+from . import datatypes as datatypes_mod
 from . import platforms as platforms_mod
 from . import workspaces as workspaces_mod
 from .errors import DeliveryError
@@ -36,6 +37,9 @@ KIND_RESOURCE = "resource"
 KIND_STORAGE = "storage"
 #: 把一个目录搬到另一个地方。搬运能力在别处（六条链），这里只管审批和台账。
 KIND_TRANSFER = "transfer"
+#: 往数据类型词表里加一个词（一级目录）。规范要求「新增数据类型要审批」——
+#: 审批通过后直接写进 identity/data-types.json，不停在「待开通」
+KIND_DATATYPE = "datatype"
 KINDS = (
     KIND_ACCOUNT,
     KIND_PERMISSION,
@@ -43,6 +47,7 @@ KINDS = (
     KIND_STORAGE,
     KIND_TRANSFER,
     KIND_RESOURCE,
+    KIND_DATATYPE,
 )
 KIND_LABELS = {
     KIND_ACCOUNT: "开账号",
@@ -51,6 +56,7 @@ KIND_LABELS = {
     KIND_STORAGE: "数据目录",
     KIND_TRANSFER: "数据迁移",
     KIND_RESOURCE: "资源开通",
+    KIND_DATATYPE: "数据类型",
 }
 #: 停在「待开通」等人执行的那几类。
 #:
@@ -143,6 +149,9 @@ class Template:
     caps: tuple = ()
     #: credential：允许申请的桶白名单，((桶名, 地域), ...)
     buckets: tuple = ()
+    #: 数据类型的元信息（中文名、层级），来自 identity/data-types.json。
+    #: storage 模板只带自己桶里用得到的那几个；datatype 模板带整张词表（给申请人看有哪些了）
+    types: dict = field(default_factory=dict, compare=False)
     #: 并行文件系统（CPFS / vePFS）。形状见 `_filesystems()`
     filesystems: tuple = field(default_factory=tuple, compare=False)
     #: credential：允不允许申请人把范围收窄到某个子目录
@@ -290,6 +299,14 @@ class Template:
                 }
                 for n, r in self.buckets
             ],
+            "types": (
+                {
+                    k: {"label": v["label"], "layers": list(v["layers"])}
+                    for k, v in self.types.items()
+                }
+                if self.kind in (KIND_STORAGE, KIND_DATATYPE)
+                else {}
+            ),
             "allow_prefix": self.allow_prefix if self.kind == KIND_CREDENTIAL else False,
             "whole_bucket": self.whole_bucket if self.kind == KIND_CREDENTIAL else False,
             "max_days": self.max_days if self.kind in (KIND_PERMISSION, KIND_RESOURCE) else 0,
@@ -349,6 +366,7 @@ _COMMON = {"id", "kind", "platform", "account", "title", "description", "risk", 
 _BY_KIND = {
     KIND_ACCOUNT: {"groups", "username_pattern", "console_login", "workspaces"},
     KIND_STORAGE: {"buckets", "stages"},
+    KIND_DATATYPE: {"buckets"},
     KIND_TRANSFER: {"buckets", "filesystems"},
     KIND_PERMISSION: {"groups", "max_days", "workspaces"},
     KIND_CREDENTIAL: {"role_arn", "max_hours", "caps", "buckets", "allow_prefix", "whole_bucket"},
@@ -383,7 +401,27 @@ STAGES = (
 )
 
 
-def _stages(spec: dict, buckets: tuple, where: str) -> dict:
+def _stages_from(buckets: tuple, where: str, types) -> dict:
+    """模板没写 stages：每个桶能放哪几类数据，**直接照数据类型词表**。
+
+    这是新写法 —— 分类只在词表里维护一份。模板里再抄一份的话，词表加了新类型、
+    模板没跟着改，申请页上就选不到它，而没有任何报错提醒这件事。
+    """
+    if not types:
+        raise CatalogError(
+            f"{where}：没写 stages，也没有数据类型词表（{datatypes_mod.FILENAME}）—— "
+            "不知道每个桶能放哪几类数据"
+        )
+    out = {}
+    for name, _ in buckets:
+        keys = types.for_bucket(name)
+        if not keys:
+            raise CatalogError(f"{where}：数据类型词表里没说桶 {name!r} 能放什么")
+        out[name] = keys
+    return out
+
+
+def _stages(spec: dict, buckets: tuple, where: str, types=None) -> dict:
     """`{"桶名": ["raw-ego", "label"]}` —— 这个桶允许在哪些 stage 下建目录。
 
     **桶必须在 buckets 里**：写了一个不在白名单里的桶名，等于悄悄多开一个可申请的位置。
@@ -398,7 +436,7 @@ def _stages(spec: dict, buckets: tuple, where: str) -> dict:
             raise CatalogError(f"{where}：stages 里的 {name!r} 不在 buckets 里")
         if not isinstance(items, list) or not items:
             raise CatalogError(f"{where}：stages[{name!r}] 必须是非空数组")
-        bad = [x for x in items if x not in STAGES]
+        bad = [x for x in items if x not in STAGES and not (types and x in types.types)]
         if bad:
             raise CatalogError(
                 f"{where}：stages[{name!r}] 里不认识的 stage {bad[0]!r}，"
@@ -844,7 +882,7 @@ def _cost_centers(spec: dict, where: str) -> tuple:
     return tuple(out)
 
 
-def parse_template(spec: object, index: int, registry=None) -> Template:
+def parse_template(spec: object, index: int, registry=None, types=None) -> Template:
     where = f"templates[{index}]"
     if not isinstance(spec, dict):
         raise CatalogError(f"{where} 必须是对象")
@@ -934,10 +972,25 @@ def parse_template(spec: object, index: int, registry=None) -> Template:
         # 它把事情问清楚、走审批、留台账，执行的人照着单子做。
         kw["buckets"] = _buckets(spec, where)
         if kind == KIND_STORAGE:
-            kw["stages"] = _stages(spec, kw["buckets"], where)
+            if "stages" in spec:
+                kw["stages"] = _stages(spec, kw["buckets"], where, types)
+            else:
+                kw["stages"] = _stages_from(kw["buckets"], where, types)
+            used = {k for keys in kw["stages"].values() for k in keys}
+            kw["types"] = {k: types.types[k] for k in sorted(used) if types and k in types.types}
         else:
             # 并行文件系统（预热 / 沉降那两条链）。和桶分两份登记 —— 见 `_filesystems`
             kw["filesystems"] = _filesystems(spec.get("filesystems"), where)
+    elif kind == KIND_DATATYPE:
+        if not types:
+            raise CatalogError(
+                f"{where}：没有数据类型词表（{datatypes_mod.FILENAME}），「新增数据类型」无处可写"
+            )
+        kw["buckets"] = _buckets(spec, where)
+        stray = [n for n, _ in kw["buckets"] if n not in types.buckets]
+        if stray:
+            raise CatalogError(f"{where}：桶 {stray[0]!r} 不在数据类型词表的 buckets 里")
+        kw["types"] = dict(types.types)
     elif kind == KIND_RESOURCE:
         kw["max_days"] = _int(spec, "max_days", where, 0, 0, 3650)
         kw["options"] = _options(spec, where)
@@ -1030,6 +1083,9 @@ def parse_template(spec: object, index: int, registry=None) -> Template:
 @dataclass(frozen=True)
 class Catalog:
     templates: tuple = ()
+    #: 数据类型词表。「新增数据类型」申请靠它查重，审批通过后往 datatypes_path 里写
+    datatypes: object = field(default_factory=lambda: datatypes_mod.Registry(), compare=False)
+    datatypes_path: str = ""
 
     def get(self, template_id: str) -> Optional[Template]:
         return next((t for t in self.templates if t.id == template_id), None)
@@ -1038,18 +1094,18 @@ class Catalog:
         return tuple(t for t in self.templates if t.kind == kind)
 
 
-def parse(data: object, registry=None) -> Catalog:
+def parse(data: object, registry=None, types=None) -> Catalog:
     if not isinstance(data, dict) or data.get("schema") != SCHEMA:
         raise CatalogError(f"模板目录 schema 必须是 {SCHEMA}")
     items = data.get("templates")
     if not isinstance(items, list):
         raise CatalogError("模板目录缺 templates 数组")
-    templates = [parse_template(spec, i, registry) for i, spec in enumerate(items)]
+    templates = [parse_template(spec, i, registry, types) for i, spec in enumerate(items)]
     ids = [t.id for t in templates]
     dup = sorted({i for i in ids if ids.count(i) > 1})
     if dup:
         raise CatalogError(f"模板 id 重复：{', '.join(dup)}")
-    return Catalog(tuple(templates))
+    return Catalog(tuple(templates), datatypes=types or datatypes_mod.Registry())
 
 
 def load(path: Optional[str], registry=None) -> Catalog:
@@ -1067,4 +1123,10 @@ def load(path: Optional[str], registry=None) -> Catalog:
         raise CatalogError(f"读不了模板目录 {path}：{exc}") from exc
     if registry is None:
         registry = workspaces_mod.load(workspaces_mod.beside(path))
-    return parse(data, registry)
+    types_path = datatypes_mod.beside(path)
+    try:
+        types = datatypes_mod.load(types_path)
+    except datatypes_mod.DataTypeError as exc:
+        raise CatalogError(str(exc)) from None
+    got = parse(data, registry, types)
+    return Catalog(got.templates, datatypes=got.datatypes, datatypes_path=types_path or "")

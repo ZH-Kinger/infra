@@ -1,0 +1,73 @@
+{
+  "_": "数据类型词表：所有桶的一级目录只能从这里取。新增走面板的「新增数据类型」申请，审批通过后自动写进来。规范见 docs/collab/planning/oss-storage-spec.md。",
+  "types": {
+    "third-party-data": {
+      "label": "供应商数据",
+      "layers": [
+        "供应商",
+        "批次ID"
+      ]
+    },
+    "internet": {
+      "label": "互联网数据",
+      "layers": [
+        "来源",
+        "批次ID"
+      ]
+    },
+    "public-datasets": {
+      "label": "开源数据集",
+      "layers": [
+        "数据集名"
+      ]
+    },
+    "teleop": {
+      "label": "真机数据",
+      "layers": [
+        "设备或场地",
+        "批次ID"
+      ]
+    },
+    "label": {
+      "label": "标注成品",
+      "layers": [
+        "来源",
+        "版本",
+        "批次ID"
+      ]
+    },
+    "processed": {
+      "label": "加工产出",
+      "layers": [
+        "来源或项目",
+        "批次ID"
+      ]
+    }
+  },
+  "buckets": {
+    "wuji-provider-hz": [
+      "third-party-data",
+      "internet"
+    ],
+    "wuji-bucket-hangzhou": [
+      "third-party-data",
+      "internet",
+      "public-datasets",
+      "teleop"
+    ],
+    "wuji-sing": [
+      "third-party-data",
+      "internet",
+      "public-datasets",
+      "teleop"
+    ],
+    "wuji-processed-hz": [
+      "label",
+      "processed"
+    ],
+    "wuji-processed-sing": [
+      "label",
+      "processed"
+    ]
+  }
+}

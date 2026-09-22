@@ -89,3 +89,13 @@ tester 报了 1 个阻塞 bug + 3 个缺口 + 2 个 nit，全部已修：
 [2026-09-22] [AUDITOR] infra 面板三审（R1-R4）：闸门通过。遗留两处小瑕疵——move_cred_left 存的是原始错误文本，文本每次不同时仍会每轮写一次；关单确认文案没区分同云和数据流动的情况；首单真实预热要用小目录盯着跑完。
 
 [2026-09-22 DEV] 两处小瑕疵已修：move_cred_left 落盘前经 mover._stable 抹掉 RequestId/UUID；关单文案区分跨云（钥匙撤、任务失败）与同云/数据流动（云上任务照常跑完）。
+
+[2026-09-22 DEV] CPFS 预热 / 沉降真机实跑通过（走面板 mover 代码路径）：oss://wuji-datasets-hz-6c661af0/_panel-selftest/20260922/ → cpfs /share/datasets/_panel-selftest/20260922/（task-00524a83c0d04041，90s，43B/1 文件），再沉降回 _panel-selftest/20260922-sink/（task-00bbc6b6551ce689），原件与回程逐字节一致。OSS 测试对象已删；CPFS 上留一个 43B 的 hello.txt（面板无删 CPFS 权限，刻意）。vePFS 方向仍只过了只读接口，未实跑。
+
+[2026-09-22] [AUDITOR] infra 数据类型词表：闸门通过（无 High）。Medium 两条待修——server.catalog 缓存只看模板文件的修改时间，data-types.json 和 workspaces.json 改了不会生效（新类型批完选不到）；datatypes.append 不加锁，并发会丢写。Low：写成功但单子没落盘时重试会误判失败、note 没写进词表、datatype 模板被子账号门挡住。
+
+[2026-09-22] [AUDITOR] infra 九章人工登记 + M-1/M-2 修复：闸门通过（无 High）。M-A：inventory.parse 丢了 source，页面看不出登记表过期，漏报风险在登记之后新开的号；Low：离职提示没说去九章控制台、iam 导出多出 skip 行、前端没有九章显示名、登记表权限应为 600。
+
+[2026-09-22] [AUDITOR] infra 九章人工登记修复（M-A, L-a~L-d）：闸门通过。L-d 登记表权限不对就整轮不刷新，这个取舍可以接受——每轮都会发飞书告警，快照和名册保持不动；遗留：失败时报告在日志里打印两次，refresh 单元的 OnFailure 兜底还没启用（老问题）。
+
+[2026-09-22 DEV] 上面各轮的 Medium / Low 已修（遗留的两条小瑕疵除外）。新建 wuji-provider-hz / wuji-processed-hz / wuji-processed-sing 三个桶；wuji-bucket-hangzhou 不配旧版本清理（用户决定）。九章 18 人按邮箱关联进名册，账号 ID 暂填 wuji，待确认。

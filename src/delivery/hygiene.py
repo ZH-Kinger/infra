@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Optional
 
-from . import inventory
+from . import inventory, offline_accounts, platforms
 
 #: AK 建出来多久算该轮换。看的是**年龄**不是「最近用没用」——
 #: 一把天天在用的老 AK 才是最该换的那种
@@ -537,6 +537,7 @@ def build(
         owner = _owner_of(person)
         owner_uid = _owner_uid(person)
 
+        manual = _offline_note(snapshot, user)
         if person is None and _is_service(user.name, known_services):
             # 服务号不进无主清单，但下面的 AK 检查照常 —— 服务号的 AK 才最容易被忘掉
             pass
@@ -548,7 +549,7 @@ def build(
                     account=user.account,
                     subject=user.name,
                     why="名册里认不出这个号是谁的",
-                    detail=user.display_name or "",
+                    detail=" ".join(x for x in (user.display_name or "", manual) if x),
                 )
             )
         elif person.union_id and statuses is not None and person.union_id in statuses:
@@ -563,7 +564,7 @@ def build(
                         subject=user.name,
                         owner=owner,
                         why="飞书里查不到这个人（不在应用可用范围内，或已被移出通讯录）",
-                        detail=akn,
+                        detail=manual or akn,
                     )
                 )
             elif _gone(st):
@@ -575,7 +576,7 @@ def build(
                         subject=user.name,
                         owner=owner,
                         why=_gone(st),
-                        detail=akn,
+                        detail=manual or akn,
                     )
                 )
 
@@ -615,6 +616,17 @@ def build(
         # `summary()["incomplete"]` 为 False —— 定时任务据此判定「一切正常」，
         # 而实际上离职这一类**一个人都没查**
         report.skipped.append("在职状态一个人都没查到（名册里没有 union_id），本次不判断谁离职")
+    for scope, meta in sorted((snapshot.offline or {}).items()):
+        age = _days_since(meta.get("as_of", ""), now)
+        if age is None or age > offline_accounts.STALE_DAYS:
+            # **过时的方向是漏报**：登记之后新开的号不在表里，那个人离职时这里完全看不到它。
+            # 多报一条（表里写着正常、其实已停用）人去核一眼就行；漏报才是这类检查要防的
+            report.skipped.append(
+                f"{platforms.name_of(scope.split('/')[0])}（{scope}）是人工登记的，"
+                f"截至 {meta.get('as_of') or '未知'}"
+                + (f"，已经 {age} 天没更新" if age is not None else "")
+                + " —— 之后新开的号这里看不到，离职检查可能漏报。重新导出一份更新登记表"
+            )
     if all(u.keys is None for u in snapshot.users) and snapshot.users:
         report.skipped.append("一个账号的 AK 都没采到 —— 检查采集身份有没有 ram:ListAccessKeys")
 
@@ -676,3 +688,27 @@ def view(report: Report) -> dict:
         ],
         "skipped": list(report.skipped),
     }
+
+
+def _offline_note(snapshot, user) -> str:
+    """人工登记平台上的账号：说清楚「面板管不了，去哪儿处理」和「这是截至哪天的登记」。
+
+    不说的话，体检页上九章的号和阿里的号长得一样，人会以为面板能收、或者以为这是实时数据。
+    """
+    meta = (getattr(snapshot, "offline", None) or {}).get(f"{user.platform}/{user.account}")
+    if not meta:
+        return ""
+    name = platforms.name_of(user.platform)
+    return (
+        f"{name}没有接入面板，请到{name}控制台处理（人工登记，截至 {meta.get('as_of') or '未知'}）"
+    )
+
+
+def _days_since(day: str, now) -> Optional[int]:
+    from datetime import datetime
+
+    try:
+        then = datetime.strptime(str(day), "%Y-%m-%d").timestamp()
+    except ValueError:
+        return None
+    return int(((now if now is not None else time.time()) - then) // 86400)

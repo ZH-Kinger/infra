@@ -1867,6 +1867,16 @@ def _refresh_locked(args, report) -> Optional[int]:
             )
         report.problems.extend(baseline_errors)
         profiles = args.aliyun_profile or ["ALIYUN"]
+        from . import offline_accounts as offline_mod
+
+        # 人工登记表读不了就**整轮不刷新名册**：带着一张缺了九章的快照往下走，
+        # 名册会把那些人的九章号全抹掉，离职检查也就再也看不到它们
+        try:
+            offline_rows = offline_mod.load(offline_mod.beside(args.inventory))
+        except offline_mod.OfflineError as exc:
+            report.problems.append(str(exc))
+            print(report.render())
+            return 1
 
         def collect_proposal() -> dict:
             accounts = []
@@ -1875,6 +1885,9 @@ def _refresh_locked(args, report) -> Optional[int]:
                     aliyun.Credentials.from_env(prefix), progress=say
                 )
             accounts += cloudcollect.collect_volcano(volcano.Credentials.from_env(), progress=say)
+            # 没有采集接口的平台（九章）：人工登记的账号也要进名册匹配，
+            # 否则「谁拥有这个九章号」永远对不上人，离职检查也就查不到它
+            accounts += offline_mod.cloud_accounts(offline_rows)
             services = list(args.service) + _load_service_names("identity/services.json")
             return propose(
                 accounts,
@@ -1884,8 +1897,17 @@ def _refresh_locked(args, report) -> Optional[int]:
             ).to_dict()
 
         refresh.run(
-            known_users=_panel_issued_users(args, report.problems),
-            collect_snapshot=lambda: build_snapshot(_snapshot_jobs(profiles, ()), progress=say),
+            # 人工登记表里的号出处已经写在登记表里了（谁导出、哪天），不算「来路不明」。
+            # 不排除的话，每往登记表里加一个人，都会被当成「不是面板开的、请补登记」报一次
+            known_users=_panel_issued_users(args, report.problems)
+            | {
+                f"{a['platform']}/{a['account']}/{u['name']}"
+                for a in offline_rows
+                for u in a["users"]
+            },
+            collect_snapshot=lambda: _with_offline(
+                build_snapshot(_snapshot_jobs(profiles, ()), progress=say), offline_rows
+            ),
             collect_proposal=collect_proposal,
             directory=lambda: _directory_entries(args.directory, progress=False),
             manual=_load_manual(args.manual),
@@ -2030,6 +2052,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     raise AssertionError(f"未处理的子命令 {args.command!r}")
+
+
+def _with_offline(snapshot: dict, rows: list) -> dict:
+    """把人工登记的账号拼进云上采集的快照。云上那部分一个字不动。"""
+    from . import offline_accounts as offline_mod
+
+    snapshot = dict(snapshot)
+    snapshot["accounts"] = list(snapshot.get("accounts") or []) + offline_mod.snapshot_accounts(
+        rows
+    )
+    return snapshot
 
 
 if __name__ == "__main__":
