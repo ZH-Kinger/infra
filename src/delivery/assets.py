@@ -508,7 +508,15 @@ def create_dataset(
     if accessibility == DATASET_ACCESS:
         body["AccessibleRoleIdList"] = list(DATASET_ROLES)
     if import_info:
-        # **PAI 真正拿去挂载的东西。** 不带的话很可能建出一条「看得见但挂不上」的数据集
+        # 现网人工建的那批都带着它，所以跟着带 —— **但它不是挂载必需的**。
+        # 这里原先写着「不带的话很可能建出一条『看得见但挂不上』的数据集」，
+        # 2026-09-23 真机证伪了：在同一个工作空间里拿「只差 ImportInfo 一个变量」的
+        # 两条数据集各起一台 DSW，两边都 Running、挂载事件原文一致、零 FailedMount
+        # （见 docs/collab/research/pai-dataset-importinfo.md）。那句话害得排查的人
+        # 往错方向走过一次，所以改掉它而不是留着。
+        # 另外：**建完就补不上了** —— UpdateDataset 对这个字段是静默无效的
+        # （接口只回 RequestId、GmtModifiedTime 也刷新了，但回读仍是 null），
+        # 和 UserId 那个坑同形状。要带就在建的时候带。
         body["ImportInfo"] = json.dumps(import_info, ensure_ascii=False, separators=(",", ":"))
     if labels:
         body["Labels"] = labels

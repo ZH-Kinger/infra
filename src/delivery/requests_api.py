@@ -77,6 +77,11 @@ _EVENT_LABELS = {
     "revoke_failed": "到期回收失败",
     "expiry_remind_failed": "到期提醒没有发出去",
     "expiry_reminded": "提醒即将到期",
+    # 管理员改已发出的凭证（改的是云上那条策略，AK 不变）。
+    # 不填这三条的话，申请人在自己单子上看到的是 `cred_regrant_done` 这种原始事件名
+    "cred_regrant_requested": "准备调整凭证权限",
+    "cred_regrant_failed": "凭证权限调整失败",
+    "cred_regrant_done": "凭证权限已调整",
 }
 #: 这些事件的 note 是云接口 / 飞书接口的原始错误，只给管理员看；员工看到的是下面的说明
 _ERROR_NOTES = {
@@ -86,6 +91,10 @@ _ERROR_NOTES = {
     "credential_failed": "可以稍后再领取，仍失败请联系管理员",
     "password_failed": "可以稍后再领取，仍失败请联系管理员",
     "link_needed": "管理员会把新账号对应到你名下",
+    # **不能说「凭证仍按原来的权限有效」** —— 抛异常不等于云上没改：
+    # `CreatePolicyVersion` / `UpdatePolicy` 都可能服务端已生效而客户端超时断连，
+    # 那时候收窄或延期其实已经落地了。对申请人说一句确定的假话，比说不确定更糟
+    "cred_regrant_failed": "这次调整可能没有生效，管理员会核对后处理",
 }
 
 

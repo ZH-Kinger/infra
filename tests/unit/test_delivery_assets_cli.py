@@ -118,14 +118,20 @@ class VolcanoPostSigningTests(unittest.TestCase):
         self.assertNotEqual(a, b)
 
     def test_sts_call_uses_sts_host(self):
+        """火山 STS 在独立域名上，而签名按域名算 —— 签错就是 `SignatureDoesNotMatch`，
+        长得和「权限不足」一模一样，排查会被带偏。
+
+        `AssumeRole` 和账号门 `GetCallerIdentity` **都是 STS 动作，都要走这个域名**。
+        门那一条原先是 `iam:ListUsers`（通用域名），换到 STS 之后域名得跟着换。
+        """
         from delivery.provision import VolcanoExecutor
 
         urls = []
 
         def send(url, headers, data=None):
             urls.append((url, headers["host"]))
-            if "ListUsers" in url:
-                return 200, {"Result": {"UserMetadata": [{"AccountId": "2000000001"}]}}
+            if "GetCallerIdentity" in url:
+                return 200, {"Result": {"AccountId": 2000000001}}  # 火山回数字
             return 200, {
                 "Result": {
                     "Credentials": {
@@ -139,9 +145,11 @@ class VolcanoPostSigningTests(unittest.TestCase):
 
         ex = VolcanoExecutor("2000000001", volcano.Credentials("AK", "SK"), transport=send)
         ex.assume_role("trn:iam::2000000001:role/r", "li.si@wuji.tech", 1)
-        sts_url, sts_host = urls[-1]
-        self.assertTrue(sts_url.startswith("https://sts.volcengineapi.com/"))
-        self.assertEqual(sts_host, "sts.volcengineapi.com")
+        actions = [u.split("Action=", 1)[1].split("&", 1)[0] for u, _ in urls]
+        self.assertEqual(actions, ["GetCallerIdentity", "AssumeRole"])
+        for url, host in urls:
+            self.assertTrue(url.startswith("https://sts.volcengineapi.com/"), url)
+            self.assertEqual(host, "sts.volcengineapi.com")
 
 
 ME = "li.si@wuji.tech"

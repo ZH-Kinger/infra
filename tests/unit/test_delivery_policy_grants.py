@@ -846,8 +846,9 @@ class ExecutorPolicyTests(unittest.TestCase):
         def send(url, headers, data=None):
             query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
             calls.append(query)
-            if query["Action"] == "ListUsers":
-                return 200, {"Result": {"UserMetadata": [{"AccountId": "2000000001"}]}}
+            if query["Action"] == "GetCallerIdentity":
+                # 账号门走 sts:GetCallerIdentity（火山回的 AccountId 是数字）
+                return 200, {"Result": {"AccountId": 2000000001}}
             if query["Action"] == "GetUser":
                 return 200, {"Result": {"User": {}}}
             return handler(query)

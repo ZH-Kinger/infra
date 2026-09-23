@@ -797,8 +797,9 @@ class VolcanoAttachedTests(unittest.TestCase):
         def send(url, headers, data=None):
             query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
             calls.append(query)
-            if query["Action"] == "ListUsers":
-                return 200, {"Result": {"UserMetadata": [{"AccountId": "2000000001"}]}}
+            if query["Action"] == "GetCallerIdentity":
+                # 账号门走 sts:GetCallerIdentity（火山回的 AccountId 是数字）
+                return 200, {"Result": {"AccountId": 2000000001}}
             return handler(query)
 
         return VolcanoExecutor("2000000001", volcano.Credentials("AK", "SK"), transport=send), calls
@@ -867,16 +868,17 @@ class VolcanoAttachedTests(unittest.TestCase):
             ex.attached("lisi")
 
     def test_wrong_account_stops(self):
-        ex = VolcanoExecutor(
-            "2000000009",
-            volcano.Credentials("AK", "SK"),
-            transport=lambda url, headers, data=None: (
-                200,
-                {"Result": {"UserMetadata": [{"AccountId": "2000000001"}]}},
-            ),
-        )
+        """这把 AK 属于 …001，面板要动的是 …009 的号 —— 一个字都不许查，更不许撤。"""
+        seen = []
+
+        def send(url, headers, data=None):
+            seen.append(dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))["Action"])
+            return 200, {"Result": {"AccountId": 2000000001}}
+
+        ex = VolcanoExecutor("2000000009", volcano.Credentials("AK", "SK"), transport=send)
         with self.assertRaises(ProvisionError):
             ex.attached("lisi")
+        self.assertEqual(seen, ["GetCallerIdentity"])
 
     def policies(self, *items):
         def handler(q):

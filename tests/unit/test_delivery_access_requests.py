@@ -361,6 +361,26 @@ class CatalogTests(unittest.TestCase):
         with self.assertRaises(catalog_mod.CatalogError):
             catalog_mod.parse(data)
 
+    def test_account_must_be_a_plain_digit_id(self):
+        """模板里的 `account` 只能是纯数字云账号 ID，而且这是**账号门的前提**。
+
+        `_check_account` 比的是 `str(返回的 AccountId or "") == str(self.account)`。
+        那个 `or ""` 在返回体缺字段时会塌成空串 —— 只有 `self.account` 恒为非空数字串，
+        空串才永远撞不上、门才是 fail-closed 的。这条规则一旦放宽到允许空串之类的
+        `account`，那道门就会在「接口没回 AccountId」时**静默放行**。
+        两处是耦合的，所以在这里也钉一份。
+        """
+        for account in ("", "   ", "12345", "1" * 21, "acc-2000001", "2_000_000_001", "2e9"):
+            with self.subTest(bad=account):
+                self.bad(account=account)
+        # 首尾空白是**规范化**掉、不是留着：存进模板的是裸数字串，
+        # 门那边拿到的就不会是「带空格的另一个串」
+        for raw in (f"  {ACC}  ", f"{ACC}\n"):
+            with self.subTest(normalised=raw):
+                data = json.loads(json.dumps(TEMPLATES))
+                data["templates"][0]["account"] = raw
+                self.assertEqual(catalog_mod.parse(data).get("oss-read").account, ACC)
+
     def test_missing_file_means_no_templates(self):
         self.assertEqual(catalog_mod.load("/nonexistent/templates.json").templates, ())
 
@@ -2183,62 +2203,282 @@ class ReauditRegressionTests(unittest.TestCase):
 
 
 class VolcanoExecutorTests(unittest.TestCase):
-    ACCOUNT = "2000000001"
+    """火山执行身份的账号门 —— 唯一判据是 `sts:GetCallerIdentity`。
 
-    def executor(self, handler):
+    这道门回答「手里这把 AK 真属于目标云账号吗」。**假门比没门更糟**：放行畸形返回
+    就会在别人的主账号下写东西，而门本身恒失败则整条路根本跑不起来。两种都出现过：
+
+      · 原先走 `iam:ListUsers`，从任意一个子账号的 trn 里反推主账号 ID。
+        发放身份**没有这个权限**（真机 `AccessDenied: iam:ListUsers on trn:iam::…:user/*`，
+        它的 Allow 只锁在自己发的号上，这是对的）。火山两个凭证模板都没有 role_arn
+        → 每张火山凭证必经 `issue_long_term()` → 第一行就是这道门 → **必然失败**。
+        线上 20 张单里 14 张凭证单全是阿里的、火山一张都没有，所以从没被发现。
+      · 签名域名签错 → 恒 `SignatureDoesNotMatch`，同样是门恒失败。所以 host/region
+        由 `test_account_check_calls_sts_on_its_own_host_and_region` 逐字钉住。
+
+    现在与 `AliyunExecutor._check_account` 逐字同语义，不扩任何权限。
+    """
+
+    ACCOUNT = "2000000001"
+    STS_HOST = "sts.volcengineapi.com"
+    IAM_HOST = "open.volcengineapi.com"
+
+    def executor(self, handler, account=None):
+        """返回 (执行器, 请求队列, 域名队列)。队列按调用顺序，用来断言「门在动作之前」。"""
         from delivery.clouds import volcano
         from delivery.provision import VolcanoExecutor
 
         calls = []
+        hosts = []
 
         def send(url, headers, data=None):
             import urllib.parse
 
-            query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
-            calls.append(query)
+            parts = urllib.parse.urlsplit(url)
+            query = dict(urllib.parse.parse_qsl(parts.query))
+            calls.append(dict(query, _authorization=headers["Authorization"]))
+            hosts.append((parts.hostname, headers["host"]))
             return handler(query)
 
-        return VolcanoExecutor(self.ACCOUNT, volcano.Credentials("AK", "SK"), transport=send), calls
+        ex = VolcanoExecutor(
+            self.ACCOUNT if account is None else account,
+            volcano.Credentials("AKLTfakekeyid", "ZmFrZXNlY3JldA=="),
+            transport=send,
+        )
+        return ex, calls, hosts
 
-    def test_account_check_fails_closed_when_unconfirmed(self):
-        for users in ([], [{"UserName": "x"}], [{"AccountId": "999"}]):
-            ex, calls = self.executor(lambda q, u=users: (200, {"Result": {"UserMetadata": u}}))
-            with self.assertRaises(ProvisionError):
-                ex.in_group("lisi", "grp")
-            self.assertEqual([c["Action"] for c in calls], ["ListUsers"])
+    def identity(self, account=None, **extra):
+        """GetCallerIdentity 的真机返回形状：AccountId 是**数字**，外加 Trn/UserId。"""
+        body = {
+            "AccountId": int(self.ACCOUNT if account is None else account),
+            "Trn": f"trn:iam::{self.ACCOUNT}:user/panel-issuer",
+            "UserId": 2100000001,
+        }
+        body.update(extra)
+        return 200, {"Result": body}
 
-    def test_account_from_trn_accepted(self):
+    # ── 门本身 ────────────────────────────────────────────────────────
+
+    def test_account_check_calls_sts_not_iam(self):
+        """门走 STS，不走 IAM；而且**先问身份再做动作**。"""
+
         def handler(q):
-            if q["Action"] == "ListUsers":
-                return 200, {
-                    "Result": {"UserMetadata": [{"Trn": f"trn:iam::{self.ACCOUNT}:user/a"}]}
-                }
+            if q["Action"] == "GetCallerIdentity":
+                return self.identity()
             return 200, {"Result": {"UserGroupMetadata": []}}
 
-        ex, _ = self.executor(handler)
+        ex, calls, _ = self.executor(handler)
         self.assertFalse(ex.in_group("lisi", "grp"))
+        actions = [c["Action"] for c in calls]
+        self.assertEqual(actions, ["GetCallerIdentity", "ListGroupsForUser"])
+        # 回归锁：别再走回 iam:ListUsers —— 发放身份没有那个权限
+        self.assertNotIn("ListUsers", actions)
+
+    def test_account_check_calls_sts_on_its_own_host_and_region(self):
+        """火山 STS 在独立域名/区域上，而签名把域名和区域都算进去了。
+
+        签错任意一个都是 `SignatureDoesNotMatch` —— 和「权限不足」长得一模一样，
+        排查会被带偏到权限上去。域名从 URL 和 host 头两处取（两处不一致也是签名错），
+        区域从 Authorization 的 Credential scope 里取。
+        """
+
+        def handler(q):
+            if q["Action"] == "GetCallerIdentity":
+                return self.identity()
+            return 200, {"Result": {"UserGroupMetadata": []}}
+
+        ex, calls, hosts = self.executor(handler)
+        ex.in_group("lisi", "grp")
+        self.assertEqual(hosts[0], (self.STS_HOST, self.STS_HOST))
+        # 后面的 IAM 调用仍然走通用域名：别把整个执行器搬到 STS 域名上
+        self.assertEqual(hosts[1], (self.IAM_HOST, self.IAM_HOST))
+        scope = calls[0]["_authorization"].split("Credential=", 1)[1].split(",", 1)[0]
+        self.assertEqual(scope.split("/")[2:], ["cn-north-1", "sts", "request"])
+        self.assertEqual(calls[1]["_authorization"].split("/")[2], "cn-beijing")
+
+    def test_account_check_fails_closed_on_malformed_or_foreign_identity(self):
+        """返回体不是「明明白白就是这个账号」时一律停，且**停在动作之前**。
+
+        列表里每一项都必须拒。挑几个说明为什么：
+          · 缺 `AccountId` / `None` / `""` / `0`：`str(x or "")` 会塌成空串，
+            门就退化成「空串 == 账号 ID」—— 只有云账号 ID 恒为非空数字串
+            （catalog 的 `^[0-9]{6,20}$`）才让这个塌陷不成为放行。
+          · 只有 `Trn`：老实现从 trn 反推账号，新实现不认。写在这里是**反向回归锁**，
+            免得有人「顺手把 trn 兜底加回来」，那等于把权限不足的老路重新接上。
+          · `"12000000001"` / `"20000000010"`：多一位数字的邻居账号，子串判会放过。
+          · `" 2000000001"` / `"02000000001"`：空格和前导零 —— 归一化写宽一点
+            （strip/int()）就会把它们判成同一个账号，那是两个不同的云账号。
+          · `2000000001.0` / `2.000000001e9`：JSON 里写成浮点/科学计数法时 Python
+            解出 float，`str()` 后是 `2000000001.0`，不等 → 停。宁可多停一次。
+        """
+        bad = [
+            {},
+            {"AccountId": None},
+            {"AccountId": ""},
+            {"AccountId": 0},
+            {"AccountId": []},
+            {"AccountId": {}},
+            {"AccountId": ["2000000001"]},
+            {"AccountId": {"AccountId": "2000000001"}},
+            {"Trn": "trn:iam::2000000001:user/a"},
+            {"AccountId": "2000000009"},
+            {"AccountId": "12000000001"},
+            {"AccountId": "20000000010"},
+            {"AccountId": " 2000000001"},
+            {"AccountId": "2000000001 "},
+            {"AccountId": "02000000001"},
+            {"AccountId": "2000000001\n"},
+            {"AccountId": 2000000001.0},
+            {"AccountId": 2.000000001e9},
+            {"AccountId": True},
+            {"Result": {"AccountId": "2000000001"}},  # 多包一层
+        ]
+        for body in bad:
+            with self.subTest(body=body):
+                ex, calls, _ = self.executor(lambda q, b=body: (200, {"Result": b}))
+                with self.assertRaises(ProvisionError):
+                    ex.in_group("lisi", "grp")
+                # 门没过就不许有第二个请求：确认不了身份时一个字都不能写云上
+                self.assertEqual([c["Action"] for c in calls], ["GetCallerIdentity"])
+
+    def test_numeric_and_string_account_ids_both_match(self):
+        """火山回数字、阿里回字符串 —— 类型差异不能变成一道假门（恒拒也是坏门）。"""
+        for returned, configured in (
+            (2000000001, "2000000001"),  # 真机形状：数字返回 / 字符串配置
+            ("2000000001", "2000000001"),
+            (2000000001, 2000000001),
+        ):
+            with self.subTest(returned=returned, configured=configured):
+
+                def handler(q, r=returned):
+                    if q["Action"] == "GetCallerIdentity":
+                        return 200, {"Result": {"AccountId": r}}
+                    return 200, {"Result": {"UserGroupMetadata": []}}
+
+                ex, calls, _ = self.executor(handler, account=configured)
+                self.assertFalse(ex.in_group("lisi", "grp"))
+                self.assertEqual(len(calls), 2)
+
+    def test_identity_is_checked_once_and_reused(self):
+        """一次执行器生命周期内只问一次。每个动作都问 = 多打一倍接口、还多一处抖动点。"""
+
+        def handler(q):
+            if q["Action"] == "GetCallerIdentity":
+                return self.identity()
+            if q["Action"] == "GetUser":
+                return 200, {"Result": {"User": {"UserName": "lisi"}}}
+            if q["Action"] == "ListGroupsForUser":
+                return 200, {"Result": {"UserGroupMetadata": []}}
+            if q["Action"] == "ListAttachedUserPolicies":
+                return 200, {"Result": {"AttachedPolicyMetadata": []}}
+            return 200, {"Result": {}}
+
+        ex, calls, _ = self.executor(handler)
+        ex.in_group("lisi", "grp")
+        ex.user_exists("lisi")
+        ex.has_policy("lisi", "System", "TOSReadOnlyAccess")
+        ex.attached("lisi")
+        ex.detach_policy("lisi", "System", "TOSReadOnlyAccess")
+        self.assertEqual([c["Action"] for c in calls].count("GetCallerIdentity"), 1)
+
+    def test_failed_check_is_not_remembered_as_passed(self):
+        """门失败不置缓存：接口抖一下之后的重试还得重新问，不能被一次失败「放行」。"""
+        state = {"ok": False}
+
+        def handler(q):
+            if q["Action"] == "GetCallerIdentity":
+                return self.identity() if state["ok"] else (200, {"Result": {}})
+            return 200, {"Result": {"UserGroupMetadata": []}}
+
+        ex, calls, _ = self.executor(handler)
+        with self.assertRaises(ProvisionError):
+            ex.in_group("lisi", "grp")
+        state["ok"] = True
+        self.assertFalse(ex.in_group("lisi", "grp"))
+        self.assertEqual([c["Action"] for c in calls].count("GetCallerIdentity"), 2)
+
+    def test_wrong_account_error_is_readable_and_leaks_no_credential(self):
+        """文案要让人直接想到「执行凭证配错账号了」，而且不能把 AK/SK 带进事件里
+        （这条消息会写进申请单事件，见 `describe_error`）。"""
+        ex, _, _ = self.executor(lambda q: self.identity(account="2000000009"))
+        with self.assertRaises(ProvisionError) as ctx:
+            ex.in_group("lisi", "grp")
+        message = str(ctx.exception)
+        self.assertIn("账号", message)
+        self.assertIn("凭证", message)
+        self.assertNotIn("AKLTfakekeyid", message)
+        self.assertNotIn("ZmFrZXNlY3JldA==", message)
+        self.assertIsInstance(ctx.exception, DeliveryError)
+
+    def test_issue_long_term_needs_no_iam_listusers(self):
+        """P0 回归：发长期凭证的整条路上不许出现 `iam:ListUsers`。
+
+        火山两个凭证模板（`volcano-tos-upload`/`-download`）都没有 role_arn，
+        所以每一张火山凭证都走这里。这个假 transport 对 `ListUsers` 回真机那条
+        `AccessDenied` —— 门只要走回 IAM，这个用例立刻红。
+        """
+
+        def handler(q):
+            action = q["Action"]
+            if action == "ListUsers":
+                return 403, {
+                    "ResponseMetadata": {
+                        "Error": {
+                            "Code": "AccessDenied",
+                            "Message": (
+                                "User is not authorized to perform: iam:ListUsers "
+                                "on resource: trn:iam::2111674479:user/*"
+                            ),
+                        }
+                    }
+                }
+            if action == "GetCallerIdentity":
+                return self.identity()
+            if action == "GetUser":
+                return 404, {
+                    "ResponseMetadata": {"Error": {"Code": "EntityNotExist.User", "Message": "x"}}
+                }
+            if action == "CreateAccessKey":
+                return 200, {
+                    "Result": {"AccessKey": {"AccessKeyId": "AKLTnew", "SecretAccessKey": "s"}}
+                }
+            return 200, {"ResponseMetadata": {}}
+
+        ex, calls, hosts = self.executor(handler)
+        cred = ex.issue_long_term("tempak-lisi", "李四-外采", {"Statement": []})
+        self.assertEqual((cred.access_key_id, cred.access_key_secret), ("AKLTnew", "s"))
+        actions = [c["Action"] for c in calls]
+        self.assertNotIn("ListUsers", actions)
+        self.assertEqual(actions[0], "GetCallerIdentity")
+        self.assertEqual(hosts[0][0], self.STS_HOST)
+        # AK 必须最后发：前面任何一步失败都不该已经有一把长期密钥流出去
+        self.assertEqual(actions[-1], "CreateAccessKey")
+        # 门只问一次，哪怕这条路上串了建号/建策略/挂策略/发 AK 四个动作
+        self.assertEqual(actions.count("GetCallerIdentity"), 1)
+
+    # ── 门通过之后的原有行为 ──────────────────────────────────────────
 
     def test_remove_with_wrong_group_name_is_an_error(self):
         def error(code):
             return 404, {"ResponseMetadata": {"Error": {"Code": code, "Message": "x"}}}
 
         def handler(q):
-            if q["Action"] == "ListUsers":
-                return 200, {"Result": {"UserMetadata": [{"AccountId": self.ACCOUNT}]}}
+            if q["Action"] == "GetCallerIdentity":
+                return self.identity()
             if q["Action"] == "ListGroupsForUser":
                 return 200, {"Result": {"UserGroupMetadata": [{"UserGroupName": "grp-typo"}]}}
             return error("EntityNotExist.UserGroup")
 
-        ex, _ = self.executor(handler)
+        ex, _, _ = self.executor(handler)
         from delivery.clouds import volcano
 
         with self.assertRaises(volcano.VolcanoError):
             ex.remove_from_group("lisi", "grp-typo")
 
         def gone(q):
-            if q["Action"] == "ListUsers":
-                return 200, {"Result": {"UserMetadata": [{"AccountId": self.ACCOUNT}]}}
+            if q["Action"] == "GetCallerIdentity":
+                return self.identity()
             return error("EntityNotExist.User")
 
-        ex, _ = self.executor(gone)
+        ex, _, _ = self.executor(gone)
         ex.remove_from_group("lisi", "grp")  # 子账号已删：当作已回收

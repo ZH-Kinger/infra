@@ -154,7 +154,12 @@ class AliyunExecutor:
         if self._checked:
             return
         body = self._call(aliyun.STS, "GetCallerIdentity", {})
-        if str(body.get("AccountId") or "") != self.account:
+        got = str(body.get("AccountId") or "")
+        # **两边同时为空串会相等 → 静默放行。** 读不到账号号码和「号码对不上」是两回事，
+        # 分开报：后者说「不属于目标账号」是**说错了因**，会让人去查凭证配错了哪个账号
+        if not got or not str(self.account):
+            raise ProvisionError("STS 没有返回账号号码，确认不了执行身份，已停止")
+        if got != str(self.account):
             raise ProvisionError("执行身份不属于目标云账号，已停止（检查执行凭证配置）")
         self._checked = True
 
@@ -615,7 +620,7 @@ class AliyunExecutor:
             "CreatePolicy",
             {
                 "PolicyName": policy,
-                "PolicyDocument": json.dumps(policy_doc, separators=(",", ":")),
+                "PolicyDocument": grants.policy_text(policy_doc),
                 "Description": f"面板长期数据访问凭证 {user}",
             },
         )
@@ -630,6 +635,76 @@ class AliyunExecutor:
             return LongTermCredential(user, policy, ak["AccessKeyId"], ak["AccessKeySecret"])
         except KeyError:
             raise ProvisionError("CreateAccessKey 返回缺少凭证字段") from None
+
+    def read_policy(self, user: str) -> dict:
+        """读回**这个子账号**那条自定义策略当前生效的文档。读不到抛。
+
+        **收 user、不收策略名**，理由同 `rewrite_policy`。
+
+        `regrant` 靠它拿两样东西：① 算 diff 的「改之前」；② **生效时间**
+        （`DateGreaterThan`）—— 申请单上历史没存过它，而拿 `now` 兜底等于让一张
+        尚未生效的凭证提前生效，所以读不回来就整个拒掉，不许猜。
+
+        **这里只保证「文档读回来了」，不保证里面有时间窗**：手工建的、或被人在控制台
+        改过的策略可能一条 Condition 都没有。「读不到生效时间就拒」这个承诺落在
+        `regrant.plan` 身上 —— 它拿不到 `not_before` 会自己拒。
+        """
+        self._check_account()
+        policy_name = grants.policy_name(user)
+        got = self._call(
+            aliyun.RAM, "GetPolicy", {"PolicyName": policy_name, "PolicyType": "Custom"}
+        )
+        version = str((got.get("Policy") or {}).get("DefaultVersion") or "")
+        if not version:
+            raise ProvisionError(f"读不到策略 {policy_name} 的默认版本")
+        body = self._call(
+            aliyun.RAM,
+            "GetPolicyVersion",
+            {"PolicyName": policy_name, "PolicyType": "Custom", "VersionId": version},
+        )
+        text = (body.get("PolicyVersion") or {}).get("PolicyDocument")
+        if not text:
+            # 和「不是合法 JSON」分开报：这句会直接摆到运维面前，说成 JSON 坏了
+            # 会让人去查文档内容，而真实原因是返回里压根没有这个字段
+            raise ProvisionError(f"策略 {policy_name} 的返回里没有 PolicyDocument")
+        try:
+            doc = json.loads(text)
+        except (TypeError, ValueError):
+            # **TypeError 也要接**：字段不是 str（已解析的对象、bytes）时抛的是它，
+            # 不接就穿透出去、调用方拿到的不是 ProvisionError。bot 仓库刚踩过同形状的坑
+            raise ProvisionError(f"策略 {policy_name} 的文档不是合法 JSON") from None
+        if not isinstance(doc, dict):
+            raise ProvisionError(f"策略 {policy_name} 的文档不是对象")
+        return doc
+
+    def rewrite_policy(self, user: str, doc: dict) -> None:
+        """把**这个子账号**那条自定义策略换成新文档。**AK 一个字不动**，对方不用改配置。
+
+        **收 user、不收策略名。** 和 `issue_long_term`/`revoke_long_term` 一致（它们也是
+        传 user 自己算名字），调用方就没有传错的机会 —— 而云上拦不住：阿里 issuer 对
+        `ram:CreatePolicyVersion` 同时开了 `policy/staff-oss-auto-*` 和 `policy/temp-ak-auto-*`，
+        **后者是 bot 发给外部使用方的那批凭证的策略**。传错一个名字就能改掉机器人管的
+        外部凭证窗口，云不会拦。`grants.policy_name` 对不认识的前缀自己会抛。
+
+        阿里这边是**加一个版本并设为默认**，不是原地改 —— 改坏了还能在控制台把旧版本
+        设回默认，这是唯一的退路。
+
+        `RotateStrategy` 必须给：一条策略最多 5 个版本（且不可调），不给的话第 6 次直接
+        失败，而这个功能本来就是给「反复微调」用的。交给服务端删最老的非默认版本，
+        **不自己 List+Delete** —— 那要多两次 API，还多一处并发竞态。
+        （bot 仓库 `core/temp_ak_issuance/issuer.py::rewrite_ram_window` 线上跑的就是这套。）
+        """
+        self._check_account()
+        self._call(
+            aliyun.RAM,
+            "CreatePolicyVersion",
+            {
+                "PolicyName": grants.policy_name(user),
+                "PolicyDocument": grants.policy_text(doc),
+                "SetAsDefault": "true",
+                "RotateStrategy": "DeleteOldestNonDefaultVersionWhenLimitExceeded",
+            },
+        )
 
     def revoke_long_term(self, user: str) -> list:
         """到期清理：删 AK → 摘策略 → 删策略 → 删用户。返回没删掉的东西（供告警）。
@@ -738,14 +813,29 @@ class VolcanoExecutor:
         )
 
     def _check_account(self) -> None:
+        """这把 AK 是不是目标云账号的。**问 STS，不问 IAM。**
+
+        原先这里走 `iam:ListUsers` 从任意一个子账号的 trn 里反推主账号 ID —— 绕了一圈，
+        而且**发放身份根本没有这个权限**（它的 Allow 只锁在自己发的那些号上，这是对的）。
+        后果是火山凭证模板都没有 role_arn、每一张都必经 `issue_long_term()`，而它第一行
+        就是这道门 —— **火山的凭证发放这条路从来没跑通过**。没人发现是因为线上 14 张凭证单
+        全是阿里的，火山一张都没有（2026-09-23 取证查实）。
+
+        `sts:GetCallerIdentity` 直接回「我是谁、属于哪个账号」，和阿里那侧逐字同一个语义，
+        发放身份现在就调得通（实测返回 `trn:iam::<账号>:user/panel-issuer`），不用扩任何权限。
+        """
         if self._checked:
             return
-        body = self._call(volcano.IAM, "ListUsers", {"Limit": "1"})
-        users = body.get("UserMetadata") or []
-        accounts = {_volcano_account(u) for u in users} - {""}
-        # 失败即关：确认不了凭证属于哪个账号（没有子账号、返回里缺字段）同样停止
-        if accounts != {self.account}:
-            raise ProvisionError("无法确认执行身份属于目标云账号，已停止（检查执行凭证配置）")
+        body = self._call(
+            self.STS, "GetCallerIdentity", {}, host=self.STS_HOST, region=self.STS_REGION
+        )
+        # 火山这里回的是数字，阿里回字符串 —— 统一成字符串再比，别让类型差异变成一道假门
+        got = str(body.get("AccountId") or "")
+        # 同阿里那侧：两边同时为空会相等、静默放行；「读不到」和「对不上」分开报
+        if not got or not str(self.account):
+            raise ProvisionError("STS 没有返回账号号码，确认不了执行身份，已停止")
+        if got != str(self.account):
+            raise ProvisionError("执行身份不属于目标云账号，已停止（检查执行凭证配置）")
         self._checked = True
 
     def user_exists(self, user: str) -> bool:
@@ -1119,7 +1209,7 @@ class VolcanoExecutor:
             "CreatePolicy",
             {
                 "PolicyName": policy,
-                "PolicyDocument": json.dumps(policy_doc, separators=(",", ":")),
+                "PolicyDocument": grants.policy_text(policy_doc),
                 "Description": f"面板长期数据访问凭证 {user}"[:128],
             },
         )
@@ -1136,6 +1226,48 @@ class VolcanoExecutor:
             return LongTermCredential(user, policy, ak["AccessKeyId"], ak["SecretAccessKey"])
         except KeyError:
             raise ProvisionError("CreateAccessKey 返回缺少凭证字段") from None
+
+    def read_policy(self, user: str) -> dict:
+        """读回**这个子账号**那条自定义策略的文档。读不到抛。语义同阿里那侧。"""
+        self._check_account()
+        policy_name = grants.policy_name(user)
+        body = self._call(volcano.IAM, "GetPolicy", {"PolicyName": policy_name})
+        text = (body.get("Policy") or {}).get("PolicyDocument")
+        if not text:
+            raise ProvisionError(f"策略 {policy_name} 的返回里没有 PolicyDocument")
+        try:
+            doc = json.loads(text)
+        except (TypeError, ValueError):
+            raise ProvisionError(f"策略 {policy_name} 的文档不是合法 JSON") from None
+        if not isinstance(doc, dict):
+            raise ProvisionError(f"策略 {policy_name} 的文档不是对象")
+        return doc
+
+    def rewrite_policy(self, user: str, doc: dict) -> None:
+        """把**这个子账号**那条自定义策略换成新文档。AK 不动。
+
+        **火山没有版本概念，这是原地替换 —— 改完就没有回滚点了。**（实测：
+        `CreatePolicyVersion`/`ListPolicyVersions`/`SetDefaultPolicyVersion` 在火山
+        2018-01-01 上全部 404 `InvalidActionOrVersion`，和调一个瞎编的动作同一句话。）
+        所以调用方**必须先把现场读回来的那份存好**（`read_policy`），而且要存
+        **读回来的那份**、不是按当前代码重算的「理论旧文档」—— 云上那份可能被人手改过，
+        存重算的等于存了个假回滚点。
+
+        参数名是 `NewPolicyDocument`，**不是 `PolicyDocument`**：火山的选填参数缺席
+        等于「不动这个字段」，名字写错不会报错，只会**什么都不改**、接口照样回 200。
+        `NewPolicyName` 不给（不改名）。
+
+        另外火山的策略变更约 30–40 秒才传播到生效，成功提示里要说这句。
+        """
+        self._check_account()
+        self._call(
+            volcano.IAM,
+            "UpdatePolicy",
+            {
+                "PolicyName": grants.policy_name(user),
+                "NewPolicyDocument": grants.policy_text(doc),
+            },
+        )
 
     def revoke_long_term(self, user: str) -> list:
         """到期清理：删 AK → 摘策略 → 删策略 → 删用户。返回没删掉的东西（供告警）。
@@ -1164,6 +1296,20 @@ class VolcanoExecutor:
             kid = key.get("AccessKeyId")
             if not kid:
                 continue
+            if str(key.get("Status") or "").lower() == "active":
+                # **先禁再删**，同 `delete_user`：火山不许删启用中的 AK。
+                # 这条路上的 AK **一定**是 active（刚发出去就是启用的），所以到期回收
+                # 第一次跑就会撞 —— 而火山凭证这条链在 2026-09-23 之前一次都没跑过，
+                # 所以谁都没发现。删不掉 → 用户还挂着 AK → DeleteUser 也失败 →
+                # 子账号 + 长期 AK + 策略全留在云上
+                step(
+                    f"禁用 AccessKey …{str(kid)[-4:]}",
+                    lambda kid=kid: self._call(
+                        volcano.IAM,
+                        "UpdateAccessKey",
+                        {"UserName": user, "AccessKeyId": kid, "Status": "inactive"},
+                    ),
+                )
             step(
                 f"删 AccessKey {str(kid)[-4:]}",
                 lambda kid=kid: self._call(

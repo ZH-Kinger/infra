@@ -45,7 +45,8 @@ ALIYUN_ALLOWED = {
     "DeleteUser",
 }
 VOLCANO_ALLOWED = {
-    "ListUsers",
+    # 账号门：sts:GetCallerIdentity（不是 iam:ListUsers —— 发放身份没有那个权限）
+    "GetCallerIdentity",
     "GetLoginProfile",
     "UpdateLoginProfile",
     "DeleteLoginProfile",
@@ -162,6 +163,7 @@ class VolcanoCloud:
         self.policies = list(policies)
         self.fail = {}
         self.calls = []
+        self.hosts = set()
 
     def err(self, code, status=404):
         return status, {"ResponseMetadata": {"Error": {"Code": code, "Message": code}}}
@@ -173,11 +175,20 @@ class VolcanoCloud:
         return 200, body
 
     def send(self, url, headers, data=None):
-        q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+        parts = urllib.parse.urlsplit(url)
+        self.hosts.add(parts.hostname)
+        q = dict(urllib.parse.parse_qsl(parts.query))
         act = q["Action"]
         self.calls.append((act, dict(q)))
-        if act == "ListUsers":
-            return self.ok({"UserMetadata": [{"AccountId": VOLC_ACC}]})
+        if act == "GetCallerIdentity":
+            # 账号门。真机形状：AccountId 是**数字**，另带 Trn/UserId
+            return self.ok(
+                {
+                    "AccountId": int(VOLC_ACC),
+                    "Trn": f"trn:iam::{VOLC_ACC}:user/panel-executor",
+                    "UserId": 2100000002,
+                }
+            )
         if act in self.fail:
             return self.err(self.fail[act], 400)
         if not self.exists:
@@ -432,6 +443,9 @@ class VolcanoDisableTests(unittest.TestCase):
         self.assertTrue(cloud.profile)
         self.assertEqual(cloud.keys, {"AKLTa1": "inactive", "AKLTb2": "inactive"})
         self.assertLessEqual(set(cloud.actions), VOLCANO_ALLOWED)
+        # 账号门先行，而且走 STS 自己的域名（签名按域名算，签错就恒 SignatureDoesNotMatch）
+        self.assertEqual(cloud.actions[0], "GetCallerIdentity")
+        self.assertEqual(cloud.hosts, {"open.volcengineapi.com", "sts.volcengineapi.com"})
 
     def test_already_disallowed_is_not_recorded_as_closed(self):
         """登录本来就关着 → login=False。否则恢复时会把一个**本来就不能登录**的号打开。"""
@@ -575,6 +589,44 @@ class VolcanoDeleteTests(unittest.TestCase):
         cloud = VolcanoCloud()
         cloud.exists = False
         self.assertEqual(cloud.executor().delete_user("lisi"), [])
+
+
+class VolcanoAccountGateTests(unittest.TestCase):
+    """停号/删号是不可逆的写操作，账号门错一次就是**在别人的主账号上删人**。
+
+    所以这里只验一件事：门不过 → 一个写请求都不发、一个读请求也不发。
+    """
+
+    def executor(self, account):
+        cloud = VolcanoCloud(groups=["algo"], policies=[pol("TOSReadOnlyAccess")])
+        ex = VolcanoExecutor(account, volcano.Credentials("AK", "SK"), transport=cloud.send)
+        return cloud, ex
+
+    def test_other_account_touches_nothing(self):
+        ops = {
+            "disable_user": ((), {}),
+            "delete_user": ((), {}),
+            "enable_user": ((), {"login": True, "keys": ["AKLTa1"]}),
+        }
+        for op, (args, kwargs) in ops.items():
+            with self.subTest(op=op):
+                cloud, ex = self.executor("2000000009")
+                with self.assertRaises(ProvisionError):
+                    getattr(ex, op)("lisi", *args, **kwargs)
+                self.assertEqual(cloud.actions, ["GetCallerIdentity"])
+                self.assertTrue(cloud.exists)
+                self.assertTrue(cloud.login_allowed)
+                self.assertEqual(cloud.keys, {"AKLTa1": "active", "AKLTb2": "inactive"})
+                self.assertEqual(cloud.groups, ["algo"])
+
+    def test_identity_without_account_id_is_refused(self):
+        """返回体缺 `AccountId`（接口变更、换了个错的 endpoint）一律停，不能静默放行。"""
+        cloud, ex = self.executor(VOLC_ACC)
+        cloud.send = lambda url, headers, data=None: cloud.ok({"Trn": "trn:iam::2000000001:user/a"})
+        ex._transport = cloud.send
+        with self.assertRaises(ProvisionError):
+            ex.delete_user("lisi")
+        self.assertTrue(cloud.exists)
 
 
 # ── offboard 模块 ────────────────────────────────────────────────────────

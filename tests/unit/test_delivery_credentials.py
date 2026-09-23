@@ -414,12 +414,20 @@ class VolcanoSessionPolicyTests(unittest.TestCase):
 
         def send(url, headers, data=None):
             calls.append(url)
-            return 200, {"Result": {"UserMetadata": [{"AccountId": VOLC}]}}
+            if "GetCallerIdentity" in url:
+                # 账号门；火山回的 AccountId 是数字
+                return 200, {"Result": {"AccountId": int(VOLC)}}
+            return 200, {"Result": {}}
 
         ex = VolcanoExecutor(VOLC, volcano.Credentials("AK", "SK"), transport=send)
         with self.assertRaises(ProvisionError):  # 返回里没有凭证字段
             ex.assume_role(f"trn:iam::{VOLC}:role/r", "li", 1)
         self.assertTrue(any("AssumeRole" in u for u in calls))
+        # 账号门排在 AssumeRole 前面：确认不了身份就不该去扮演任何角色
+        self.assertLess(
+            next(i for i, u in enumerate(calls) if "GetCallerIdentity" in u),
+            next(i for i, u in enumerate(calls) if "AssumeRole" in u),
+        )
 
 
 class RoutingTests(unittest.TestCase):

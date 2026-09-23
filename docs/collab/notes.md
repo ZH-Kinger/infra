@@ -173,3 +173,59 @@ tester 报了 1 个阻塞 bug + 3 个缺口 + 2 个 nit，全部已修：
   把自己送进真故障分支，干净 CI 容器里会满屏 KeyError —— 已在 setUp 里把环境钉死。
   未做：真机端到端（面板机上跑一次 @drill.service 看标题、让 sweep 真退一次非零看退出码），
   以及面板机 systemd 版本是否 ≥251（<251 走的是「标题对、正文缺怎么死的、stderr 有留痕」那条路）。
+
+## 2026-09-23 [TESTER] 火山账号门 ListUsers → GetCallerIdentity：29 条红用例改对并加固
+
+`VolcanoExecutor._check_account` 换语义后，六个文件里的假 transport 还在喂 `ListUsers`。
+已全部改成 `GetCallerIdentity`，并把这道门当成**安全门**来锁（不只是把动作名换掉）：
+- 域名/区域逐字钉死：`sts.volcengineapi.com` + scope 里的 `cn-north-1`（从 Authorization 头取）；
+  IAM 调用仍须留在 `open.volcengineapi.com`/`cn-beijing`。签错域名 = `SignatureDoesNotMatch`，
+  长得和「权限不足」一样，排查必被带偏。
+- 20 种畸形/邻居 `AccountId`（缺字段/None/""/0/list/dict/只有 Trn/多一位/前导零/空格/浮点/
+  科学计数法/bool）一律必须抛 `ProvisionError`，且**停在动作之前**（断言只发出过 1 个请求）。
+  「只有 Trn」那条是**反向回归锁**：谁把 trn 反推兜底加回来，等于把权限不足的老路接回来。
+- 数字/字符串归一两边都测；`_checked` 只缓存成功、失败不缓存。
+- P0 回归锁 `test_issue_long_term_needs_no_iam_listusers`：假 transport 对 `ListUsers` 回真机
+  那条 AccessDenied，门只要走回 IAM 立刻红。
+- 离职链新增 `VolcanoAccountGateTests`：账号对不上时 disable/delete/enable 一个请求都不发。
+六个坏实现（丢 host/宽归一化/不缓存/空门/退回 ListUsers/不做 str 归一）逐个注入验证，全部被抓。
+`provision._volcano_account`（现无生产调用方）**测试侧零引用**，未新增用例，留给审计判。
+
+[2026-09-23] [AUDITOR] 火山凭证 P0 + 凭证运维（regrant）：1 阻塞 + 4 中 + 11 低。阻塞与两条中危已修。
+  **阻塞**：`flows.regrant_credential` 里调了一个根本不存在的方法 `self._template_of`，
+  任何一次调用必 AttributeError —— 而全量 3201 条全绿，因为这条路**一条用例都没有**。
+  这是「代码路径存在、测试也绿、只是从来没有真实流量走过它」的第二例（第一例是火山凭证发放）。
+  **M-2（修阻塞时一并解掉）**：`repair` 取的是**活模板**的 caps，不是这张单子批准的那份快照。
+  有人把模板加宽（比如给只发 list+download 的模板补上 write）→ 对一张老单点「重算」→
+  **那把已发出去的 AK 当场获得写权限**，而且因为新旧 caps 都从同一份活模板算，
+  `fields` 里不会有 cred_caps、页面上一个字都不会提到权限变了。改成从 `ticket["template"]`
+  快照构造（新增 `flows._Approved` / `_approved`）。
+  **M-4**：加 pending 互斥，没有跨三步事务，两个管理员同时点会留下「云上是 B、单子是 A」。
+  **L-8（线上数据推翻了我的设计）**：我原先拿 `user.startswith("staff-")` 判归属，
+  而线上 14 张凭证单里有 cred_user 的 3 张**全是 `tempak-` 老前缀**（内部前缀今天才改），
+  那道门会把当前全部可改的凭证挡在外面 —— 包括这个功能要修的那两把。改成按单子判：
+  `user` 只能来自 `ticket["cred_user"]`，那是面板发放时自己写的。**前缀会变，单子不会。**
+  留到下一批（随 HTTP 接口，`regrant_credential` 目前无调用方、生产触发不了）：
+  M-3 `cred_regrant_pending` 没有消费者（todo 缺一条）、M-5 延期后到期提醒不再发、
+  L-1 statement_diff 假定 Action/Resource 是 list、L-5 changed=False 那条路不记事件、
+  L-9 policy_text 的 6144 预检不对称、L-10 `provision._volcano_account` 死代码建议删。
+
+[2026-09-23] [教训] 今天三次把「没验证过的事」当成已知写进了代码，全部由别人发现：
+  ① systemd MONITOR_* 的版本号和注入条件（审计查 v255 源码，开发机就是不成立的那个版本）；
+  ② 「线上火山凭证确实发得出来」（取证实测：发放身份没有 ListUsers 权限，这条路一次没成功过）；
+  ③ 拿子账号前缀当归属判据（线上数据：前缀今天才改，没有一张新前缀的单子）。
+  三次都不是逻辑写错。共同点是**依据本身没核过**，而三次的失效方向都是静默的。
+
+[2026-09-23] [RESEARCHER] 飞书审批定义**别用 API 改**（`docs/collab/research/feishu-approval-update-definition.md`）：
+  接口能改，但方式是**全量覆盖**，而 GET 的返回**喂不回** POST —— 最致命的是
+  **`node_list` 里根本没有审批人**（GET 不返回 `approver`），拿备份重建必然建出一个没有
+  审批人的流程，而那个审批节点带 `empty_auto_pass: true`（审批人空→自动通过）。
+  面板唯一的放行条件是实例级 APPROVED → **门禁被静默拆掉，而外表一切正常**：
+  单子照发照「通过」照开通，没有任何人会发现审批这一步已经不存在了。
+  另外 API 建的定义在后台停不了删不掉；widget id 官方原话是「修改发布后**不保证**不变」，
+  而面板正是靠它取单号（不同步 → 所有审批被判「申请单号不一致」）。
+  结论：选项去后台 devMode 手工加，只追加不动已有的；保存发布后立刻重跑
+  `delivery approval widgets --write` 同步，两步之间是在途单的失效窗口。
+  回滚路径是编辑页的**版本管理切历史版本**，不是那份 GET 备份（备份里没有审批人，复原不了）。
+  待办（加法式、与本次解耦）：发起实例时改用 `custom_id` 顶替默认 id（官方支持，
+  且 GET 实例返回的 form 里带 custom_id），那条「改表单必须停机重跑」的悬崖就没了。

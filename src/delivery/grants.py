@@ -177,6 +177,30 @@ def session_policy(doc: dict) -> str:
     return text
 
 
+#: 自定义策略正文的字符上限（两朵云都是 6144，且**不可调**）。
+#: 和 `SESSION_POLICY_MAX` 是两回事：那个管 AssumeRole 的 Policy 参数
+LONG_TERM_POLICY_MAX = 6144
+
+
+def policy_text(doc: dict) -> str:
+    """策略文档 → 下发给云的正文。**建和改两条路共用这一个**。
+
+    原先「建」（`issue_long_term` → `CreatePolicy`）用默认的 `ensure_ascii=True`、
+    「改」（`rewrite_policy` → `CreatePolicyVersion`）用 `False`，而 `check_prefix`
+    是允许中文前缀的 —— 同一条逻辑策略在两条路上会被编成长度差 6 倍的两份正文，
+    连「离上限还有多少余量」都不一样。统一成不转义。
+
+    超长直接抛、**不截断**：截断出来仍是合法 JSON，但少掉的往往正是末尾那条 Deny，
+    结果是悄悄发出一把比批准范围更大的凭证（同 `session_policy` 的理由）。
+    """
+    text = json.dumps(doc, separators=(",", ":"), ensure_ascii=False)
+    if len(text) > LONG_TERM_POLICY_MAX:
+        raise GrantError(
+            f"策略正文 {len(text)} 字符，超过 {LONG_TERM_POLICY_MAX} 上限（目录名太长？）"
+        )
+    return text
+
+
 def build_policy(
     platform: str,
     bucket: str,

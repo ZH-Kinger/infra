@@ -16,7 +16,7 @@ import re
 import sys
 import time
 import urllib.parse
-from dataclasses import MISSING, asdict, fields
+from dataclasses import MISSING, asdict, dataclass, fields
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Mapping, Optional, Sequence
 
@@ -166,6 +166,76 @@ _FIELD_DEFAULTS = {
 
 def _effective(template: dict, names: tuple) -> dict:
     return {k: template.get(k, _FIELD_DEFAULTS.get(k)) for k in names}
+
+
+@dataclass(frozen=True)
+class _Approved:
+    """**这张单子当初批的那份模板**，不是现在的活模板。
+
+    `regrant` 只需要这几个字段，所以不去还原一整个 `catalog.Template` ——
+    快照里 `buckets` 是 `[{"name":…,"region":…}]`、`caps` 是 list，和 Template 的
+    形状本来就不一样，硬还原只会多一处要维护的转换。
+
+    **为什么必须用快照**：审批卡上写的是提交那一刻的 caps 和桶清单，那才是批准的范围。
+    读活模板的话，有人把模板加宽（比如给一个原本只发「看+下载」的模板补上「上传」），
+    管理员对一张老单点一次「重算」，**那把已经发出去的 AK 当场就有了写权限** ——
+    而且因为新旧 caps 都从同一份活模板算，`fields` 里不会有 `cred_caps`，
+    页面上一个字都不会提到权限变了。
+    """
+
+    platform: str
+    account: str
+    buckets: tuple
+    caps: tuple
+    max_hours: int
+
+
+def _approved(ticket: dict) -> _Approved:
+    snap = ticket.get("template") or {}
+    # 老快照可能缺字段（`_EXEC_FIELDS` 后来加过东西），按 Template 的默认值补
+    # **falsy 也要回落**，不只是「键缺席」：`max_hours` 是 None/0/{} 时算出 0，
+    # 而 `regrant.plan` 的 `if cap_hours and …` 会把 0 当成「不限时长」—— 延期上限整条消失。
+    # 这个函数存在的全部理由就是容忍退化的快照，不能在这一处朝相反方向退化
+    got = {k: (snap.get(k) or _FIELD_DEFAULTS.get(k)) for k in ("platform", "account", "max_hours")}
+    buckets = tuple(
+        (str(b.get("name") or ""), str(b.get("region") or ""))
+        for b in (snap.get("buckets") or [])
+        if isinstance(b, dict)
+    )
+    return _Approved(
+        platform=str(got["platform"] or ""),
+        account=str(got["account"] or ""),
+        buckets=buckets,
+        caps=tuple(snap.get("caps") or []),
+        max_hours=int(got["max_hours"] or 0),
+    )
+
+
+def _window_start(doc: dict) -> Optional[float]:
+    """从策略文档里读回生效时间（`DateGreaterThan`）。读不到返回 None。
+
+    **这是「不许拿 now 兜底」那条规矩的落地点。** 申请单上历史没存过生效时间，
+    而重算策略必须知道它 —— 用 `now` 顶替等于让一张尚未生效的凭证提前生效，是静默扩权。
+
+    返回 None 之后，`regrant.plan` 会**先回落单子上缓存的 `cred_not_before`**（那是上一次
+    改动时从云上读回来记下的真实发放时刻，不是 now，所以安全），两者都没有才真拒。
+    **别把那条回落删掉** —— 云上的窗被人在控制台改花过的策略，恰恰是最需要修的那种，
+    删了之后它就永远修不了了。
+
+    只认**所有** Allow 语句都同意的那个值：不一致说明这条策略被人在控制台改过，
+    那时候「生效时间是几点」本身就没有唯一答案，宁可说不知道。
+    """
+    seen = set()
+    for st in (doc or {}).get("Statement") or []:
+        if str(st.get("Effect") or "") != "Allow":
+            continue
+        cond = (st.get("Condition") or {}).get("DateGreaterThan") or {}
+        for value in cond.values():
+            seen.add(str(value))
+    if len(seen) != 1:
+        return None
+    got = _ts(seen.pop().replace("Z", "+00:00"))
+    return got or None
 
 
 def _ts(iso: object) -> float:
@@ -1814,6 +1884,151 @@ class Flows:
         """
         self._own(ticket_id, union_id)
         return self.revoke_now(ticket_id, actor=union_id)
+
+    def regrant_credential(
+        self,
+        ticket_id: str,
+        *,
+        mode: str,
+        actor: str,
+        reason: str = "",
+        expire=None,
+        caps=None,
+    ) -> dict:
+        """改一把已发出去的长期凭证：重算 / 改到期 / 改权限。**AK 不动。**
+
+        改的是那条自定义策略，不是凭证本身 —— 所以对方的服务不用改配置、不用停服。
+        这正是「重发凭证」做不到的事，也是这条路存在的理由。
+
+        **这个方法本身不做归属检查** —— 调用方负责（同 `revoke_now`）。接 HTTP 时忘了
+        `admin=True` 的话，申请人就能自助把有效期延到模板上限、把 caps 加到模板上限。
+
+        三步，顺序**恒为「先云后账」**：
+
+            1) 单子记意图   cred_regrant_requested + cred_regrant_pending
+            2) 写云         阿里 CreatePolicyVersion（加版本设默认）/ 火山 UpdatePolicy（原地替换）
+            3) 单子写结果   回写字段、清 pending、cred_regrant_done
+
+        为什么是这个顺序（两个方向都安全）：延长时若第 3 步失败，号会按**旧的**到期
+        时间被回收 —— 服务断了，但没越权；缩短时若第 3 步失败，云上已经 403，单子上的
+        日期只是晚点删。反过来先改单子的话，缩短会把号提前删掉、延长会让号在策略还没
+        延之前就被删 —— 都更糟。
+
+        **崩在 2 和 3 之间**：`cred_regrant_pending` 留在单子上，待办页据此报一条
+        「面板上写的有效期和云上判的可能不一致」。**对齐必须是人点的，不能让定时任务
+        自动回填** —— 自动回填会把一次没改成的改动悄悄变成既成事实，而「有人改过但
+        没改成」这条痕迹恰恰是事后最要紧的。
+        """
+        from . import regrant as regrant_mod
+
+        ticket = self.store.get(ticket_id)
+        if ticket.get("status") != t.DONE:
+            raise FlowError("只有已完成的单子能改凭证", 409)
+        # **扩权类必须说明理由。** 延长有效期、补权限都是在批准范围之内再往回放，
+        # 事后要回答「谁在什么时候为什么改的」。重算不扩不缩，不强求
+        if mode in (regrant_mod.MODE_EXPIRE, regrant_mod.MODE_CAPS) and not str(reason).strip():
+            raise FlowError("延长有效期 / 改权限要写明理由", 400)
+
+        # **上一次没做完就不许再来一次。** 没有跨三步的事务，两个管理员同时点的话
+        # 会是「云上是 B 写的、单子是 A 写的、谁都不知道」。
+        #
+        # **这不是互斥量** —— `store.get` 和后面的 `store.update` 之间没有锁（update 的锁
+        # 只保单次写），真并发时两边都能过这道门。它只把窗口收窄，并让「有人改过但没改成」
+        # 这条痕迹变成**会拦路的**信号，而不是一条没人看的字段。真要互斥得加 CAS。
+        if ticket.get("cred_regrant_pending"):
+            raise FlowError("这张单上有一次没完成的凭证改动，先处理它", 409)
+        tpl = _approved(ticket)
+        if not tpl.platform or not tpl.account:
+            raise FlowError("这张单子的模板快照里没有平台/账号，改不了", 409)
+        issuer = self._issuer_for(tpl.platform, tpl.account)
+        # kind 排在 `cred_user` 之前：一张搬运单进来时报「这是 12 小时内的临时凭证」
+        # 是**错的因**，会把人引去查凭证类型
+        if ticket.get("kind") != catalog_mod.KIND_CREDENTIAL:
+            raise FlowError("只有凭证单能改策略", 409)
+        user = str(ticket.get("cred_user") or "")
+        if not user:
+            raise FlowError("这是 12 小时内的临时凭证，云上没有可改的策略。要变更只能重新申请", 409)
+        # 归属判据是**这张申请单**，不是前缀：`user` 来自 `ticket["cred_user"]`，
+        # 那是面板发放时自己写进去的，本身就是「这个号是我们发的」的权威证据。
+        #
+        # 早先这里写的是 `user.startswith(grants_mod.USER_PREFIX)`，**那是错的**：
+        # 内部前缀 2026-09-23 才从 `tempak-` 改成 `staff-`，而线上三张有 cred_user 的
+        # 单子全是老前缀 —— 那道门会把**当前全部可改的凭证**挡在外面，其中两把正是
+        # 这个功能的起因（策略缺 GetBucketLocation）。前缀会变，单子不会。
+        #
+        # 要挡的「拿别人的号来改」由别处保证：`read_policy`/`rewrite_policy` 收的是
+        # user 而不是策略名，而 user 只能从单子里来 —— 调用方传不进任意名字。
+        #
+        # **真正的前缀白名单在 `grants.policy_name`**（两个入口第一件事就是过它，
+        # 不在 `_PREFIX_PAIRS` 里的前缀直接抛）。上面这段是在说「别在这里按前缀判」，
+        # 不是说「没有前缀边界」—— 哪天有人把 `ISSUED_PREFIXES` 里别的前缀并进
+        # `_PREFIX_PAIRS`，边界会静默放开，而这段注释正好在劝人别管前缀。
+
+        # 现场读回来那份：既是算 diff 的「改之前」，也是**唯一**能拿到生效时间的地方
+        # （单子上历史没存过它）。火山是原地替换、没有回滚点，所以这份必须存进单子，
+        # 而且要存**读回来的**、不是按当前代码重算的「理论旧文档」—— 云上那份可能
+        # 被人在控制台改过，存重算的等于存了个假回滚点
+        before = issuer.read_policy(user)
+        plan = regrant_mod.plan(
+            ticket,
+            tpl,
+            mode=mode,
+            now=self._clock(),
+            expire=expire,
+            caps=caps,
+            before=before,
+            not_before=_window_start(before),
+        )
+        if not plan.ok:
+            raise FlowError(plan.why, 409)
+        if not plan.changed:
+            # 算出来和云上一模一样：不写。阿里一条策略只有 5 个版本，白写一次就白吃一格
+            return self.store.get(ticket_id)
+
+        pending = {
+            "mode": mode,
+            "expire": plan.expire,
+            "caps": list(plan.caps),
+            "actor": actor,
+            "reason": str(reason)[:_REASON_MAX],
+            "at": t.now_iso(self._clock),
+        }
+        self.store.update(
+            ticket_id,
+            actor=actor,
+            expect=[t.DONE],
+            event="cred_regrant_requested",
+            note=f"准备改凭证策略（{plan.summary}）",
+            fields={"cred_regrant_pending": pending, "cred_policy_prev": before},
+        )
+        try:
+            issuer.rewrite_policy(user, plan.policy)
+        except Exception as exc:  # noqa: BLE001 — 写云失败要把原因带给管理员
+            # pending **留着**：它是「有人改过但没改成」的唯一痕迹
+            with contextlib.suppress(t.TicketError):
+                self.store.update(
+                    ticket_id,
+                    actor=actor,
+                    expect=[t.DONE],
+                    event="cred_regrant_failed",
+                    note=f"改凭证策略失败：{describe_error(exc)}",
+                )
+            raise FlowError(f"改凭证策略失败：{describe_error(exc)}", 502) from None
+
+        fields = dict(plan.fields)
+        fields["cred_regrant_pending"] = {}
+        if "expires_at_ts" in fields:
+            # 和开通那条路同一种写法（`t.now_iso(lambda: expires)`），别另造一个格式化 ——
+            # 两处格式不一样的话，同一张单子上的两条日期看起来像来自两个系统
+            fields["expires_at"] = t.now_iso(lambda: fields["expires_at_ts"])
+        return self.store.update(
+            ticket_id,
+            actor=actor,
+            expect=[t.DONE],
+            event="cred_regrant_done",
+            note=f"已改凭证策略（{plan.summary}）。AK 不变，对方不用改配置",
+            fields=fields,
+        )
 
     def revoke_now(self, ticket_id: str, *, actor: str) -> dict:
         """作废一份已发出的访问凭证。链接外泄时用这个。
