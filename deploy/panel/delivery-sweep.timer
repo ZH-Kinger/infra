@@ -1,5 +1,5 @@
 [Unit]
-Description=Cloud panel sweep every 10 minutes
+Description=Cloud panel sweep every minute
 
 [Timer]
 OnBootSec=2min

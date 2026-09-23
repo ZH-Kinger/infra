@@ -512,6 +512,84 @@ class TicketTests(unittest.TestCase):
         )
         self.assertAlmostEqual(r.items[0].since, old, delta=2)
 
+    def test_a_ticket_that_never_reached_the_approval_counts_too(self):
+        """`submit_failed`（提交给飞书审批那一步就断了）和 `failed` 同一类（审计 Med-1）。
+
+        为什么必须收：`flows.recover_stuck` 只在 `executing` 那一支调 `_emit`，
+        也就是说 **submit_failed 的单子不会推飞书**。待办页再不收它的话，
+        申请人以为在走流程、管理员在任何一页上都看不到它 —— 谁都不知道它卡了。
+        """
+        r = todo.Report()
+        todo.collect_tickets(r, [{"state": "submit_failed", "created_at": iso(time.time())}])
+        self.assertEqual([i.kind for i in r.items], ["request_failed"])
+        self.assertEqual(r.items[0].group, todo.URGENT)
+
+    def test_both_stuck_states_land_in_one_row(self):
+        """两类合并成一行、数字是两类之和 —— 分两行的话同一件事（有人在等）
+        会在页面上占两个位置，而管理员的处理动作是一样的。"""
+        r = todo.Report()
+        todo.collect_tickets(
+            r,
+            [
+                {"state": "failed", "created_at": iso(time.time() - DAY)},
+                {"state": "submit_failed", "created_at": iso(time.time() - 2 * DAY)},
+            ],
+        )
+        self.assertEqual(len(r.items), 1)
+        self.assertEqual(r.items[0].count, 2)
+        self.assertIn("2 张单", r.items[0].title)
+
+    def test_the_age_spans_both_stuck_states(self):
+        """最老的那张是 submit_failed 时，`since` 要跟着它走。
+
+        只按 failed 算的话，页面上写「最早的 1 天前」，而实际有一张卡了 9 天。
+        """
+        old = time.time() - 9 * DAY
+        r = todo.Report()
+        todo.collect_tickets(
+            r,
+            [
+                {"state": "failed", "created_at": iso(time.time() - DAY)},
+                {"state": "submit_failed", "created_at": iso(old)},
+            ],
+        )
+        self.assertAlmostEqual(r.items[0].since, old, delta=2)
+
+    def test_the_other_dead_ends_are_not_swept_in(self):
+        """放宽到 `submit_failed` **不等于**「凡是不好看的状态都算」。
+
+        撤回 / 驳回 / 已关闭都是**有人做过决定**的终点，没有人在等；把它们也报出来，
+        待办页会被历史单子填满，而那正是「清单页」和「待办页」的区别。
+        `submitting` 则是还在进行中，卡住了自有 `recover_stuck` 把它推成 submit_failed。
+        """
+        r = todo.Report()
+        todo.collect_tickets(
+            r,
+            [
+                {"state": "withdrawn", "created_at": iso(time.time())},
+                {"state": "rejected", "created_at": iso(time.time())},
+                {"state": "closed", "created_at": iso(time.time())},
+                {"state": "revoked", "created_at": iso(time.time())},
+                {"state": "submitting", "created_at": iso(time.time())},
+            ],
+        )
+        self.assertEqual(r.items, [])
+
+    def test_the_states_it_watches_are_the_ones_tickets_actually_uses(self):
+        """筛选用的是字面量字符串，而状态名的真相源是 `tickets.py`。
+        哪天那边改名（或这边手滑打错一个字），筛选会**静默**变成空 —— 页面干干净净。"""
+        from delivery import tickets as tickets_mod
+
+        r = todo.Report()
+        todo.collect_tickets(
+            r,
+            [
+                {"state": tickets_mod.FAILED, "created_at": iso(time.time())},
+                {"state": tickets_mod.SUBMIT_FAILED, "created_at": iso(time.time())},
+            ],
+        )
+        self.assertEqual(r.items[0].count, 2)
+
 
 class ExpiringTests(unittest.TestCase):
     NOW = 1_800_000_000.0
@@ -567,6 +645,205 @@ class ExpiringTests(unittest.TestCase):
         r = todo.Report()
         todo.collect_expiring(r, [{"who": "x"}, {"expires_at_ts": None}], now=self.NOW)
         self.assertEqual(r.items, [])
+
+
+class OrphanTests(unittest.TestCase):
+    """`cred_orphan`：单子已经走完、云上那个子账号还在（2026-09-23 新增）。
+
+    **这一类的要害是「和到期时间无关」。** `flows._needs_reclaim`
+    （`src/delivery/flows.py:1881-1884`）对这类单子根本不看 `expires_at_ts`，
+    定时任务从关单那天起每分钟试删一次；待办页要是按到期时间筛，
+    「今天关掉的 90 天凭证单」要等 83 天才出现 —— 而它恰恰是**没有任何人在等**的那种，
+    这一页是它唯一的出口。
+
+    也不能并进「已过期还没收回」：它没过期，那是句不准的话。页面上说不准的话，
+    人就开始自己去核实，这一页也就白做了。
+    """
+
+    NOW = 1_800_000_000.0
+
+    def row(self, **over):
+        row = {"state": "closed", "cred_user": True, "expires_at_ts": self.NOW - DAY, "who": "u0"}
+        row.update(over)
+        return row
+
+    def collect(self, *rows):
+        r = todo.Report()
+        todo.collect_expiring(r, list(rows), now=self.NOW)
+        return {i.kind: i for i in r.items}
+
+    # ── 哪些算 orphan ────────────────────────────────────────────────────
+    def test_every_finished_state_with_a_live_cloud_user_is_an_orphan(self):
+        """「单子废了、号还在」的两个状态都算：交付失败（FAILED）和被关掉（CLOSED）。
+
+        逐个列而不是只测 closed：漏掉哪一个，那一类单子的云上残留就永远不上页，
+        而漏法是静默的（页面干干净净）。
+
+        **`revoked` 不在这里** —— 那是「已经收回」，见下一条。
+        """
+        for state in ("closed", "failed"):
+            with self.subTest(state):
+                got = self.collect(self.row(state=state))
+                self.assertIn("cred_orphan", got)
+                self.assertEqual(got["cred_orphan"].count, 1)
+
+    def test_a_revoked_ticket_is_not_an_orphan(self):
+        """**回归锁**：已经收回的单子不算 orphan，哪怕 `cred_user` 还在单子上。
+
+        `cred_user` 记的是「当初建的号叫什么」，不是「云上还有没有这个号」——
+        `flows._mark_revoked`（`src/delivery/flows.py:1903-1916`）收成功后并**不**清它
+        （只有「没送达的凭证」那一支 `:1986` 才清）。所以把 `revoked` 补进
+        `_CLOSED_STATES` 会让历史上**每一张正常收回**的凭证单都变成一条 URGENT 的
+        「云上的号还在」—— 整页假话，而这一页一旦说假话就没人看了。
+
+        判据向 `flows._needs_reclaim` 对齐：它认的也只有 FAILED / CLOSED。
+        「回收成功之后 `cred_user` 确实还在」这个事实用真 `Flows` 证在
+        `test_delivery_todo_api.py::RevokedOrphanTests`。
+
+        （断言只说「不是 orphan」：本函数是展示层，喂进来什么算什么，所以带着一个
+        过去的到期时间时它会落进「已过期」那一类。REVOKED 的行在
+        `server._todo_view` 那一层压根到不了这儿 —— 同一条也在 `RevokedOrphanTests` 锁着。）
+        """
+        for when, label in ((-DAY, "到期时间在过去"), (60 * DAY, "到期时间在未来")):
+            with self.subTest(label):
+                got = self.collect(self.row(state="revoked", expires_at_ts=self.NOW + when))
+                self.assertNotIn("cred_orphan", got, "已经收回的单子不该报「云上的号还在」")
+
+    def test_it_is_urgent_not_a_nice_to_have(self):
+        """URGENT，不是 NORMAL：这是一把**还能用的**长期 AK 留在云上。
+
+        放进 NORMAL 的话它排在「7 天内到期」后面、也不点亮导航角标 —— 而那两件事
+        的紧急程度差一个量级：到期的凭证会自己失效，这个不会。
+        """
+        got = self.collect(self.row())
+        self.assertEqual(got["cred_orphan"].group, todo.URGENT)
+
+    def test_the_states_it_watches_match_the_real_ticket_constants(self):
+        """`todo._CLOSED_STATES` 是**字面量**（todo 是展示层，刻意不 import 状态机）。
+
+        代价是它会悄悄漂：`tickets.py` 里哪天改了某个状态的字面值，这边筛不到、
+        页面上什么都不显示，**没有任何报错**。所以在测试这一侧做反向校验 ——
+        源码那边保持字面量不动。
+
+        这张表同时是一道**边界**：只有 FAILED / CLOSED，和 `flows._needs_reclaim`
+        认的那两个一字不差。多一个 `REVOKED` 是假告警
+        （见 `test_a_revoked_ticket_is_not_an_orphan`），少一个就是云上的残留永远不上页。
+        """
+        from delivery import tickets as tickets_mod
+
+        self.assertEqual(set(todo._CLOSED_STATES), {tickets_mod.CLOSED, tickets_mod.FAILED})
+        self.assertNotIn(tickets_mod.REVOKED, todo._CLOSED_STATES, "收回了就不是残留")
+
+    def test_a_cleaned_up_ticket_is_not_an_orphan(self):
+        """`cred_user` 没了 = 云上收干净了（定时任务删完会清掉它，STS 凭证本来就没有）。
+
+        误报的代价在这一类特别大：URGENT + 角标，而历史上关掉过的单子有的是。
+
+        （这里只断言「不是 orphan」：本函数是展示层，喂进来什么算什么。这种行在
+        `server._todo_view` 那一层压根到不了这儿 —— 它的筛选是
+        `state == DONE or (state in live and cred_user)`，锁在
+        `test_delivery_todo_api.py::test_a_closed_ticket_with_nothing_left_on_the_cloud_is_not_reported`。）
+        """
+        for empty in ("", None, False, 0):
+            with self.subTest(repr(empty)):
+                self.assertNotIn("cred_orphan", self.collect(self.row(cred_user=empty)))
+
+    def test_a_live_ticket_is_not_an_orphan_even_with_a_cloud_user(self):
+        """还在用的单子（DONE）不算 —— 它的子账号本来就该在云上。
+
+        这条要是错了，**每一张正常发出去的凭证**都会天天挂在待办页最上面。
+        """
+        self.assertNotIn("cred_orphan", self.collect(self.row(state="done")))
+
+    # ── 和到期时间无关 ──────────────────────────────────────────────────
+    def test_the_expiry_does_not_decide_whether_it_shows_up(self):
+        """过去 / 未来 / 0 / 压根没这个字段：四种都照样上页。
+
+        这正是这次修的要害。`expires_at_ts` 在未来那一格就是原来的缺口
+        （今天关掉的 90 天凭证单 → 83 天后才出现）。
+        """
+        cases = {
+            "已经过期": self.row(expires_at_ts=self.NOW - 30 * DAY),
+            "还有 60 天": self.row(expires_at_ts=self.NOW + 60 * DAY),
+            "写着 0": self.row(expires_at_ts=0),
+            "压根没有这个字段": {"state": "closed", "cred_user": True, "who": "u0"},
+        }
+        for label, row in cases.items():
+            with self.subTest(label):
+                got = self.collect(row)
+                self.assertIn("cred_orphan", got, f"{label}：云上还有一把 AK，页面却是空的")
+                self.assertEqual(got["cred_orphan"].count, 1)
+
+    def test_an_orphan_is_not_also_counted_as_expired(self):
+        """摘出去就是摘出去：同一张单子不许同时出现在两行里。
+
+        两行的话页面上一件事占两个位置，两个数字加起来还对不上「有多少东西要收」。
+        """
+        got = self.collect(self.row(expires_at_ts=self.NOW - DAY))
+        self.assertEqual(sorted(got), ["cred_orphan"])
+
+    def test_an_orphan_expiring_soon_is_not_also_counted_as_expiring(self):
+        """另一头同理：到期时间落在 7 天窗里的 orphan 也只报一行。"""
+        got = self.collect(self.row(expires_at_ts=self.NOW + 3 * DAY))
+        self.assertEqual(sorted(got), ["cred_orphan"])
+
+    # ── 别把原来那两类弄坏 ──────────────────────────────────────────────
+    def test_the_ordinary_two_kinds_still_work_next_to_an_orphan(self):
+        """一批行里三类都有：三条 Item 都在，`count` 各算各的，不重不漏。
+
+        「摘出去」这个写法最容易出的错就是把 `rest` 算错 —— 少摘（重复计数）或者
+        多摘（正常的到期单子从页面上消失，而那才是服务会断的那一类）。
+        """
+        got = self.collect(
+            self.row(state="closed"),  # orphan
+            self.row(state="failed", who="u1"),  # orphan
+            {"expires_at_ts": self.NOW + 2 * DAY, "who": "u2"},  # 7 天内到期
+            {"expires_at_ts": self.NOW - 2 * DAY, "who": "u3"},  # 已过期
+            {"expires_at_ts": self.NOW - 5 * DAY, "who": "u4"},  # 已过期
+        )
+        self.assertEqual(sorted(got), ["cred_expired", "cred_expiring", "cred_orphan"])
+        self.assertEqual(got["cred_orphan"].count, 2)
+        self.assertEqual(got["cred_expiring"].count, 1)
+        self.assertEqual(got["cred_expired"].count, 2)
+
+    def test_a_done_ticket_with_a_cloud_user_still_lands_in_the_normal_kinds(self):
+        """**`cred_user` 本身不是判据**，「已经走完的状态」才是。
+
+        正常发出去的凭证单（DONE）一样有 `cred_user`；把它也摘走的话，
+        「7 天内到期」那一行会漏掉所有还在用的凭证 —— 而那一行盯的正是「服务会断」。
+        """
+        got = self.collect(
+            {"state": "done", "cred_user": True, "expires_at_ts": self.NOW + 2 * DAY, "who": "u0"},
+            {"state": "done", "cred_user": True, "expires_at_ts": self.NOW - DAY, "who": "u1"},
+        )
+        self.assertEqual(sorted(got), ["cred_expired", "cred_expiring"])
+        self.assertNotIn("cred_orphan", got)
+
+    def test_rows_without_a_state_are_still_handled(self):
+        """行里没有 `state`（老调用方、或者别处直接调 `collect_expiring`）：
+        按老语义走到期那两类，不能因为新加的筛选就崩掉或者全被摘走。"""
+        got = self.collect({"expires_at_ts": self.NOW - DAY, "who": "u0"})
+        self.assertEqual(sorted(got), ["cred_expired"])
+
+    # ── 说出来的那句话 ──────────────────────────────────────────────────
+    def test_the_headline_counts_them_and_does_not_claim_they_expired(self):
+        got = self.collect(self.row(), self.row(who="u1"))["cred_orphan"]
+        self.assertIn("2", got.title)
+        self.assertNotIn("过期", got.title, "它没过期 —— 说它过期是句不准的话")
+        self.assertTrue(got.batch, "两张以上是能一起处理的")
+        self.assertEqual(got.count, 2)
+
+    def test_a_single_orphan_is_not_flagged_as_batchable(self):
+        self.assertFalse(self.collect(self.row()).get("cred_orphan").batch)
+
+    def test_it_does_not_leak_the_cloud_user_name(self):
+        """`cred_user` 只以 bool 进来（`server._todo_view` 那边就转过了）。
+
+        万一哪天有人图方便把真名传进来，这一类的文案是最容易顺手写进去的
+        —— 而待办页是网页。
+        """
+        got = self.collect(self.row(cred_user="tempak-secret-name"))["cred_orphan"]
+        self.assertNotIn("tempak-secret-name", got.title + got.what)
 
 
 class RosterTests(unittest.TestCase):

@@ -116,3 +116,17 @@ tester 报了 1 个阻塞 bug + 3 个缺口 + 2 个 nit，全部已修：
 - [2026-09-23] PAI 配额接口（研究员查证 + 真机验证）：PaiStudio `GET pai.<region>.aliyuncs.com/api/v1/quotas/`，version 2022-01-12，采集身份零改动可调；每条配额自带 `Workspaces[]`，不用反查。**返回按调用者的工作空间成员身份裁剪** —— 「查不到配额」和「真没卡」长得一样，而要判的恰恰是采集身份多半不在其中的未登记空间，所以必须三态（yes/no/unknown），unknown 照列不过滤。没配额的空间照样能跑任务（落公共资源组按量付费），文案写「没有专属算力配额」而不是「不可用」。
 - [2026-09-23] [AUDITOR] 复审：闸门通过，无 High。H-1/H-2 与 M-1~M-5 逐条关闭。本轮新发现已随提交修掉：Med-1 远档缺下界（剩 12 小时会一轮发两张一样的卡）、Med-2 永久失败被 1 分钟一轮的 sweep 无限重试（7 天堆两万条事件）、Low-3/4/7/8。遗留不拦提交：火山 executor 的 Deny 比阿里少 CreateLoginProfile/AttachUserPolicy/AddUserToGroup（既存）、TOS 版本删除动作待真机确认。
 - [2026-09-23] 教训两条：① 送审期间不要再改同一棵树 —— 审计那 30→11→7→0 的失败是在移动的代码上跑出来的，不是套件不稳；② 修 Med-2 时我把「同因失败只记一次」放在了写标记之后，结果飞书抖动超过一分钟这一档就永远发不出去，比原问题更糟（tester 复现）。判断必须排在写标记之前：重试那一轮不写任何标记，发成了再补。
+
+[2026-09-23] [AUDITOR] 面板告警闭环 + 待办覆盖 + cred_orphan：无阻塞，4 中 9 低。
+  核过：revoke_expired 的 11 条成功/中性返回行全部不被 is_trouble 误判；AST 扫描覆盖五个步骤
+  函数链路的全部产出行；_CLOSED_STATES 不含 revoked 正确（_mark_revoked 不清 cred_user）；
+  StateDirectory 写法正确、过渡（丢旧冷却记录 ≤6 条多余告警）可接受；rest 的 dict 相等不会误剔。
+  提交前已修：① 兜底告警文案不再教人加 SuccessExitStatus（照做会关掉安全网，已加回归锁）；
+  ② UNIT_ALERT_STATE 优先读 systemd 注入的 $STATE_DIRECTORY（只推 src/ 不更新 unit 时不至于
+  静默失效）；③ server 的 live 元组改引用 todo._CLOSED_STATES（那个含 DONE 的死分支是诱饵）；
+  ④ orphan 剔除改取反判据；⑤ unit 注释「没有 root 改属主老坑」说得太满 + EnvironmentFile
+  覆盖 Environment= 的坑；⑥ sweep.timer 描述「每 10 分钟」→「每分钟」。
+  下一批（审计同意可延后）：Med-3 submit_failed 是无出边终态、报上待办页后没有任何按钮能处理；
+  Med-4「管理员点了作废、云那边没删成」（DONE + cred_user + sealed 已清）这第三种残留仍不上页；
+  Low-1 provision.remove_from_group 不吞 EntityNotExist.Group → 组被删后永久「回收失败」且无人能关掉；
+  Low-2 AST 扫描跳过 _mark_revoked/_revoke_failed 的透传 note（已漏一条未签字）。

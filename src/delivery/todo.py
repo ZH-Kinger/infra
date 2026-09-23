@@ -28,6 +28,15 @@ from typing import Optional
 
 URGENT = "urgent"
 NORMAL = "normal"
+
+#: 单子已经走完的状态。走到这里还留着 `cred_user`，说明云上那个号没收掉。
+#: 用字面量而不是 import tickets：todo 是纯展示层，不该反向依赖状态机。
+#:
+#: **刻意不含 `revoked`，别顺手补上去。** `cred_user` 记的是「当初建的号叫什么」，
+#: 不是「云上还有没有这个号」—— `flows._mark_revoked` 收成功后并不清它。
+#: 把 `revoked` 加进来，历史上每一张**正常收回**的凭证单都会变成「云上的号还在」，
+#: 而且是 URGENT。判据向 `flows._needs_reclaim` 对齐（它认的也只有 FAILED/CLOSED）。
+_CLOSED_STATES = ("closed", "failed")
 CHORE = "chore"
 #: 展示顺序，也是严重度顺序
 GROUPS = (URGENT, NORMAL, CHORE)
@@ -272,8 +281,14 @@ def collect_iam_drift(report: Report, cached: dict, held: set) -> None:
 
 
 def collect_tickets(report: Report, rows: list) -> None:
-    """申请单：开通失败、登录名没写进 IAM、卡住不动。**这三类都有人在等**。"""
-    failed = [t for t in rows or () if t.get("state") == "failed"]
+    """申请单：开通失败、登录名没写进 IAM、卡住不动。**这三类都有人在等**。
+
+    `submit_failed`（提交给审批那一步就断了）也算 —— 它和 `failed` 一样是「有人在等、
+    而且不会自己好」，但它**不会推飞书**（`flows.recover_stuck` 只在 `executing` 分支
+    调 `_emit`）。只挑 `failed` 的话，这类单子在任何地方都不会出现（审计 Med-1）。
+    """
+    stuck_states = ("failed", "submit_failed")
+    failed = [t for t in rows or () if t.get("state") in stuck_states]
     if failed:
         oldest = min((days_ago(t.get("created_at", "")) or 0) for t in failed) or None
         report.add(
@@ -316,8 +331,38 @@ def collect_expiring(report: Report, rows: list, now: Optional[float] = None) ->
     而到期那天断的是服务。两边说的是同一件事，但收件人不同，少哪一边都会漏。
     """
     at = now if now is not None else time.time()
-    soon = [r for r in rows or () if at < (r.get("expires_at_ts") or 0) <= at + 7 * 86400]
-    dead = [r for r in rows or () if 0 < (r.get("expires_at_ts") or 0) <= at]
+
+    # **单子已经走完、云上那个子账号还在 = 现在就该看，和到期时间无关。**
+    # `flows._needs_reclaim` 对这类单子根本不看 `expires_at_ts`，定时任务从关单那天起
+    # 每分钟试删一次；而这里要是按到期时间筛，「今天关掉的 90 天凭证单」要等 83 天
+    # 才在页面上出现。也不能把它塞进「已过期」那一类 —— 它没过期，那是句不准的话。
+    def _orphan(r) -> bool:
+        return bool(r.get("cred_user")) and r.get("state") in _CLOSED_STATES
+
+    orphan = [r for r in rows or () if _orphan(r)]
+    # 取反判据，不写 `r not in orphan` —— 那是 O(n²)，而且「不会误剔」要靠
+    # 「判据是行内容的纯函数」这段推理才成立。读的人不该被要求做这段推理（审计 Low-4）
+    rest = [r for r in rows or () if not _orphan(r)]
+    soon = [r for r in rest if at < (r.get("expires_at_ts") or 0) <= at + 7 * 86400]
+    dead = [r for r in rest if 0 < (r.get("expires_at_ts") or 0) <= at]
+    if orphan:
+        report.add(
+            Item(
+                kind="cred_orphan",
+                group=URGENT,
+                title=f"{len(orphan)} 张凭证的单子已经关了，云上的号还在",
+                what=(
+                    "单子走完了，子账号和它那把长期 AK 还留在云上 —— 定时任务在试着删，"
+                    "删不掉才是要你看的。收不掉的原因通常是号被手工改过（改了名、挂了别的策略）。"
+                ),
+                action="去看",
+                href="#admin/requests",
+                source="申请单",
+                source_at="",
+                batch=len(orphan) > 1,
+                count=len(orphan),
+            )
+        )
     if soon:
         first = min(soon, key=lambda r: r.get("expires_at_ts") or 0)
         days = max(0, int(((first.get("expires_at_ts") or at) - at) / 86400))

@@ -1649,6 +1649,7 @@ class SweepTests(unittest.TestCase):
         from unittest import mock
 
         from delivery import cli_requests
+        from delivery.cli import EXIT_REPORTED
 
         h = Harness()
         work = Path(tempfile.mkdtemp())
@@ -1697,7 +1698,14 @@ class SweepTests(unittest.TestCase):
                 code = cli_requests._sweep(args)
         finally:
             os.chdir(cwd)
-        self.assertEqual(code, 1)  # 坏单子算一个问题
+        # 坏单子算一个问题，但**是「已经报出来的那一类」**：活干完了、单子上记了、
+        # 日志里打了 —— 退 3（`EXIT_REPORTED`，单元里 `SuccessExitStatus=3`），
+        # 不惊动 systemd 的 OnFailure 兜底告警。
+        # 这里写死 1 的那些年，一张发不出提醒的单子就能让管理员每分钟收到一条
+        # 「异常退出，没来得及出报告（崩溃 / 超时被杀 / 依赖导入失败）」——
+        # 三种原因一个没中。**1 留给「这一轮真没干成活」**，见
+        # test_sweep_still_revokes_when_feishu_token_fails（审批同步整步跳过 → 1）。
+        self.assertEqual(code, EXIT_REPORTED)
         self.assertEqual(store.get(ticket["id"])["status"], t.DONE)
         manual = json.loads((ident / "manual-links.json").read_text(encoding="utf-8"))
         self.assertEqual(manual["links"]["new@wuji.tech"]["accounts"], [f"aliyun/{ACC}/xinren"])

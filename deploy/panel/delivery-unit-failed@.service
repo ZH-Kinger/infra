@@ -20,6 +20,20 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+# 冷却记录要落盘，否则每次失败都私聊一遍，一分钟一轮的定时器一天能发一千多条。
+# **用 StateDirectory，不开 identity/ 的写权限**：这个单元带着飞书应用凭证做出站请求，
+# 是本机最靠外的进程之一，没有理由让它能覆盖 tickets.json / people.json / admins.json。
+# systemd 自己建目录、属主是 delivery、重启保留。
+#
+# 两个别踩的地方：
+#  · **目录归 systemd 管了，文件没有。** 以 root 手跑一次 `delivery unit-failed`
+#    （不带 systemd 环境）会把 alert-state.json 重建成 root:root 0600，之后 delivery
+#    读不了也写不了 → 冷却永久失效（每次只在 journal 留一行）。要验就 `sudo -u delivery` 跑。
+#  · **EnvironmentFile 的取值覆盖 Environment=，与书写顺序无关。** 哪天 refresh.env 里
+#    出现同名 DELIVERY_ALERT_STATE，下面这行会静默失效。代码侧兜底是读 systemd 自己注入的
+#    $STATE_DIRECTORY（见 cli.UNIT_ALERT_STATE），所以这行漏了或被覆盖都还能落到同一个目录。
+StateDirectory=delivery
+Environment=DELIVERY_ALERT_STATE=/var/lib/delivery/alert-state.json
 TimeoutStartSec=2min
 ProtectKernelTunables=true
 ProtectKernelModules=true

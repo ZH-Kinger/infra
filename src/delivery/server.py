@@ -418,11 +418,26 @@ def _todo_view(backend) -> dict:
                         and bool(row.get("user_created"))
                         and not row.get("iam_written")
                     ),
+                    # 云上那个子账号还在不在。已关单 / 已失败但它还在 = 一把还能用的
+                    # 凭证没收掉，下面 collect_expiring 靠它把这类单子捞回来
+                    "cred_user": bool(row.get("cred_user")),
                 }
             )
         todo_mod.collect_tickets(report, rows)
         # 到期提醒是双份的：飞书私聊提醒申请人（flows.remind_expiring），这里提醒管理员
-        todo_mod.collect_expiring(report, [r for r in rows if r.get("state") == tickets_mod.DONE])
+        # **不能只喂 DONE。** `flows._needs_reclaim` 把「已关单但云上凭证还在」的也算进
+        # 回收范围，那种单子状态是 CLOSED/FAILED —— 只喂 DONE 的话，一把删不掉的长期 AK
+        # 在待办页上一个字都不会出现，而它正是最该被看见的（审计 Med-1）
+        live = (tickets_mod.DONE, tickets_mod.CLOSED, tickets_mod.FAILED)
+        todo_mod.collect_expiring(
+            report,
+            [
+                r
+                for r in rows
+                if r.get("state") == tickets_mod.DONE
+                or (r.get("state") in live and r.get("cred_user"))
+            ],
+        )
 
     part("申请单", _tickets)
 

@@ -727,6 +727,7 @@ def _move_announce(args):
 
 
 def _sweep(args) -> int:
+    from . import flows as flows_mod
     from . import iam_sync
     from . import notify as notify_mod
     from . import people as people_mod
@@ -734,7 +735,7 @@ def _sweep(args) -> int:
     from . import review as review_mod
     from .approval import ApprovalConfig, FeishuApproval
     from .catalog import load as load_catalog
-    from .cli import _require_identity_dir
+    from .cli import EXIT_REPORTED, _require_identity_dir
     from .flows import Flows
     from .identity.directory import tenant_token
     from .provision import executor_configured, executor_from_env, issuer_configured
@@ -745,7 +746,15 @@ def _sweep(args) -> int:
     rules_path = getattr(args, "policy_rules", "identity/policy-rules.json")
     for path in (args.tickets, args.people, args.manual, policies_path, rules_path):
         _require_identity_dir(Path(path).resolve())
-    problems = 0
+    # **两类问题分开记，因为退出码的含义不一样**（见本函数末尾）：
+    #   broken  = 这一轮没干成活（整步抛异常）→ 1 → systemd 的 OnFailure 兜底告警
+    #   handled = 某张单子有问题，已经打印、已经记进单子 → 3（EXIT_REPORTED）→ 正常结束
+    # 混着记的代价 2026-09-23 在线上看到了：两张单子的申请人没有飞书标识、到期提醒
+    # 永远发不出去，于是一分钟一轮的 sweep 每分钟退 1、每分钟触发一次兜底告警，
+    # 管理员每分钟收到一条「异常退出，没来得及出报告（崩溃 / 超时被杀 / 依赖导入失败）」——
+    # 三种原因一个没中，任务跑得好好的。报警开始说假话，人就学会了忽略它。
+    broken = 0
+    handled = 0
     app_id = os.environ.get("DELIVERY_FEISHU_APP_ID", "")
     secret = os.environ.get("DELIVERY_FEISHU_APP_SECRET", "")
     approval = None
@@ -760,7 +769,8 @@ def _sweep(args) -> int:
             if config is not None:
                 approval = FeishuApproval(config, token_fn)
     except Exception as exc:  # noqa: BLE001
-        problems += 1
+        # 审批同步**整个跳过**了，不是某张单子的事：这一轮确实没干成活
+        broken += 1
         print(f"飞书审批不可用，本次跳过审批同步：{_brief(exc)}")
     notify = notify_mod.from_env(os.environ, token=token_fn)
     bindings = str(Path(args.people).with_name("bindings.json"))
@@ -794,36 +804,62 @@ def _sweep(args) -> int:
         issuer_ready=issuer_configured,
     )
     # 每一步、每张单子都隔离：一张单子出错不能挡住后面的到期回收
-    for ticket in flows.store.all():
+    #
+    # **存储读不了要打印一行原因再退，不能带 traceback 崩掉。** 崩掉的话 journal 里
+    # 一行报告都没有，而兜底告警只会说「这一轮没跑成」—— 人看日志看到的是一坨
+    # traceback，得自己读到最后一行才知道是 JSON 坏了。这一条也是真正需要兜底告警的
+    # 那种情况（审批同步 / 到期回收 / 到期提醒全停），所以返回 1 而不是 3
+    try:
+        tickets = flows.store.all()
+    except Exception as exc:  # noqa: BLE001
+        print(f"读不了申请单存储，本轮什么都没做：{_brief(exc)}")
+        return 1
+    for ticket in tickets:
         if ticket.get("status") != PENDING:
             continue
         try:
             after = flows.sync(ticket["id"], force=True)
         except Exception as exc:  # noqa: BLE001
-            problems += 1
+            # 单张单子核对不过（审批码写坏、实例被删）：已经打印，后面的单子照跑
+            handled += 1
             print(f"{ticket['id']}：同步失败 {_brief(exc)}")
             continue
         if after.get("status") != ticket.get("status"):
             print(f"{ticket['id']}：{ticket['status']} → {after['status']}")
+    # 每一步带一个「这一步出问题要不要惊动人」。绝大多数是 False —— 问题会留在单子上、
+    # 出现在待办页，不值得让一分钟一轮的定时器变成一分钟一条私聊。
     steps = (
-        lambda: flows.recover_stuck(actor="system"),
-        flows.resume_approved if approval is not None else list,
-        flows.revoke_expired,
+        (lambda: flows.recover_stuck(actor="system"), False),
+        (flows.resume_approved if approval is not None else list, False),
+        # **回收失败是例外。** 到期没收干净 = 一把还能用的凭证留在云上，而我们以为收了。
+        # 它不会变成刷屏：单子回收成功后这行自然消失，而且兜底告警有 6 小时冷却兜着。
+        (flows.revoke_expired, True),
         # 号建好了、登录名没写进公司 IAM = 那个人登不进控制台。**自动补，别等人点按钮**
-        flows.retry_iam_writes,
-        flows.remind_expiring,
+        (flows.retry_iam_writes, False),
+        (flows.remind_expiring, False),
     )
-    for step in steps:
+    for step, urgent in steps:
         try:
             lines = step()
         except Exception as exc:  # noqa: BLE001
-            problems += 1
+            broken += 1
             print(f"定时任务出错：{_brief(exc)}")
             continue
         for line in lines:
             print(line)
-            problems += "失败" in line or "中断" in line
-    return 1 if problems else 0
+            if not flows_mod.is_trouble(line):
+                continue
+            if urgent:
+                broken += 1
+            else:
+                handled += 1
+    if broken:
+        return 1
+    # 跑完了、单张单子有问题、已经打印也已经记进单子 → 3。
+    # 单元里 `SuccessExitStatus=3` 把它声明成正常结束，兜底告警只管真出事的那种。
+    # 这些问题**不是没人管**：它们在待办页上（`delivery/todo.py` 从单子里读），
+    # 那里一条就是一条，不会因为定时器一分钟一轮就变成一分钟一条私聊。
+    return EXIT_REPORTED if handled else 0
 
 
 def _find_account(data: dict, spec: str) -> dict:

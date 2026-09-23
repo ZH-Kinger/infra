@@ -379,6 +379,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     uf.add_argument("--unit", required=True, help="挂掉的单元名（systemd 传 %%i）")
     uf.add_argument("--admins", default="identity/admins.json")
+    uf.add_argument(
+        "--state",
+        default=UNIT_ALERT_STATE,
+        help="告警冷却记录（只存单元名和时间戳），默认 identity/alert-state.json",
+    )
 
     rf = commands.add_parser(
         "refresh", help="定时任务：采集权限快照、生成映射提案、重建人员名册，异常时飞书告警"
@@ -1903,8 +1908,14 @@ def _request_paths(args) -> dict:
     return out
 
 
-#: 刷新跑完了、发现了问题、告警已经送到。和「进程崩了、告警没发出去」（1）分开，
-#: 这样 systemd 的 OnFailure 兜底只在后一种情况触发。见 deploy/panel/delivery-refresh.service
+#: 跑完了、发现了问题、**这个问题有人会知道**。和「进程崩了 / 这一轮没干成活」（1）分开，
+#: 这样 systemd 的 OnFailure 兜底只在后一种情况触发。
+#:
+#: 两个使用者对「有人会知道」的兑现方式不同，别按其中一个去理解另一个：
+#:   · `refresh` —— 它自己先把告警私聊出去了，送到了才返 3（见 `_cmd_refresh` 末尾）。
+#:   · `requests sweep` —— 它**不发告警**，问题留在单子上、出现在管理后台待办页。
+#:     一分钟一轮的定时器不适合把每个办不了的单子变成一条私聊。
+#: 见 deploy/panel/delivery-refresh.service、delivery-sweep.service 的 SuccessExitStatus。
 EXIT_REPORTED = 3
 
 
@@ -1936,23 +1947,155 @@ def _admin_alert(title: str, text: str, admins_path: str = "") -> str:
     return ""
 
 
+#: 同一个单元连续失败时，最多这么久私聊一次。
+#:
+#: 定时器最密的是 sweep（1 分钟一轮）。一个不会自己好的故障 = 一天 1440 条私聊，
+#: 而被刷屏的人第二天就把这个机器人折叠了 —— 之后真出事也没人看。收敛到 6 小时：
+#: 一天最多 4 条，既提醒得住，也不至于让人关掉。
+UNIT_ALERT_COOLDOWN = 6 * 3600
+#: 记「上次为哪个单元告过警」：只有单元名和时间戳，没有任何员工数据。
+#:
+#: **刻意不放 identity/。** 放那儿的话，为了写这一个文件就得给
+#: `delivery-unit-failed@.service` 开整个 identity/ 的写权限 —— 而那个单元带着飞书
+#: 应用凭证做出站请求，是本机最靠外的进程之一，凭空获得覆盖 tickets.json /
+#: people.json / admins.json 的能力（审计 Med-3）。用 systemd 的 `StateDirectory=delivery`：
+#: 目录由 systemd 建、属主自动是 delivery、重启保留，也就不会有「root 手跑一次
+#: 把属主改成 root、冷却从此静默失效」那个老坑。
+#: **优先读 systemd 自己注入的 `$STATE_DIRECTORY`**：只推 `src/` 不更新 unit 文件是这台机器的
+#: 部署惯例，而那样一来进程里既没有 `DELIVERY_ALERT_STATE`、unit 里也没有 `StateDirectory=`，
+#: `ProtectSystem=strict` 下写 `/var/lib/delivery` 直接 PermissionError —— 冷却完全不生效、
+#: 刷屏原样回来，而线索只有 journal 里一行「告警冷却记不下来」。读 `$STATE_DIRECTORY` 的话，
+#: 单元里漏写 `Environment=` 那行也不会错（审计 Med-2）。
+_STATE_DIR = os.environ.get("STATE_DIRECTORY", "").split(":")[0]
+UNIT_ALERT_STATE = os.environ.get("DELIVERY_ALERT_STATE") or (
+    f"{_STATE_DIR}/alert-state.json" if _STATE_DIR else "/var/lib/delivery/alert-state.json"
+)
+
+
+def _load_alert_state(file: Path) -> Optional[dict]:
+    """状态文件 → dict。读不了返回 None（调用方当「没记过」，照发）。"""
+    try:
+        if not file.exists():
+            return {}
+        got = json.loads(file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return got if isinstance(got, dict) else {}
+
+
+def _save_alert_state(file: Path, state: dict) -> None:
+    try:
+        # 走仓库现成的原子写：临时文件名随机（`mkstemp`），六个单元共用这个告警单元、
+        # 两个同一秒挂掉时不会互相写坏对方的临时文件。写坏一次的代价是永久的 ——
+        # `_load_alert_state` 读不懂就直接返回、再也不重写，冷却从此关闭（审计 Low-1）
+        _atomic_private_write(file, json.dumps(state, ensure_ascii=False, indent=2).encode())
+    except OSError as exc:
+        # 写不下去（目录只读、盘满）：下一次还是会发。刷屏好过静默
+        print(f"（告警冷却记不下来：{type(exc).__name__} {exc}）", file=sys.stderr)
+
+
+def _alert_cooldown(unit: str, path: str, now: float) -> tuple:
+    """`(要不要发, 这是连续第几次)`。读写状态文件出任何问题都返回「发」。
+
+    **宁可重复也别漏报**：这个文件只是为了少刷屏，它坏了不该把告警通道一起带走。
+
+    **这里只记「又失败了一次」，不动 `last_alert`。** 冷却的计时起点是「告警真的送到」，
+    由 `_alert_sent` 在发成功之后写 —— 在这里顺手写上的话，飞书抖一下（500 / token 没注入）
+    那条没人收到的告警照样开启了 6 小时静默：第一条真正送达的告警要等到六小时后。
+    """
+    file = Path(path or UNIT_ALERT_STATE)
+    state = _load_alert_state(file)
+    if state is None:
+        return True, 0  # 读不了就当没记过
+    units = state.get("units")
+    units = units if isinstance(units, dict) else {}
+    rec = units.get(unit)
+    rec = rec if isinstance(rec, dict) else {}
+    try:
+        last = float(rec.get("last_alert") or 0)
+        streak = int(rec.get("streak") or 0)
+    except (TypeError, ValueError):
+        last, streak = 0.0, 0
+    # **落在未来的时刻不认**：机器时钟跳变、或者有人手改过这个文件，都会让 now-last 恒为负，
+    # 于是这个单元被静音到真实时间追上为止 —— 而且它自己好不了。这个模块是 fail-open 的，
+    # 「时刻不合常理」比「读不懂」更该发出来
+    if last > now:
+        print(f"（{unit} 的上次告警时刻在未来，按没记过处理）", file=sys.stderr)
+        last = 0.0
+    # **隔够久的一次失败是「新故障」，连号要归零。** 不归零的话，一个恢复了三个月、
+    # 今天重新挂掉的单元，告警会写「这是连续第 400 次」—— 把人往「已经挂很久了」带偏，
+    # 正是这次改动要消灭的那类「告警说假话」（审计 Low-6）
+    try:
+        last_fail = float(rec.get("last_fail") or 0)
+    except (TypeError, ValueError):
+        last_fail = 0.0
+    if last_fail and now - last_fail > 2 * UNIT_ALERT_COOLDOWN:
+        streak = 0
+    # 冷却期外 = 上次告警之后它一直没好（或者刚坏）：这条要发，连号继续往上加
+    send = now - last >= UNIT_ALERT_COOLDOWN
+    streak += 1
+    units[unit] = {"streak": streak, "last_fail": now, "last_alert": last}
+    state["units"] = units
+    _save_alert_state(file, state)
+    return send, streak
+
+
+def _alert_sent(unit: str, path: str, now: float) -> None:
+    """告警**确实送到**之后才开始计冷却。发不出去不算，下一轮还要再试。"""
+    file = Path(path or UNIT_ALERT_STATE)
+    state = _load_alert_state(file)
+    if state is None:
+        return
+    units = state.get("units")
+    units = units if isinstance(units, dict) else {}
+    rec = units.get(unit)
+    rec = dict(rec) if isinstance(rec, dict) else {}
+    rec["last_alert"] = now
+    units[unit] = rec
+    state["units"] = units
+    _save_alert_state(file, state)
+
+
 def _cmd_unit_failed(args) -> int:
     """systemd 的 OnFailure 兜底：定时任务**自己没来得及发告警**就结束了。
 
     崩溃、超时被杀、依赖导入失败 —— 这几种情况进程拿不到报告，也就发不出告警。
     不兜底的话，一个每小时跑一次的任务可以连着挂好几天没人知道。
+
+    **文案不许替 systemd 猜原因。** 原先写死「崩溃 / 超时被杀 / 依赖导入失败」，
+    而 2026-09-23 线上真正的原因是第四种：任务跑完了、只是退出码非零。
+    三句猜测全错，人照着去查日志什么也查不到 —— 告警说假话比不报还糟。
     """
     unit = str(args.unit or "").strip() or "（未知单元）"
+    now = time.time()
+    state_path = getattr(args, "state", "") or UNIT_ALERT_STATE
+    send, streak = _alert_cooldown(unit, state_path, now)
+    hours = UNIT_ALERT_COOLDOWN // 3600
+    if not send:
+        print(f"（{unit} 仍在失败，第 {streak} 次；{hours} 小时内不重复私聊）")
+        return 0
+    again = f"这是连续第 {streak} 次（{hours} 小时内只私聊一次）。\n" if streak > 1 else ""
+    # **别在这里教人加 SuccessExitStatus。** 原先那句是这么写的，而这批改完之后
+    # sweep 最常见的失败恰恰是「到期回收没收干净」—— 日志里没 traceback、报告也出全了，
+    # 完全符合那句话的判据。照做就是 SuccessExitStatus=1，而 1 同时是「整步崩了」
+    # 「存储读不了」的退出码 → 兜底告警从此永久失效。告警不该给出会关掉自己的建议。
     text = (
-        f"{unit} 异常退出，没来得及出报告（崩溃 / 超时被杀 / 依赖导入失败）。\n"
+        f"{unit} 这一轮没跑成。\n"
+        f"{again}"
         f"看日志：journalctl -u {unit} -n 80 --no-pager\n"
-        "修好之前，这个任务管的数据不会更新。"
+        "最后几行有 Python 报错 = 真崩了（或者被超时杀掉、依赖导入失败）。\n"
+        "没有报错、报告也出全了 = 任务跑完了，但这一轮有活没干成，三种：\n"
+        "  · 到期回收没收干净 —— 管理后台待办页\n"
+        "  · 审批同步整步跳过（飞书不可用）—— 日志里有「飞书审批不可用」\n"
+        "  · 申请单存储读不了 —— 日志里有「读不了申请单存储」"
     )
-    why = _admin_alert(f"定时任务异常退出：{unit}", text, args.admins)
+    why = _admin_alert(f"定时任务没跑成：{unit}", text, args.admins)
     if why:
+        # 没送到就**不开始计冷却**：下一轮还要再试，否则一次飞书抖动换来六小时静默
         print(f"兜底告警没发出去：{why}", file=sys.stderr)
         return 1
-    print(f"已私聊管理员：{unit} 异常退出")
+    _alert_sent(unit, state_path, now)
+    print(f"已私聊管理员：{unit} 没跑成")
     return 0
 
 

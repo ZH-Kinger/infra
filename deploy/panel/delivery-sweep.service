@@ -6,6 +6,11 @@ Wants=network-online.target
 OnFailure=delivery-unit-failed@%n.service
 
 [Service]
+# 3 = 跑完了、某张单子有问题、已经打印也已经记进单子（待办页上看得到）。
+# 不声明成正常结束的话，一分钟一轮的定时器会把一张办不了的单子变成一分钟一条私聊 ——
+# 而兜底告警的原文是「异常退出，没来得及出报告」，一句真话都没有。
+SuccessExitStatus=3
+
 Type=oneshot
 User=delivery
 WorkingDirectory=/opt/infra

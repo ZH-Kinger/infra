@@ -33,6 +33,8 @@ from delivery.feishu import FeishuUser
 from delivery.registry import PlatformRegistry
 from delivery.server import COOKIE_NAME, Backend, Store, _WebSession, make_handler
 
+from . import test_delivery_access_requests as base
+
 TODO = "/api/admin/todo"
 ACC = "1000000000000001"
 DAY = 86400
@@ -449,6 +451,190 @@ class WiringTests(Base):
         )
         self.assertNotIn("cred_expiring", self.kinds())
 
+    def test_a_ticket_that_never_reached_the_approval_reaches_the_page(self):
+        """`submit_failed`：提交给飞书审批那一步就断了（审计 Med-1）。
+
+        它**不会推飞书**（`flows.recover_stuck` 只在 `executing` 那一支 `_emit`），
+        所以待办页是它唯一会露面的地方。只挑 `failed` 的话，申请人以为在走流程、
+        管理员一个字都看不到。
+        """
+        self.tickets(
+            {
+                "id": "REQ-5",
+                "kind": "permission",
+                "status": tickets_mod.SUBMIT_FAILED,
+                "created_at": iso(self.clock() - DAY),
+            }
+        )
+        self.assertEqual(self.item("request_failed")["count"], 1)
+
+    def test_a_closed_ticket_whose_cloud_user_is_still_there_is_reported(self):
+        """**已关单、但云上那个子账号还在** = 一把还能用的长期 AK 没人管（审计 Med-1）。
+
+        `flows._needs_reclaim` 把这种单子算进回收范围（「交付失败或被关掉、但子账号
+        已经建出来」），定时任务会一直试着删；删不掉的时候，这一页是**唯一**会说出来的
+        地方 —— 而在改之前，喂给 `collect_expiring` 的行只有 DONE，它一个字都不会出现。
+
+        它落的是 `cred_orphan`、**在要紧的那一组**，而不是「已过期还没收回」：两件事
+        不一样，定时任务对这一类**根本不看到期时间**（见
+        `test_a_closed_ticket_with_a_live_cloud_user_shows_up_before_it_expires`）。
+        """
+        self.tickets(
+            {
+                "id": "REQ-6",
+                "kind": "credential",
+                "status": tickets_mod.CLOSED,
+                "cred_user": "tempak-abc",
+                "expires_at_ts": self.clock() - DAY,
+                "created_at": iso(self.clock() - 3 * DAY),
+            }
+        )
+        got = self.item("cred_orphan")
+        self.assertEqual(got["count"], 1)
+        self.assertEqual(got["group"], todo_mod.URGENT, "云上留着一把能用的 AK 不是「顺手处理」")
+        # 同一张单子不许同时占两行：页面上一件事就是一行，数字也才对得上
+        self.assertNotIn("cred_expired", self.kinds())
+        self.assertNotIn("cred_expiring", self.kinds())
+
+    def test_a_failed_ticket_whose_cloud_user_is_still_there_is_reported_too(self):
+        """FAILED 和 CLOSED 同一类：凭证签发出来了、没送达，云上那个号照样在。"""
+        self.tickets(
+            {
+                "id": "REQ-7",
+                "kind": "credential",
+                "status": tickets_mod.FAILED,
+                "cred_user": "tempak-def",
+                "expires_at_ts": self.clock() - DAY,
+                "created_at": iso(self.clock() - 3 * DAY),
+            }
+        )
+        got = self.item("cred_orphan")
+        self.assertEqual(got["count"], 1)
+        self.assertEqual(got["group"], todo_mod.URGENT)
+        self.assertNotIn("cred_expired", self.kinds())
+
+    def test_a_closed_ticket_with_nothing_left_on_the_cloud_is_not_reported(self):
+        """反过来的一边：**收干净了的单子不许再出现**。
+
+        `cred_user` 空 = 云上没有残留（定时任务删完会把它清掉，STS 凭证本来就没有）。
+        还报的话，待办页会被所有历史上关掉过的单子填满，而那一页的全部价值就是
+        「上面每一条都需要你动手」—— 一旦掺进不需要动手的，人就不看了。
+
+        这一条现在还多守一层：`cred_orphan` 是 URGENT，误报会直接点亮导航角标。
+        """
+        self.tickets(
+            {
+                "id": "REQ-8",
+                "kind": "credential",
+                "status": tickets_mod.CLOSED,
+                "cred_user": "",
+                "expires_at_ts": self.clock() - DAY,
+                "created_at": iso(self.clock() - 3 * DAY),
+            }
+        )
+        kinds = self.kinds()
+        self.assertNotIn("cred_expired", kinds)
+        self.assertNotIn("cred_orphan", kinds)
+
+    def test_an_ordinary_expired_done_ticket_still_shows_up(self):
+        """对照组：放宽筛选不能把原来就该出现的那一类挤掉。"""
+        self.tickets(
+            {
+                "id": "REQ-9",
+                "kind": "permission",
+                "status": tickets_mod.DONE,
+                "expires_at_ts": self.clock() - DAY,
+                "created_at": iso(self.clock() - 3 * DAY),
+            }
+        )
+        self.assertEqual(self.item("cred_expired")["count"], 1)
+
+    def test_a_withdrawn_ticket_is_not_swept_in_by_the_wider_filter(self):
+        """放宽只放到 DONE / CLOSED / FAILED 三个状态（`flows._RECLAIMABLE` 那一组）。
+
+        撤回 / 驳回的单子从来没开通过，云上没有任何东西 —— 它们要是也被算进来，
+        「已过期还没收回」那一行的数字就不再是「有多少东西要收」了。
+
+        注意这道门在 **server 那一层**：`_todo_view._tickets` 压根不会把 WITHDRAWN 的行
+        喂进 `collect_expiring`，所以 `todo._CLOSED_STATES` 认不认它都无所谓。
+        两层判据不一致的后果见 `RevokedOrphanTests`。
+        """
+        self.tickets(
+            {
+                "id": "REQ-10",
+                "kind": "credential",
+                "status": tickets_mod.WITHDRAWN,
+                "cred_user": "tempak-ghi",
+                "expires_at_ts": self.clock() - DAY,
+                "created_at": iso(self.clock() - 3 * DAY),
+            }
+        )
+        kinds = self.kinds()
+        self.assertNotIn("cred_expired", kinds)
+        self.assertNotIn("cred_orphan", kinds)
+
+    def test_a_closed_ticket_with_a_live_cloud_user_shows_up_before_it_expires(self):
+        """回归锁（2026-09-23 修，`todo.cred_orphan`）：**这一类和到期时间无关**。
+
+        修之前：`_todo_view._tickets` 放宽了喂给 `collect_expiring` 的行（DONE，或
+        DONE/CLOSED/FAILED 且 `cred_user` 还在），但 `collect_expiring` 自己的筛选仍然
+        **按到期时间**（7 天内到期 / 已过期），而 `flows._needs_reclaim`
+        （`src/delivery/flows.py:1881-1884`）对这类单子**根本不看** `expires_at_ts`：
+        只要 `kind==credential and cred_user and status in (FAILED, CLOSED)` 就立刻算
+        「云上还有东西要收」。两个判据不一致，于是一张今天关掉的 90 天凭证单：
+
+          · 定时任务：从今天起每分钟试删一次，删不掉退 1、私聊管理员（这半边一直是好的）；
+          · 待办页：**83 天后才出现**。
+
+        当时的实测（`server_mod._todo_view` 直接调）：
+            {kind: credential, status: closed, cred_user: "tempak-zzz",
+             expires_at_ts: now + 60 天}   →  kinds == []
+
+        现在：`collect_expiring` 先把这类行摘成 `orphan`（`src/delivery/todo.py` 的
+        `_CLOSED_STATES`），单独报一类 `cred_orphan`、URGENT、不参与到期时间的筛选。
+        文案也才是准的 —— 它**没有过期**，说「已过期还没收回」是句不准的话。
+
+        这条用例盯的就是「和到期时间无关」：所以到期时间特意放在**未来 60 天**。
+        真按到期时间筛的话这里必然是空的。
+        """
+        self.tickets(
+            {
+                "id": "REQ-12",
+                "kind": "credential",
+                "status": tickets_mod.CLOSED,
+                "cred_user": "tempak-zzz",
+                "expires_at_ts": self.clock() + 60 * DAY,
+                "created_at": iso(self.clock() - DAY),
+            }
+        )
+        got = self.item("cred_orphan")
+        self.assertEqual(got["count"], 1)
+        self.assertEqual(got["group"], todo_mod.URGENT)
+        # 到期还早，所以这两类一条都不该有 —— 它要是落进「已过期」，页面就在说假话
+        self.assertNotIn("cred_expired", self.kinds())
+        self.assertNotIn("cred_expiring", self.kinds())
+
+    def test_the_cloud_user_flag_is_published_as_a_boolean(self):
+        """行里带出去的是 `bool`，不是用户名本身。
+
+        这一页是网页：多带一个云上登录名出去没有任何用处，只是多一处可泄漏的字段。
+        """
+        self.tickets(
+            {
+                "id": "REQ-11",
+                "kind": "credential",
+                "status": tickets_mod.CLOSED,
+                "cred_user": "tempak-secret-name",
+                "expires_at_ts": self.clock() - DAY,
+                "created_at": iso(self.clock() - 3 * DAY),
+            }
+        )
+        view = self.view()
+        self.assertEqual(self.item("cred_orphan", view)["count"], 1)
+        # 这一行**正是靠 `cred_user` 算出来的**，所以它是最容易顺手把登录名带出去的一条：
+        # 标题里写「tempak-secret-name 还在云上」很自然，而这一页是网页
+        self.assertNotIn("tempak-secret-name", json.dumps(view, ensure_ascii=False))
+
     def test_reconcile_drift_reaches_the_page(self):
         self.write(
             "iam-reconcile.json",
@@ -588,6 +774,144 @@ class AcFiveTests(Base):
             )
         )
         self.assertEqual(len(rows), len(orphan))
+
+
+class RevokedOrphanTests(Base):
+    """**回归锁：已经收回（REVOKED）的凭证单不算「云上的号还在」，哪怕 `cred_user` 还在。**
+
+    这一类有两道门，两道都锁：
+
+        server（`_todo_view._tickets`）  喂 `collect_expiring` 的只有 DONE/CLOSED/FAILED
+        todo（`_CLOSED_STATES`）        算 orphan 的只有 CLOSED/FAILED
+
+    两处都没有 REVOKED，而且**都是有意的**。下一个人会犯的错是「消掉这处不一致」——
+    看见 `cred_user` 还在就以为云上还有残留，于是把 `revoked` 补进
+    `_CLOSED_STATES`、或者把 server 的 `live` 和它对齐。那一改，**历史上每一张
+    正常收回的凭证单都会变成一条 URGENT 的「云上的号还在」**，全是假话；
+    而这一页说一次假话，之后就没人看了。
+
+    为什么它是假话：`cred_user` 记的是「当初建的号叫什么」，**不是**「云上还有没有
+    这个号」—— 见 `test_a_revoked_ticket_still_carries_its_cloud_user_name`，
+    那条用真 `Flows` 跑一遍回收，证明收成功之后这个字段原样还在。
+    判据的真相源是 `flows._needs_reclaim`，它认的也只有 FAILED / CLOSED。
+
+    （server 比 todo 多一个 DONE，那个差异是对的、别去抹平：DONE 的单子要走
+    「7 天内到期 / 已过期」那两类，它的子账号本来就该在云上。）
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        # `Env` 要发凭证，而凭证的唯一出口是取件地址：`DELIVERY_BASE_URL` 没配 flows 会直接拒。
+        # 只给这个类开，别影响本文件其余用例（它们刻意不带这个环境变量）
+        base.setUpModule()
+
+    @classmethod
+    def tearDownClass(cls):
+        base.tearDownModule()
+
+    def test_a_revoked_ticket_never_shows_up_as_an_orphan(self):
+        """整条链路走一遍：一张已收回、`cred_user` 还留着的单子 → 待办页上什么都没有。
+
+        这条锁的是**管理员真正看到的东西**（两道门串联的结果）。两道门各自那一层
+        另有专门的锁 —— 单独松掉一道，红的是那边：
+
+            todo 那道    `test_delivery_todo.py::OrphanTests`
+                         ::test_a_revoked_ticket_is_not_an_orphan
+            两张表的形状 `test_the_two_filters_are_deliberately_not_the_same_list`（下一条）
+
+        本机实测：只把 `revoked` 补进 `_CLOSED_STATES`，红的是上面那两条，**这一条仍然绿**
+        （server 那道还拦着）。两道一起松掉它才红 —— 所以它是兜底，不是唯一那道。
+
+        到期时间故意给过去的：连「已过期还没收回」也不许有 —— 号已经删了，
+        那句话同样是假的。
+        """
+        self.tickets(
+            {
+                "id": "REQ-13",
+                "kind": "credential",
+                "status": tickets_mod.REVOKED,
+                "cred_user": "tempak-gone",
+                "expires_at_ts": self.clock() - DAY,
+                "created_at": iso(self.clock() - 3 * DAY),
+            }
+        )
+        kinds = self.kinds()
+        self.assertNotIn("cred_orphan", kinds, "已经收回的单子不该报「云上的号还在」")
+        self.assertNotIn("cred_expired", kinds)
+
+    def test_the_two_filters_are_deliberately_not_the_same_list(self):
+        """server 比 todo 多一个 DONE，两边都没有 REVOKED —— **这个形状是对的**。
+
+            server `live`            DONE / CLOSED / FAILED   （`flows._RECLAIMABLE`）
+            todo `_CLOSED_STATES`    CLOSED / FAILED          （`flows._needs_reclaim`）
+
+        DONE 那一个多出来是因为它要走「7 天内到期 / 已过期」那两类（子账号本来就该在）；
+        REVOKED 两边都没有是因为它已经收回了。**看起来像两处不一致，其实是两个问题的答案。**
+        这条用例就是写给「顺手把它们统一一下」的那个人看的。
+        """
+        from delivery import todo as todo_src
+
+        self.assertEqual(set(todo_src._CLOSED_STATES), {tickets_mod.CLOSED, tickets_mod.FAILED})
+        # DONE 的单子照旧走到期那两类，没被 orphan 抢走
+        self.tickets(
+            {
+                "id": "REQ-14",
+                "kind": "credential",
+                "status": tickets_mod.DONE,
+                "cred_user": "tempak-live",
+                "expires_at_ts": self.clock() + 2 * DAY,
+                "created_at": iso(self.clock() - DAY),
+            }
+        )
+        kinds = self.kinds()
+        self.assertIn("cred_expiring", kinds, "还在用的凭证快到期了，这一行不能丢")
+        self.assertNotIn("cred_orphan", kinds)
+
+    def test_a_revoked_ticket_still_carries_its_cloud_user_name(self):
+        """**这条是上面两道门的全部理由** —— 回收成功之后 `cred_user` 原样留在单子上。
+
+        `flows._mark_revoked`（`src/delivery/flows.py:1903-1916`）那次 `store.update`
+        没有 `fields=` —— 只有「没送达的凭证」那一支（`:1986`）才把
+        `cred_user`/`cred_ak_id`/`sealed` 清空。所以 `cred_user` **不能**当成
+        「云上还有没有这个号」的判据，它只是「这张单子当初建的号叫什么」
+        （留着有用：云上冒出一个没人认识的 `tempak-*` 时，靠它能查回是哪张单子发的）。
+
+        本机实测（就是本用例）：发一张 24 小时的长期凭证 → 过期 → `revoke_expired()`
+        真删了云上的号（`issuer.actions` 里有 `("revoke", <用户名>)`）→ 单子进 REVOKED，
+        而 `cred_user` 原样还在。
+
+        **所以「`cred_user` 还在 = 云上还有残留」这个直觉是错的**，而它恰恰是
+        「把 `revoked` 补进 `_CLOSED_STATES`」那个改动的全部依据。下半段把那个改动
+        模拟出来（直接把 REVOKED 的行喂进 `collect_expiring`），看它会产出什么：
+        一条假的 URGENT。这段是**反证**，不是在要求这种行为 —— 真正的判据
+        `_CLOSED_STATES` 不含 REVOKED，锁在上面两条和
+        `test_delivery_todo.py::OrphanTests::test_a_revoked_ticket_is_not_an_orphan`。
+        """
+        from .test_delivery_credentials import BUCKET, Env
+
+        env = Env()
+        done = env.run(payload={"bucket": BUCKET, "prefix": "batch/", "hours": 24})
+        self.assertTrue(done.get("cred_user"), "长期凭证才会在云上建号，不然这条用例没内容")
+        env.now[0] += 25 * 3600
+        self.assertEqual(len(env.flows.revoke_expired()), 1)
+        self.assertIn(("revoke", done["cred_user"]), env.issuer.actions, "云上那个号确实删了")
+        after = env.store.get(done["id"])
+        self.assertEqual(after["status"], tickets_mod.REVOKED)
+        self.assertEqual(after.get("cred_user"), done["cred_user"], "回收成功并没有清掉它")
+
+        row = {"state": after["status"], "cred_user": bool(after.get("cred_user"))}
+        # 现在的判据：这张「已经收干净」的单子不是 orphan
+        report = todo_mod.Report()
+        todo_mod.collect_expiring(report, [row], now=env.now[0])
+        self.assertEqual([i.kind for i in report.items], [], "收回了就不该再出现在待办页上")
+
+        # 反证：把 `revoked` 补进去会怎样 —— 同一张单子立刻变成一条 URGENT 的假告警。
+        # 这就是那个改动的代价，按线上的历史单量，有多少张收回过就有多少条
+        with mock.patch.object(todo_mod, "_CLOSED_STATES", ("closed", "failed", "revoked")):
+            louder = todo_mod.Report()
+            todo_mod.collect_expiring(louder, [row], now=env.now[0])
+        self.assertEqual([i.kind for i in louder.items], ["cred_orphan"])
+        self.assertEqual(louder.items[0].group, todo_mod.URGENT)
 
 
 class ExecutorTests(Base):
