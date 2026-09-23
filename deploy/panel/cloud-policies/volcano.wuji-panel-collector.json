@@ -1,0 +1,120 @@
+{
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeInstanceTypes",
+        "ecs:DescribeImages",
+        "ecs:DescribeZones",
+        "ecs:DescribeRegions",
+        "ecs:DescribeInstances",
+        "ecs:DescribeSecurityGroups"
+      ],
+      "Resource": [
+        "*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "vpc:DescribeVpcs",
+        "vpc:DescribeSubnets",
+        "vpc:DescribeSecurityGroups",
+        "vpc:DescribeSecurityGroupAttributes"
+      ],
+      "Resource": [
+        "*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "resourcecenter:SearchResources"
+      ],
+      "Resource": [
+        "*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetLoginProfile",
+        "iam:GetUser",
+        "iam:GetUserGroup",
+        "iam:ListAccessKeys",
+        "iam:ListAttachedUserGroupPolicies",
+        "iam:ListAttachedUserPolicies",
+        "iam:ListGroups",
+        "iam:ListPolicies",
+        "iam:ListUserGroupsForUser",
+        "iam:ListUsers",
+        "iam:ListUsersForGroup"
+      ],
+      "Resource": [
+        "*"
+      ]
+    },
+    {
+      "Effect": "Deny",
+      "Action": [
+        "ecs:AttachKeyPair",
+        "ecs:CreateImage",
+        "ecs:CreateInstance",
+        "ecs:CreateKeyPair",
+        "ecs:DeleteImages",
+        "ecs:DeleteInstance",
+        "ecs:DeleteInstances",
+        "ecs:ModifyInstanceAttribute",
+        "ecs:RunInstances",
+        "ecs:StartInstance",
+        "ecs:StartInstances",
+        "ecs:StopInstance",
+        "ecs:StopInstances",
+        "iam:AddUserToGroup",
+        "iam:AttachRolePolicy",
+        "iam:AttachUserGroupPolicy",
+        "iam:AttachUserPolicy",
+        "iam:CreateAccessKey",
+        "iam:CreateLoginProfile",
+        "iam:CreatePolicy",
+        "iam:CreateRole",
+        "iam:CreateUser",
+        "iam:CreateUserGroup",
+        "iam:DeleteAccessKey",
+        "iam:DeleteLoginProfile",
+        "iam:DeletePolicy",
+        "iam:DeleteRole",
+        "iam:DeleteUser",
+        "iam:DeleteUserGroup",
+        "iam:DetachUserGroupPolicy",
+        "iam:DetachUserPolicy",
+        "iam:RemoveUserFromGroup",
+        "iam:UpdateAccessKey",
+        "iam:UpdateLoginProfile",
+        "iam:UpdatePolicy",
+        "iam:UpdateRole",
+        "iam:UpdateUser",
+        "iam:UpdateUserGroup",
+        "tos:Abort*",
+        "tos:Create*",
+        "tos:Delete*",
+        "tos:GetObject",
+        "tos:Put*",
+        "tos:Restore*",
+        "tos:Update*",
+        "vpc:AllocateEipAddress",
+        "vpc:AuthorizeSecurityGroupIngress",
+        "vpc:CreateSecurityGroup",
+        "vpc:CreateSubnet",
+        "vpc:CreateVpc",
+        "vpc:DeleteSecurityGroup",
+        "vpc:DeleteSubnet",
+        "vpc:DeleteVpc",
+        "vpc:RevokeSecurityGroupIngress"
+      ],
+      "Resource": [
+        "*"
+      ]
+    }
+  ]
+}

@@ -116,7 +116,12 @@ def collect_volcano(creds: volcano.Credentials, *, transport=None, progress=None
             account = account or str(r.get("AccountID") or "")
             out.append(
                 {
-                    "type": str(r.get("ResourceType") or r.get("TypeName") or ""),
+                    # **优先用 TypeName**（`Volcengine::VMP::Workspace`）：`ResourceType` 是
+                    # 裸的产品内类型名，火山**任何产品**的工作区都叫 `Workspace` ——
+                    # 只看它的话，托管 Prometheus 的工作区会被当成机器学习平台的算力空间
+                    # （线上真发生了，报给管理员的「3 个火山工作空间」全是 VMP 的）
+                    "type": str(r.get("TypeName") or r.get("ResourceType") or ""),
+                    "service": str(r.get("Service") or ""),
                     "id": str(r.get("ResourceID") or ""),
                     "name": str(r.get("ResourceName") or ""),
                     "region": str(r.get("Region") or ""),
@@ -625,6 +630,183 @@ def build_snapshot(
     if bucket_error:
         out["bucket_error"] = bucket_error[:300]
     return out
+
+
+def regions_in_use(snapshot: Optional[dict]) -> dict:
+    """资产快照里**实际有东西**的地域：`{地域: {资源类型: 个数}}`。
+
+    为什么这件事值得单独算
+    ──────────────────────
+    「哪些地域有我们的资源」以前没有任何地方回答得了。面板只认登记过的地域
+    （`workspaces.json`），而人在控制台上随手开一台机器、建一个桶，面板完全不知道 ——
+    那台机器没人管、出了事也没人知道它归谁。
+
+    **数据是现成的**：阿里云资源中心一次返回所有资源并带 `RegionId`，火山同理。
+    这里只是按地域归个类，不额外打任何接口。
+
+    全局资源（地域字段为空，比如 OSS 的账号级配置）不算进来 —— 它们不属于任何地域。
+    """
+    out: dict = {}
+    #: 不属于任何地域的东西。资源中心把 RAM 用户、策略这些标成 `global`，
+    #: 它们本来就不该出现在「哪个地域有资源」这个问题的答案里
+    skip = {"global", "cn-global", "all"}
+    for account in (snapshot or {}).get("accounts") or []:
+        platform = str(account.get("platform") or "")
+        for r in account.get("resources") or []:
+            region = str(r.get("region") or "").strip()
+            if not region or region.lower() in skip:
+                continue
+            slot = out.setdefault(f"{platform}/{region}", {})
+            kind = str(r.get("type") or "未知类型")
+            slot[kind] = slot.get(kind, 0) + 1
+    for bucket in (snapshot or {}).get("buckets") or []:
+        region = str(bucket.get("region") or "").strip().replace("oss-", "")
+        if region:
+            slot = out.setdefault(f"aliyun/{region}", {})
+            slot["OSS 桶"] = slot.get("OSS 桶", 0) + 1
+    return out
+
+
+#: 工作空间那几类资源的**完整类型名**（真机核过的，见下）。只有它们能回答
+#: 「该不该在这个地域开工作区」—— 一个地域里有 VPC、有网卡不代表那儿要有工作空间。
+#:
+#: **必须全名匹配**：按子串 `"pai"` 匹配会把火山的 `keypair` 算进来（真踩过）。
+PAI_TYPES = frozenset(
+    {
+        "ACS::PAIWorkspace::Workspace",
+        "ACS::PAIWorkspace::Dataset",
+        "Volcengine::MLPlatform::Workspace",
+    }
+)
+#: 工作空间本身（不含数据集）—— 按 ID 对账用。
+#: **火山这边曾经写成裸的 `Workspace`**，结果把托管 Prometheus（VMP）的工作区
+#: 当成了算力空间报给管理员。火山任何产品的工作区在 `ResourceType` 里都叫 `Workspace`，
+#: 能区分产品的是 `TypeName`：机器学习平台是 `Volcengine::MLPlatform::*`。
+WORKSPACE_TYPES = frozenset({"ACS::PAIWorkspace::Workspace", "Volcengine::MLPlatform::Workspace"})
+
+
+#: 配额查不到时的三态。**「看不到」不是「没有」** —— 见 `quotas_by_workspace`
+CARDS_YES, CARDS_NO, CARDS_UNKNOWN = "yes", "no", "unknown"
+
+
+def quotas_by_workspace(creds, regions, *, transport=None) -> tuple:
+    """每个工作空间有多少张卡：`({工作空间ID: {"gpu": 卡数, "quotas": [名字]}}, 没查成的地域)`。
+
+    **接口按调用者的工作空间成员身份裁剪返回**（真机实测：同一个接口，三把凭证看到的
+    条数各不相同）。所以「这个空间查不到配额」有两种可能 —— 它真没有专属算力，
+    或者采集身份不在这个空间里。而我们要判的恰恰是**没登记的空间**，采集身份
+    大概率就不在里面。两者绝不能混：混了就会把一个有 144 张卡的空间当成空壳过滤掉。
+
+    调用方据此分三态（`CARDS_*`）：查得到且有卡 / 查得到且没卡 / 没查成。
+
+    地域打不通（PAI 没有河源接入点、张家口实测 503）记进第二个返回值 ——
+    那一整个地域的结论都是「不知道」，不是「没卡」。
+    """
+    from .clouds import aliyun
+
+    found: dict = {}
+    skipped = []
+    for region in regions:
+        try:
+            got = aliyun.call_roa(
+                f"pai.{region}.aliyuncs.com",
+                aliyun.PAISTUDIO,
+                "/api/v1/quotas/",
+                {"PageSize": 100, "PageNumber": 1},
+                creds=creds,
+                transport=transport,
+            )
+        except Exception as exc:  # noqa: BLE001 — 一个地域不通不该让其余地域没结论
+            skipped.append(f"{region}：{str(exc)[:80]}")
+            continue
+        for q in got.get("Quotas") or []:
+            detail = (q.get("QuotaDetails") or {}).get("ActualMinQuota") or {}
+            try:
+                gpu = int(detail.get("GPU") or 0)
+            except (TypeError, ValueError):
+                gpu = 0
+            for ws in q.get("Workspaces") or []:
+                wid = str(ws.get("WorkspaceId") or "")
+                if not wid:
+                    continue
+                slot = found.setdefault(wid, {"gpu": 0, "quotas": []})
+                slot["gpu"] += gpu
+                slot["quotas"].append(f"{q.get('QuotaName') or q.get('Name') or ''}×{gpu}卡")
+    return found, skipped
+
+
+def cards_state(workspace_id: str, quotas: dict, skipped) -> str:
+    """这个工作空间有没有卡：`yes` / `no` / `unknown`。
+
+    有任何地域没查成时，**查不到的空间一律算 `unknown`** —— 宁可多列一个让人看一眼，
+    也不要把一个真有卡的空间判成空壳藏起来。
+    """
+    got = quotas.get(str(workspace_id or ""))
+    if got and got.get("gpu"):
+        return CARDS_YES
+    if got:
+        return CARDS_NO
+    return CARDS_UNKNOWN if skipped else CARDS_NO
+
+
+def workspaces_in_use(snapshot: Optional[dict]) -> list:
+    """云上实际存在的工作空间：`[{platform, region, id, name}]`。
+
+    **按工作空间 ID 而不是按地域**：一个地域可以有好几个工作空间（杭州就有两个），
+    按地域比的话，只要那个地域登记过任意一个，其余的全被判成「已登记」而漏掉 ——
+    漏掉的那个里面有人在跑任务、有数据集，却不在任何申请流程里。
+    """
+    out = []
+    for account in (snapshot or {}).get("accounts") or []:
+        platform = str(account.get("platform") or "")
+        for r in account.get("resources") or []:
+            if str(r.get("type") or "") not in WORKSPACE_TYPES:
+                continue
+            out.append(
+                {
+                    "platform": platform,
+                    "region": str(r.get("region") or ""),
+                    "id": str(r.get("id") or ""),
+                    "name": str(r.get("name") or ""),
+                }
+            )
+    return sorted(out, key=lambda w: (w["platform"], w["region"], w["name"]))
+
+
+def unregistered_workspaces(snapshot: Optional[dict], known_ids: Iterable[str]) -> list:
+    """云上有、登记表里没有的工作空间。**只报不动**（理由同 `unregistered_regions`）。"""
+    seen = {str(x or "").strip() for x in known_ids} - {""}
+    return [w for w in workspaces_in_use(snapshot) if w["id"] not in seen]
+
+
+def pai_regions(snapshot: Optional[dict]) -> dict:
+    """有 PAI 工作空间 / 数据集的地域：`{平台/地域: {类型: 个数}}`。
+
+    这是「新增地区」真正要看的信号。别的资源（VPC、ECS、网卡）属于另一个问题
+    ——「这些东西是谁的、还要不要」，那是资产页要回答的，不该混在一起。
+    """
+    out: dict = {}
+    for where, kinds in regions_in_use(snapshot).items():
+        mine = {k: n for k, n in kinds.items() if k in PAI_TYPES}
+        if mine:
+            out[where] = mine
+    return out
+
+
+def unregistered_regions(snapshot: Optional[dict], known: Iterable[str]) -> list:
+    """有资源、但面板没登记的地域。返回 `[(平台/地域, {类型: 个数})]`，按资源多的排前。
+
+    **`known` 里的每一项都要带平台**（`aliyun/cn-shanghai`）：不带的话火山的 `cn-shanghai`
+    会把阿里的挡掉 —— 两朵云的地域名大量重合，混成一个集合就是互相遮蔽。
+
+    **只报不动**：面板不会自己去纳管一个没人确认过的地域 —— 那意味着往一个
+    没人看过的地方开目录、建数据集、放人进去。这里要的是「你知道那儿有东西吗」。
+    """
+    seen = {str(k or "").strip().replace("oss-", "") for k in known} - {""}
+    rows = [
+        (where, kinds) for where, kinds in regions_in_use(snapshot).items() if where not in seen
+    ]
+    return sorted(rows, key=lambda row: -sum(row[1].values()))
 
 
 def load(path: Optional[str]) -> Optional[dict]:

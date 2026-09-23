@@ -1,0 +1,101 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Action": [
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*",
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    },
+    {
+      "Action": [
+        "ram:GetAccessKeyLastUsed",
+        "ram:GetLoginProfile",
+        "ram:GetPolicy",
+        "ram:GetPolicyVersion",
+        "ram:GetUser",
+        "ram:ListAccessKeys",
+        "ram:ListGroups",
+        "ram:ListGroupsForUser",
+        "ram:ListPolicies",
+        "ram:ListPoliciesForGroup",
+        "ram:ListPoliciesForUser",
+        "ram:ListUsers",
+        "ram:ListUsersForGroup"
+      ],
+      "Resource": "*",
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    },
+    {
+      "Action": [
+        "ram:ListPolicies",
+        "ram:ListPolicyAttachments",
+        "resourcemanager:GetPolicy",
+        "resourcemanager:ListPolicies",
+        "resourcemanager:ListPolicyAttachments"
+      ],
+      "Resource": "*",
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    },
+    {
+      "Action": [
+        "ims:GetVerificationInfo"
+      ],
+      "Resource": "*",
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    },
+    {
+      "Action": [
+        "ims:Bind*",
+        "ims:Create*",
+        "ims:Delete*",
+        "ims:Set*",
+        "ims:Unbind*",
+        "ims:Update*",
+        "ram:Add*",
+        "ram:Attach*",
+        "ram:Bind*",
+        "ram:Change*",
+        "ram:Create*",
+        "ram:Delete*",
+        "ram:Detach*",
+        "ram:ListSecretKeys",
+        "ram:Remove*",
+        "ram:Set*",
+        "ram:Unbind*",
+        "ram:Update*"
+      ],
+      "Resource": "*",
+      "Effect": "Deny"
+    }
+  ]
+}

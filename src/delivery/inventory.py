@@ -113,6 +113,9 @@ class UserPermissions:
     #: 这个子账号的 AK。`None` 表示**没采到**（采集身份没有 ListAccessKeys 权限），
     #: 空元组才是「确实一把都没有」—— 两者的处置完全不同，不能混成一个
     keys: Optional[tuple] = None
+    #: 还能不能登控制台。`None` = 没采到（老快照、或采集身份没有 GetLoginProfile 权限）。
+    #: **不知道不许渲染成「否」**：页面上「面板没停过它」和「云上确实还能登」是两句话
+    login_enabled: Optional[bool] = None
 
     @property
     def high_risk(self) -> tuple:
@@ -224,6 +227,15 @@ def is_high_risk(policy: str) -> bool:
     return any(m in low for m in HIGH_RISK_MARKERS)
 
 
+def _tri(value) -> Optional[bool]:
+    """三态字段：`True` / `False` / `None`（没采到）。
+
+    认不出的值一律当「不知道」——把它当成 `False` 就是替云上做了一次没有依据的断言，
+    而页面会照着这个断言让人做判断。
+    """
+    return value if isinstance(value, bool) else None
+
+
 def _keys(raw, who: str) -> Optional[tuple]:
     """AK 清单。**缺这个键表示没采到**（老快照就是这样），空数组才是「一把都没有」。
 
@@ -305,6 +317,8 @@ def parse(data: Mapping) -> Snapshot:
                     policies=_strs(u.get("policies"), f"{u['name']}.policies"),
                     groups=_strs(u.get("groups"), f"{u['name']}.groups"),
                     keys=_keys(u.get("keys"), str(u["name"])),
+                    # 老快照没有这个字段 → None（不知道），**不是 False**
+                    login_enabled=_tri(u.get("login_enabled")),
                 )
             )
         for g in acc.get("groups") or []:

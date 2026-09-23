@@ -253,6 +253,12 @@ def add_parsers(commands) -> None:
         help="真去云上探：工作空间列不列得到成员、开发桶在不在。"
         "**格式错在加载时就报了，这条查的是「配的东西存不存在」**",
     )
+    rg.add_argument(
+        "--discover",
+        action="store_true",
+        help="按资产快照列出**实际有资源的地域**，并标出哪些还没登记。不打任何云接口",
+    )
+    rg.add_argument("--assets", default="identity/assets.json")
 
     bf = rsub.add_parser(
         "backfill", help="给已有账号补上某个地域的工作空间成员 + 个人目录 + 数据集"
@@ -803,6 +809,8 @@ def _sweep(args) -> int:
         lambda: flows.recover_stuck(actor="system"),
         flows.resume_approved if approval is not None else list,
         flows.revoke_expired,
+        # 号建好了、登录名没写进公司 IAM = 那个人登不进控制台。**自动补，别等人点按钮**
+        flows.retry_iam_writes,
         flows.remind_expiring,
     )
     for step in steps:
@@ -1654,7 +1662,130 @@ def _regions(args) -> int:
         print(f"  用它的 {who}")
         if args.check:
             rc |= _probe_region(ws, _account_for(cat))
+    if args.discover:
+        rc |= _discover_regions(args, reg, cat)
     return rc
+
+
+def _discover_regions(args, reg, cat) -> int:
+    """按资产快照列出实际有资源的地域，标出没登记的那些。**不打云接口**。
+
+    「哪些地域有我们的东西」以前没有任何地方回答得了：面板只认登记过的地域，
+    而人在控制台上随手开的机器和桶，面板连它存在都不知道 —— 那些东西不在任何
+    申请流程里、没人被指为属主、离职回收也扫不到。
+    """
+    from . import assets as assets_mod
+
+    snapshot = assets_mod.load(args.assets)
+    if snapshot is None:
+        print(
+            f"\n没有资产快照（{args.assets}），先跑一次 `delivery assets collect`", file=sys.stderr
+        )
+        return 1
+    ws_known = workspace_regions(reg)
+    in_use = assets_mod.regions_in_use(snapshot)
+    pai = assets_mod.pai_regions(snapshot)
+    missing = {
+        w for w, _ in assets_mod.unregistered_regions(snapshot, ws_known | bucket_regions(cat))
+    }
+    print(f"\n实际有资源的地域（快照采于 {snapshot.get('captured_at', '未知')[:19]}）：")
+    for where, kinds in sorted(in_use.items(), key=lambda kv: -sum(kv[1].values())):
+        mark = "  ← 没登记" if where in missing else ""
+        total = sum(kinds.values())
+        top = "、".join(f"{k} {n}" for k, n in sorted(kinds.items(), key=lambda kv: -kv[1])[:4])
+        print(f"  {where:28} {total:>4} 个  {top}{mark}")
+    # **按工作空间 ID 对账，不按地域**：一个地域可能有好几个工作空间（杭州就有两个），
+    # 按地域比会把没登记的那个判成已登记
+    need = assets_mod.unregistered_workspaces(snapshot, workspace_ids(reg))
+    if need:
+        quotas, skipped = _quotas_for(need)
+        print(f"\n云上有 {len(need)} 个工作空间没登记进 workspaces.json：")
+        rank = {assets_mod.CARDS_YES: 0, assets_mod.CARDS_UNKNOWN: 1, assets_mod.CARDS_NO: 2}
+        for w in sorted(need, key=lambda x: rank.get(x.get("cards"), 3)):
+            spec = "、".join(w.get("quotas") or [])
+            mark = {
+                assets_mod.CARDS_YES: f"有 {w.get('gpu', 0)} 张卡（{spec}）",
+                assets_mod.CARDS_NO: "没有专属算力配额，用它只能跑公共资源组",
+                assets_mod.CARDS_UNKNOWN: "**查不到配额**（采集身份不在这个空间里？）",
+            }.get(w.get("cards"), "")
+            print(f"  {w['platform']}/{w['region']:16} {w['name'] or '（没名字）':26} id={w['id']}")
+            print(f"      {mark}")
+        if skipped:
+            print("  这几个地域没查成，它们的结论只能算「不知道」：" + "；".join(skipped[:3]))
+        print("  → 有卡的才值得登记；没卡的多半是开通 PAI 时自动建的空壳")
+    other = sorted(w for w in missing if w not in pai)
+    if other:
+        print(
+            f"\n另有 {len(other)} 个地域只有别的资源（VPC / ECS 这类），"
+            "和工作空间无关：" + "、".join(other)
+        )
+        print("  → 这些是「谁的、还要不要」的问题，去资产页看")
+    if not missing:
+        print("\n所有有资源的地域都登记过了。")
+    return 0
+
+
+def _quotas_for(need: list) -> tuple:
+    """给这批工作空间查算力配额。**查不成不算「没卡」**（见 assets.quotas_by_workspace）。"""
+    from . import assets as assets_mod
+    from .clouds import aliyun
+
+    regions = sorted({w["region"] for w in need if w["platform"] == "aliyun" and w["region"]})
+    if not regions:
+        # 一行阿里的都没有（比如全是火山的）：**照样要给结论栏**，
+        # 不贴的话那几行是空白，看的人不知道是「没卡」还是「没查」
+        for w in need:
+            w["cards"] = assets_mod.CARDS_UNKNOWN
+        return {}, []
+    try:
+        creds = aliyun.Credentials.from_env()
+    except aliyun.AliyunError as exc:
+        for w in need:
+            w["cards"] = assets_mod.CARDS_UNKNOWN
+        return {}, [f"没有阿里云采集凭证：{exc}"]
+    quotas, skipped = assets_mod.quotas_by_workspace(creds, regions)
+    for w in need:
+        if w["platform"] != "aliyun":
+            w["cards"] = assets_mod.CARDS_UNKNOWN
+            continue
+        w["cards"] = assets_mod.cards_state(w["id"], quotas, skipped)
+        got = quotas.get(w["id"]) or {}
+        w["gpu"] = got.get("gpu", 0)
+        w["quotas"] = got.get("quotas") or []
+    return quotas, skipped
+
+
+def workspace_ids(reg) -> set:
+    """登记表里的工作空间 ID。**按 ID 对账**：一个地域可能有好几个工作空间。"""
+    return {str(reg.get(key).get("id") or "") for key in reg.all_keys()} - {""}
+
+
+def workspace_regions(reg) -> set:
+    """**登记过工作空间**的地域，带平台前缀。
+
+    这是「该不该在这个地域开工作区」的唯一依据 —— 不能把模板里的桶算进来：
+    曼谷有一个桶，不等于曼谷登记过工作空间，而曼谷那个 PAI 工作空间恰恰
+    就是这么被遮掉、报不出来的。
+
+    带平台前缀是因为两朵云的地域名大量重合，混成一个集合就会互相遮蔽。
+    """
+    out = set()
+    for key in reg.all_keys():
+        row = reg.get(key)
+        if row.get("region"):
+            out.add(f"aliyun/{str(row['region']).replace('oss-', '')}")
+    return out
+
+
+def bucket_regions(cat) -> set:
+    """模板里出现过的桶所在地域，带平台前缀。用来判断「别的资源」那一类。"""
+    out = set()
+    for tpl in cat.templates:
+        platform = getattr(tpl, "platform", "") or "aliyun"
+        for _name, region in getattr(tpl, "buckets", ()) or ():
+            if region:
+                out.add(f"{platform}/{str(region).replace('oss-', '')}")
+    return out
 
 
 def _account_for(cat) -> str:

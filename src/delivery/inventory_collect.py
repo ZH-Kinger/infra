@@ -65,6 +65,33 @@ def _aliyun_attachments(creds, transport) -> list:
             raise aliyun.AliyunError("ListPolicyAttachments 翻页超过 200 页，已中断")
 
 
+def _aliyun_login(creds, user: str, transport):
+    """这个号还能不能登控制台。`True/False` 是已知，**`None` 是没采到**。
+
+    为什么要采
+    ──────────
+    面板原先只知道「自己做过什么」，不知道云上现在是什么样。于是在控制台上手工停过的号，
+    面板照样显示「还开着」，而管理员会照着那个标签做判断 —— 信息不准这件事，根在这里。
+
+    阿里云没有「禁止登录」开关：有登录配置 = 能登，删掉配置 = 不能登（控制台上那个
+    「禁用控制台登录」就是删配置）。所以 `EntityNotExist.*.LoginProfile` 是明确的「否」，
+    不是「查不到」—— 这两者混同的话，没配登录的号会被当成不确定，永远没人处理。
+    """
+    try:
+        aliyun.call(
+            *aliyun.RAM, "GetLoginProfile", {"UserName": user}, creds=creds, transport=transport
+        )
+        return True
+    except aliyun.AliyunDenied:
+        return None  # 采集身份没这个权限：不知道，别当成「不能登」
+    except aliyun.AliyunError as exc:
+        if "LoginProfile" in str(exc.code or ""):
+            return False
+        if "NotExist" in str(exc.code or ""):
+            return None  # 号都没了，交给别的检查去说
+        raise
+
+
 def _aliyun_keys(creds, user: str, transport) -> list:
     """一个 RAM 子账号的 AK 清单。**绝不返回 secret**（那个接口本来也不给）。
 
@@ -185,6 +212,7 @@ def collect_aliyun(creds, *, transport=None, progress: Optional[Progress] = None
             "policies": sorted(set(user_policies.get(str(u.get("UserName") or ""), []))),
             "groups": sorted(user_groups.get(str(u.get("UserName") or ""), [])),
             "keys": _aliyun_keys(creds, str(u.get("UserName") or ""), transport),
+            "login_enabled": _aliyun_login(creds, str(u.get("UserName") or ""), transport),
         }
         for u in users
     ]
@@ -192,6 +220,31 @@ def collect_aliyun(creds, *, transport=None, progress: Optional[Progress] = None
 
 
 # ── 火山 ──────────────────────────────────────────────────────────────────
+
+
+def _volcano_login(creds, user: str, transport):
+    """火山：这个号还能不能登控制台。`True/False` 是已知，**`None` 是没采到**。
+
+    火山有显式的 `LoginAllowed` 开关（阿里没有），但**对没有登录配置的号返回一个全零的
+    假对象、不报错**（bot 那边记过这个坑）。所以不能只看「有没有抛异常」，
+    要看 `LoginAllowed` 到底是不是真的 —— 否则从没开过登录的号会被记成「能登」。
+    """
+    try:
+        got = volcano.call(
+            *volcano.IAM, "GetLoginProfile", {"UserName": user}, creds=creds, transport=transport
+        )
+    except volcano.VolcanoDenied:
+        return None
+    except volcano.VolcanoError as exc:
+        # 用**错误码**判，不用整条消息：消息里带 "does not exist" 这种人类写法时，
+        # 按整条匹配会漏判；而漏判的方向是「不知道」，看着安全，实际是这一栏悄悄变空
+        from .provision import _volcano_code
+
+        return False if "notexist" in _volcano_code(exc) else None
+    profile = got.get("LoginProfile") or got
+    if not isinstance(profile, dict):
+        return None
+    return str(profile.get("LoginAllowed", "")).lower() in ("true", "1")
 
 
 def _volcano_policies(result: dict, action: str) -> list:
@@ -327,6 +380,7 @@ def collect_volcano(creds, *, transport=None, progress: Optional[Progress] = Non
                 "policies": policies,
                 "groups": sorted(user_groups.get(name, [])),
                 "keys": _volcano_keys(creds, name, transport),
+                "login_enabled": _volcano_login(creds, name, transport),
             }
         )
     return {"platform": "volcano", "account": account, "users": out_users, "groups": out_groups}

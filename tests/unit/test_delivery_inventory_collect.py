@@ -8,8 +8,11 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
 import urllib.parse
+from pathlib import Path
 
 from delivery import inventory
 from delivery.clouds import aliyun, volcano
@@ -40,7 +43,16 @@ def att(ptype, pname, policy, rg=UID):
 
 class AliyunFake:
     def __init__(
-        self, *, users, groups, members, attachments, page_size=100, overrides=None, keys=None
+        self,
+        *,
+        users,
+        groups,
+        members,
+        attachments,
+        page_size=100,
+        overrides=None,
+        keys=None,
+        login=None,
     ):
         self.users = users
         self.groups = groups
@@ -49,6 +61,12 @@ class AliyunFake:
         #: {用户名: [AK, …]}。没给的人当作一把都没有 —— 注意那和「没采到」是两件事，
         #: 后者由 overrides 里让 ListAccessKeys 回 403 来模拟
         self.keys = keys or {}
+        #: {用户名: True/False}。`True` = 有登录配置（能登控制台），
+        #: `False` = 没有登录配置 → 回 `EntityNotExist.User.LoginProfile`。
+        #: 阿里云没有「禁止登录」开关，控制台上那个「禁用控制台登录」就是删掉登录配置。
+        #: **没给的人默认「有登录配置」**：线上多数号就是开着的。
+        #: 第三态「没采到」不在这里，由 overrides 让 GetLoginProfile 回 403 来模拟
+        self.login = login or {}
         self.page_size = page_size
         self.overrides = overrides or {}
         self.calls = []
@@ -71,6 +89,14 @@ class AliyunFake:
         if action == "ListAccessKeys":
             got = self.keys.get(q.get("UserName"), [])
             return 200, {"AccessKeys": {"AccessKey": got}, "IsTruncated": False}
+        if action == "GetLoginProfile":
+            if self.login.get(q.get("UserName"), True):
+                return 200, {"LoginProfile": {"UserName": q.get("UserName")}}
+            # 删过登录配置的号：阿里云回这个码，是明确的「不能登」，不是「查不到」
+            return 404, {
+                "Code": "EntityNotExist.User.LoginProfile",
+                "Message": "The user does not have a login profile.",
+            }
         if action == "GetAccessKeyLastUsed":
             for k in self.keys.get(q.get("UserName"), []):
                 if k.get("AccessKeyId") == q.get("UserAccessKeyId"):
@@ -263,6 +289,90 @@ class AliyunCollectTests(unittest.TestCase):
         self.assertNotIn("Signature", str(ctx.exception))
 
 
+class AliyunLoginCollectTests(unittest.TestCase):
+    """阿里云：这个号还能不能登控制台。**三态**，「不知道」不许塌成「不能登」。
+
+    面板上「已停用」是一个会被管理员照着做决定的标签。采集身份缺 `ram:GetLoginProfile`
+    的时候我们对云上状态一无所知，这时贴「已停用」比什么都不写危险得多。
+    """
+
+    def collect(self, **kw):
+        fake = aliyun_fixture(**kw)
+        return collect_aliyun(CREDS, transport=fake), fake
+
+    def users_of(self, out):
+        return {u["name"]: u for u in out["users"]}
+
+    def denied(self, q):
+        return 403, {"Code": "NoPermission", "Message": "not authorized to do this action"}
+
+    def test_login_profile_exists_means_yes(self):
+        out, _ = self.collect()
+        # 必须是真正的 True，不是「真值」：下游要按 is True / is False / is None 分三支
+        self.assertEqual([u["login_enabled"] for u in out["users"]], [True, True])
+
+    def test_no_login_profile_is_a_definite_no(self):
+        """阿里云没有「禁止登录」开关——控制台上那个「禁用控制台登录」就是删掉登录配置。
+        所以 `EntityNotExist.User.LoginProfile` 是明确的「否」。记成「不知道」的话，
+        手工停过的号会永远停在待确认，没人处理。"""
+        users = self.users_of(self.collect(login={"bob": False})[0])
+        self.assertIs(users["alice"]["login_enabled"], True)
+        self.assertIs(users["bob"]["login_enabled"], False)
+
+    def test_denied_is_unknown_not_no(self):
+        out, _ = self.collect(overrides={"GetLoginProfile": self.denied})
+        self.assertTrue(all(u["login_enabled"] is None for u in out["users"]))
+
+    def test_denied_does_not_fail_the_whole_collection(self):
+        """和 `keys is None` 同一套取舍：少一项信息不该把这个云账号整份作废。
+        作废的话看板上是「快照不完整」，连权限都不显示了——代价远大于少一栏。"""
+        out, _ = self.collect(overrides={"GetLoginProfile": self.denied})
+        alice = self.users_of(out)["alice"]
+        self.assertEqual(
+            alice["policies"], ["AliyunECSFullAccess @资源组:rg-aek2abc", "AliyunOSSReadOnlyAccess"]
+        )
+        self.assertEqual(alice["keys"], [])  # AK 那侧照常采到（空 = 确实没有）
+        self.assertEqual(alice["groups"], ["ops"])
+
+    def test_user_itself_gone_is_unknown_not_no(self):
+        """列完用户、还没问到登录配置，号就被删了：`EntityNotExist.User`。
+        这是「这个号没了」，不是「这个号不能登」——由别的检查去说，这里只能记「不知道」。"""
+        out, _ = self.collect(
+            overrides={
+                "GetLoginProfile": lambda q: (
+                    404,
+                    {"Code": "EntityNotExist.User", "Message": "The user does not exist."},
+                )
+            }
+        )
+        self.assertTrue(all(u["login_enabled"] is None for u in out["users"]))
+
+    def test_unexpected_error_still_propagates(self):
+        """只认「被拒」和「不存在」两种。接口 500 要炸出来——吞成 None 的话，
+        一次全局故障会被记成「所有人的登录状态都查不到」，而那和缺权限长得一样，
+        运维会去查权限、查不出问题，然后就不再看这一栏了。"""
+        with self.assertRaises(aliyun.AliyunError) as ctx:
+            self.collect(
+                overrides={
+                    "GetLoginProfile": lambda q: (
+                        500,
+                        {"Code": "InternalError", "Message": "boom"},
+                    )
+                }
+            )
+        self.assertNotIsInstance(ctx.exception, aliyun.AliyunDenied)
+
+    def test_asked_exactly_once_per_user(self):
+        """每人每轮**一次**额外调用，这是明确认下来的成本。写成 N² 的话
+        （比如挪进按组循环里），一次采集的耗时直接翻倍。"""
+        users = [{"UserName": f"u{i:03d}"} for i in range(30)]
+        out, fake = self.collect(users=users, groups=[], members={}, attachments=[])
+        asked = [q["UserName"] for a, q in fake.calls if a == "GetLoginProfile"]
+        self.assertEqual(len(asked), 30)
+        self.assertEqual(sorted(asked), sorted(u["UserName"] for u in users))
+        self.assertEqual(len(out["users"]), 30)
+
+
 # ── 火山 ──────────────────────────────────────────────────────────────────
 
 
@@ -282,7 +392,16 @@ def project(name):
 
 class VolcanoFake:
     def __init__(
-        self, *, users, groups, members, user_policies, group_policies, overrides=None, keys=None
+        self,
+        *,
+        users,
+        groups,
+        members,
+        user_policies,
+        group_policies,
+        overrides=None,
+        keys=None,
+        login=None,
     ):
         self.users = users
         self.groups = groups
@@ -294,6 +413,11 @@ class VolcanoFake:
         #: **火山的 ListAccessKeys 不带最近使用时间**，也没有阿里那种
         #: GetAccessKeyLastUsed 可以补问，所以这里的条目里根本没有 LastUsedDate
         self.keys = keys or {}
+        #: {用户名: True / False / "stub"}。`True/False` = 有登录配置且 `LoginAllowed`
+        #: 是这个值；`"stub"` = **从没开过登录配置**，火山这时**不报错**，回一个全零假对象
+        #: （bot 那边记过这个坑）。没给的人默认「有登录配置且允许登录」。
+        #: 第三态「没采到」由 overrides 让 GetLoginProfile 回 403 来模拟
+        self.login = login or {}
         self.overrides = overrides or {}
         self.calls = []
 
@@ -318,6 +442,23 @@ class VolcanoFake:
             return 200, {"Result": {"Users": page([{"UserName": n} for n in names])}}
         if action == "ListAccessKeys":
             return 200, {"Result": {"AccessKeyMetadata": page(self.keys.get(q["UserName"], []))}}
+        if action == "GetLoginProfile":
+            state = self.login.get(q["UserName"], True)
+            if state == "stub":
+                # 没有登录配置时火山**不报错**，回一个全零 stub
+                return 200, {
+                    "Result": {
+                        "LoginProfile": {
+                            "UserName": "",
+                            "LoginAllowed": False,
+                            "CreateDate": "",
+                            "LastLoginTime": "",
+                        }
+                    }
+                }
+            return 200, {
+                "Result": {"LoginProfile": {"UserName": q["UserName"], "LoginAllowed": bool(state)}}
+            }
         if action == "ListAttachedUserPolicies":
             return 200, {
                 "Result": {"AttachedPolicyMetadata": self.user_policies.get(q["UserName"], [])}
@@ -574,6 +715,75 @@ class VolcanoKeyCollectTests(unittest.TestCase):
             self.collect(overrides=out)
 
 
+def verr(code, message="no", status=404):
+    return status, {"ResponseMetadata": {"Error": {"Code": code, "Message": message}}}
+
+
+class VolcanoLoginCollectTests(unittest.TestCase):
+    """火山：这个号还能不能登控制台。
+
+    火山有阿里没有的显式 `LoginAllowed` 开关，代价是**没有登录配置时它不报错**，
+    回一个全零假对象。所以判据只能是 `LoginAllowed` 本身，不能是「有没有抛异常」。
+    """
+
+    def collect(self, **kw):
+        fake = volcano_fixture(**kw)
+        return collect_volcano(VCREDS, transport=fake), fake
+
+    def users_of(self, out):
+        return {u["name"]: u for u in out["users"]}
+
+    def test_login_allowed_true_is_yes(self):
+        out, _ = self.collect()
+        self.assertEqual([u["login_enabled"] for u in out["users"]], [True, True])
+
+    def test_login_allowed_false_is_no(self):
+        users = self.users_of(self.collect(login={"WangEr": False})[0])
+        self.assertIs(users["ShenYi"]["login_enabled"], True)
+        self.assertIs(users["WangEr"]["login_enabled"], False)
+
+    def test_all_zero_stub_is_no_not_yes(self):
+        """**这是那个坑**：从没开过登录配置的号，火山回 200 + 一个全零 stub 而不是报错。
+        只看「调用成没成」的话，这种号会被记成「能登」，于是一个根本进不去控制台的号
+        在看板上显示成开着的——而离职检查正是照着这一栏挑人。"""
+        users = self.users_of(self.collect(login={"ShenYi": "stub"})[0])
+        self.assertIs(users["ShenYi"]["login_enabled"], False)
+        self.assertIs(users["WangEr"]["login_enabled"], True)
+
+    def test_denied_is_unknown_and_rest_still_collected(self):
+        out, _ = self.collect(
+            overrides={"GetLoginProfile": lambda q: verr("AccessDenied", "no", 403)}
+        )
+        self.assertTrue(all(u["login_enabled"] is None for u in out["users"]))
+        # 缺 `iam:GetLoginProfile` 不该把这个云账号整份作废
+        self.assertEqual(self.users_of(out)["ShenYi"]["policies"][0], "ECSReadOnlyAccess")
+        self.assertEqual(self.users_of(out)["ShenYi"]["groups"], ["algo"])
+
+    def test_not_exist_is_no(self):
+        out, _ = self.collect(
+            overrides={"GetLoginProfile": lambda q: verr("EntityNotExist.User.LoginProfile")}
+        )
+        self.assertTrue(all(u["login_enabled"] is False for u in out["users"]))
+
+    def test_server_error_is_unknown_never_no(self):
+        """接口 500：**载重的断言是「不能是 False」**——不知道就是不知道。
+        （这里和阿里那侧不同：阿里把非「被拒/不存在」的错误抛出去，火山这侧咽下来
+        记成不知道。要对齐的话改的是 src，这条断言照样成立。）"""
+        out, _ = self.collect(
+            overrides={"GetLoginProfile": lambda q: verr("InternalError", "boom", 500)}
+        )
+        self.assertTrue(all(u["login_enabled"] is None for u in out["users"]))
+
+    def test_asked_exactly_once_per_user(self):
+        """每人每轮一次，别变成 N²。"""
+        users = [{"UserName": f"u{i:03d}", "AccountId": 2000000001} for i in range(30)]
+        out, fake = self.collect(users=users, members={}, user_policies={}, groups=[])
+        asked = [q["UserName"] for a, q in fake.calls if a == "GetLoginProfile"]
+        self.assertEqual(len(asked), 30)
+        self.assertEqual(sorted(asked), sorted(u["UserName"] for u in users))
+        self.assertEqual(len(out["users"]), 30)
+
+
 # ── build_snapshot ────────────────────────────────────────────────────────
 
 
@@ -671,6 +881,114 @@ class BuildSnapshotTests(unittest.TestCase):
         恰好是模块头注释要防的「和真的没权限分不出来」。"""
         snap = build_snapshot([("aliyun", UID, _raise(DeliveryError("\n详细原因")))], now=self.NOW)
         self.assertFalse(inventory.parse(snap).complete)
+
+
+# ── 快照里的登录状态：三态必须原样穿过 write + read ────────────────────────
+
+
+class LoginStateSnapshotTests(unittest.TestCase):
+    """`login_enabled` 是 `True` / `False` / `None` 三态，解析这一步不许把它压成两态。
+
+    升级那天所有人手上都是**没有这个字段**的老快照。那时候只有 `None` 是诚实的答案：
+    压成 `False` 的话，全公司的号会在同一天显示成「不能登控制台」，而那正是这一栏
+    存在的理由——它是管理员判断一个号还活着没有的依据。
+    """
+
+    NOW = "2026-09-15T12:00:00+08:00"
+
+    def parse_user(self, raw):
+        snap = inventory.parse(
+            {
+                "captured_at": self.NOW,
+                "accounts": [{"platform": "aliyun", "account": UID, "users": [raw], "groups": []}],
+            }
+        )
+        return snap.users[0]
+
+    def test_old_snapshot_without_the_field_loads_and_is_unknown(self):
+        user = self.parse_user({"name": "alice", "policies": []})
+        self.assertIsNone(user.login_enabled)
+
+    def test_only_real_bools_survive(self):
+        """字符串 `"yes"`、数字 `1`、`null` 全是「不知道」。
+
+        `1` 尤其要盯住：`isinstance(1, bool)` 是 False，但 `if 1:` 是真——
+        靠真值判断的实现会把它读成「能登」，而那是一个没有依据的断言。
+        """
+        for raw in ("yes", "true", "false", "", 1, 0, None, [], {}, 1.0):
+            with self.subTest(raw=raw):
+                got = self.parse_user({"name": "alice", "policies": [], "login_enabled": raw})
+                self.assertIsNone(got.login_enabled)
+
+    def test_bools_survive(self):
+        for raw in (True, False):
+            with self.subTest(raw=raw):
+                got = self.parse_user({"name": "alice", "policies": [], "login_enabled": raw})
+                self.assertIs(got.login_enabled, raw)
+
+    def test_round_trip_through_write_and_read(self):
+        """采集 → 写盘 → 看板读回来，三态一路不变。中间过一次 JSON：
+        `None` 在文件里是 `null`，读回来必须还是「不知道」，不能变成缺字段的另一种含义。"""
+        data = build_snapshot(
+            [
+                (
+                    "aliyun",
+                    UID,
+                    lambda p: collect_aliyun(
+                        CREDS, transport=aliyun_fixture(login={"bob": False}), progress=p
+                    ),
+                ),
+                (
+                    "volcano",
+                    "v",
+                    lambda p: collect_volcano(
+                        VCREDS,
+                        transport=volcano_fixture(
+                            login={"WangEr": "stub"},
+                            overrides={
+                                # 这一位的登录状态没采到：文件里是 null
+                                "GetLoginProfile": lambda q: (
+                                    verr("AccessDenied", "no", 403)
+                                    if q["UserName"] == "ShenYi"
+                                    else (
+                                        200,
+                                        {
+                                            "Result": {
+                                                "LoginProfile": {
+                                                    "UserName": q["UserName"],
+                                                    "LoginAllowed": False,
+                                                }
+                                            }
+                                        },
+                                    )
+                                ),
+                            },
+                        ),
+                        progress=p,
+                    ),
+                ),
+            ],
+            now=lambda: self.NOW,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "inventory.json"
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            snap = inventory.load(str(path))
+        # 登录状态没采到 ≠ 快照不完整：整份作废会把权限、AK 一起从看板上抹掉
+        self.assertTrue(snap.complete)
+        self.assertIs(snap.user("aliyun", UID, "alice").login_enabled, True)
+        self.assertIs(snap.user("aliyun", UID, "bob").login_enabled, False)
+        self.assertIs(snap.user("volcano", "2000000001", "WangEr").login_enabled, False)
+        self.assertIsNone(snap.user("volcano", "2000000001", "ShenYi").login_enabled)
+        # 写出去的确实是 JSON 的 null，不是被悄悄丢掉的键——丢了的话读回来虽然也是
+        # None，但「采集器没采到」和「采集器根本没这个字段」就分不出来了
+        raw_volc = next(a for a in data["accounts"] if a["platform"] == "volcano")
+        self.assertIn("login_enabled", raw_volc["users"][0])
+        self.assertIsNone(raw_volc["users"][0]["login_enabled"])
+
+    def test_default_is_unknown_when_nobody_sets_it(self):
+        """直接构造的 UserPermissions（别处拼快照、测试夹具）默认也是「不知道」。"""
+        self.assertIsNone(inventory.UserPermissions("aliyun", UID, "alice").login_enabled)
 
 
 if __name__ == "__main__":

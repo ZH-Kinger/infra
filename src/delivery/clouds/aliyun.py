@@ -183,6 +183,10 @@ def call(
 #: RPC 把参数排序拼进 query 再签；ROA 签的是「方法 + 几个固定头 + x-acs-* 头 + 路径和 query」。
 #: 混用的结果是 `SignatureDoesNotMatch`，而错误信息里不会告诉你是风格用错了。
 AIWORKSPACE = "2021-02-04"
+#: PaiStudio（资源配额那套接口）。**和 AIWORKSPACE 不是一个产品**：
+#: `aiworkspace` 那边的 `/api/v1/quotas` 返回的是 MaxCompute / 公共资源配额，
+#: 专有算力（灵骏、ECS 资源组）只在这个产品里
+PAISTUDIO = "2022-01-12"
 
 
 def _http_roa(url: str, headers: dict, method: str = "GET", body: bytes = b"") -> tuple:
