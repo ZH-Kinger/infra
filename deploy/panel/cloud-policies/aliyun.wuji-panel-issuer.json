@@ -1,0 +1,126 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Action": [
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*",
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    },
+    {
+      "Action": [
+        "ram:CreateUser",
+        "ram:GetUser",
+        "ram:DeleteUser",
+        "ram:ListPoliciesForUser",
+        "ram:CreateAccessKey",
+        "ram:ListAccessKeys",
+        "ram:DeleteAccessKey",
+        "ram:UpdateAccessKey"
+      ],
+      "Resource": [
+        "acs:ram:*:1704065796538912:user/tempak-*",
+        "acs:ram:*:1704065796538912:user/staff-*"
+      ],
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    },
+    {
+      "Action": [
+        "ram:CreatePolicy",
+        "ram:GetPolicy",
+        "ram:DeletePolicy",
+        "ram:GetPolicyVersion",
+        "ram:CreatePolicyVersion",
+        "ram:ListPolicyVersions",
+        "ram:DeletePolicyVersion"
+      ],
+      "Resource": [
+        "acs:ram:*:1704065796538912:policy/temp-ak-auto-*",
+        "acs:ram:*:1704065796538912:policy/staff-oss-auto-*"
+      ],
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    },
+    {
+      "Action": [
+        "ram:AttachPolicyToUser",
+        "ram:DetachPolicyFromUser"
+      ],
+      "Resource": [
+        "acs:ram:*:1704065796538912:user/tempak-*",
+        "acs:ram:*:1704065796538912:policy/temp-ak-auto-*",
+        "acs:ram:*:1704065796538912:user/staff-*",
+        "acs:ram:*:1704065796538912:policy/staff-oss-auto-*"
+      ],
+      "Effect": "Allow",
+      "Condition": {
+        "IpAddress": {
+          "acs:SourceIp": [
+            "120.79.167.166"
+          ]
+        }
+      }
+    },
+    {
+      "Action": [
+        "ram:AttachPolicyToUser"
+      ],
+      "Resource": [
+        "acs:ram:*:system:policy/*"
+      ],
+      "Effect": "Deny"
+    },
+    {
+      "Action": [
+        "ram:CreateUser",
+        "ram:DeleteUser",
+        "ram:CreateAccessKey",
+        "ram:DeleteAccessKey",
+        "ram:UpdateAccessKey",
+        "ram:CreateLoginProfile",
+        "ram:UpdateLoginProfile",
+        "ram:AttachPolicyToUser",
+        "ram:DetachPolicyFromUser",
+        "ram:AddUserToGroup"
+      ],
+      "Resource": [
+        "acs:ram:*:1704065796538912:user/panel-*",
+        "acs:ram:*:1704065796538912:user/finance",
+        "acs:ram:*:1704065796538912:user/power-application-user",
+        "acs:ram:*:1704065796538912:user/wuji-*",
+        "acs:ram:*:1704065796538912:user/rl-*",
+        "acs:ram:*:1704065796538912:user/Data-tran"
+      ],
+      "Effect": "Deny"
+    },
+    {
+      "Action": [
+        "ram:CreateLoginProfile",
+        "ram:UpdateLoginProfile"
+      ],
+      "Resource": "*",
+      "Effect": "Deny"
+    }
+  ]
+}

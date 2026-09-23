@@ -44,6 +44,8 @@ The primary rule is:
 
 | Goal | Document |
 |---|---|
+| Request a cloud account, permissions, or an access credential; offboard a departing employee | [云账号自助平台](docs/cloud-access-platform.md) (Chinese) |
+| Deploy and operate that panel | [deploy/panel/README.md](deploy/panel/README.md) (Chinese) |
 | Let a user Agent operate the platform safely | [Dataset platform user Skill](skills/dataset-platform-user/SKILL.md) |
 | Use the platform as an engineer or data consumer | [User guide](docs/user-guide.md) |
 | Configure, approve, audit, and troubleshoot the platform | [Administrator guide](docs/admin-guide.md) |
@@ -201,6 +203,8 @@ only `<dataset>/<commit>/` paths.
 
 ```text
 src/dataset_sink/   Python implementation; zero core runtime dependencies
+src/delivery/       cloud access self-service panel and `delivery` CLI (see docs/cloud-access-platform.md)
+deploy/panel/       panel systemd units, nginx snippets, and copies of the live cloud policies
 tests/unit/         offline unit tests
 tests/integration/  real-environment tests; skipped when opt-in variables are absent
 infra/bootstrap/    local state: state backend, OIDC trust anchor, and CI roles

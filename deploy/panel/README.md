@@ -1,4 +1,10 @@
-# 云权限面板：公司 IAM 登录
+# 云权限面板：公司 IAM 登录（方案，**线上未启用**）
+
+> **先看这一段。** 线上现在跑的是**飞书登录**（`DELIVERY_AUTH=feishu`，systemd 里也是
+> `--auth feishu`），不是本文写的 IAM 登录。本文这套（oauth2-proxy + OIDC）代码和配置模板都在，
+> 服务器上连共享密钥的路径都留好了，但 oauth2-proxy 没装没跑、`DELIVERY_IAM_USERINFO_URL` 是空的。
+> 照着本文改配置之前先确认你是在**启用**它，而不是以为它已经在跑。
+> 启用还缺 IT 给三样：Issuer、client_id、client_secret（见下一节）。
 
 ```
 浏览器 ──HTTPS──> nginx / SLB ──> oauth2-proxy (127.0.0.1:4180) ──> 面板 (127.0.0.1:8765)

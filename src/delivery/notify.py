@@ -563,9 +563,10 @@ def pending_card(records, *, base_url: str = "", title: str = "") -> dict:
             key = f"{r.get('platform')}/{r.get('account')}/{r.get('user')}"
             by_hand = manual_platform(r.get("platform", ""))
             bits = [
-                "已停用"
+                # 不替云上做断言：面板只知道自己做过什么（见改版方案 5.4 文案表）
+                "已停用（面板停的）"
                 if r.get("state") == "disabled"
-                else ("要去控制台停" if by_hand else "还开着"),
+                else ("面板动不了它" if by_hand else "面板没停过它"),
                 _clip(r.get("signal"), 44),
             ]
             if r.get("incomplete"):
@@ -845,14 +846,26 @@ class FeishuNotifier:
         applicant = ticket.get("applicant") or {}
         open_id = str(applicant.get("open_id") or "")
         user_id = str(applicant.get("user_id") or "")
-        if not open_id and not user_id:
-            _log(f"{ticket.get('id')} {event}：申请人没有 open_id / user_id，跳过")
-            return
+        union_id = str(applicant.get("union_id") or "")
+        # **收件人选一次就好**：open_id > user_id > union_id。
+        # union_id 是老单子和从别处同步来的单子的常态；原先它走一条单独的提前 return 的
+        # 分支，于是绕过了下面那条「重试又失败不再打扰」，也漏了时钟注入 ——
+        # 两条路径只要分开写，迟早只有一条是对的
+        who, kind = (
+            (open_id, "open_id")
+            if open_id
+            else (user_id, "user_id")
+            if user_id
+            else (union_id, "union_id")
+        )
+        if not who:
+            _log(f"{ticket.get('id')} {event}：申请人没有 open_id / user_id / union_id，发不出去")
+            raise NotifyError("申请人没有任何飞书标识，通知发不出去")
         if event == "failed" and _failures(ticket) > 1:
             # 管理员重试又失败：员工已经知道「管理员会处理」，不再重复打扰（管理员群照发）
             return
         card = build_card(event, ticket, base_url=self.base_url, now=self._clock())
-        self.send(open_id or user_id, card, by_user_id=not open_id)
+        self.send(who, card, id_type=kind)
 
 
 class AdminAlert:

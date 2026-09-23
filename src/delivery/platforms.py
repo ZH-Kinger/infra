@@ -121,9 +121,20 @@ ALIYUN = Platform(
     session_policy=True,
     long_term=True,
     storage=StorageDialect(
-        bucket_actions=("oss:GetBucketInfo", "oss:GetBucketStat", "oss:GetBucketAcl"),
+        # GetBucketLocation：S3 兼容客户端（lakeFS、s3fs、rclone）建连时会先探地域，
+        # 探不到就报一个和权限八竿子打不着的错。不返回任何数据，白给
+        bucket_actions=(
+            "oss:GetBucketInfo",
+            "oss:GetBucketStat",
+            "oss:GetBucketAcl",
+            "oss:GetBucketLocation",
+        ),
         list_actions=("oss:ListObjects", "oss:GetBucketMultipartUploads"),
-        download_actions=("oss:GetObject",),
+        # GetObjectVersion：桶开了版本控制时，带 version id 的 GET/HEAD 走的是这个动作。
+        # 少了它的表现是「能下载、但带版本号的元信息请求 403」—— 看起来自相矛盾，
+        # 排查会往策略以外的方向跑（真机踩过：wuji-bucket-hangzhou + lakeFS）。
+        # 它只是「读同一个对象的某个版本」，不扩大数据范围：版本读写仍受同一条 Resource 约束
+        download_actions=("oss:GetObject", "oss:GetObjectVersion"),
         write_actions=("oss:PutObject", "oss:AbortMultipartUpload", "oss:ListParts"),
         deny_actions=(
             "oss:DeleteObject",

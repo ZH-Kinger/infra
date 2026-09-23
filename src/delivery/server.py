@@ -88,7 +88,15 @@ from .registry import PlatformRegistry
 from .requests_api import TICKET_ID as _ID
 from .requests_api import Caller, RequestsApi
 from .roles import ROLE_ADMIN, Admins, load_admins
-from .views import FILTERS, Labels, admin_overview, admin_people, my_keys, person_detail
+from .views import (
+    FILTERS,
+    Labels,
+    admin_overview,
+    admin_people,
+    my_keys,
+    person_detail,
+    unlinked_rows,
+)
 
 #: 工具下载目录（`--downloads`）。九章的 aladdin 没有公开下载地址，只能我们自己托管；
 #: 阿里和火山的 CLI 有官方地址，页面上直接给链接，不在这里放第二份。
@@ -320,6 +328,110 @@ class _Pending:
     verifier: str
     redirect_uri: str
     created: float = field(default_factory=time.time)
+
+
+def _todo_view(backend) -> dict:
+    """待办清单。**零云调用**：全部来自本地文件和快照，所以每次打开面板都能跑。
+
+    每一类各自 try：一个数据源读坏了只让那一类缺席（记进 `errors`），
+    不让整页打不开 —— 待办页是管理员的落地页，它打不开等于面板打不开。
+    """
+    from . import todo as todo_mod
+
+    report = todo_mod.Report()
+
+    def part(name: str, fn) -> None:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 — 一类算不出不该让整页挂掉
+            print(f"[todo] {name}：{type(exc).__name__}: {exc}", file=sys.stderr)
+            report.errors.append(f"{name}没算出来：{type(exc).__name__}")
+
+    snap = None
+    try:
+        snap = backend.snapshot()
+    except DeliveryError as exc:
+        report.errors.append(f"权限快照读不了：{str(exc).splitlines()[0]}")
+    captured = snap.captured_at if snap else ""
+    report.note_source(
+        "权限快照",
+        captured,
+        stale=todo_mod.stale("snapshot", captured),
+        # 没采到时说清楚该等还是该去查：采集任务每 20 分钟一轮
+        note="采集任务每 20 分钟跑一次，一直没有就去看系统状态" if not captured else "",
+    )
+
+    paths = backend.iam_paths()
+    if paths is not None:
+        ob_path = offboard_mod.path_beside(paths.people)
+        part("离职待办", lambda: todo_mod.collect_offboard(report, offboard_mod.pending(ob_path)))
+
+        def _drift():
+            cached = iam_sync.cached_reconcile(paths) or {}
+            at = str(cached.get("checked_at") or "")
+            report.note_source("IAM 对账", at, stale=todo_mod.stale("reconcile", at))
+            todo_mod.collect_iam_drift(report, cached, set(iam_sync.load_snooze(paths)))
+
+        part("IAM 对账", _drift)
+        part("属性表", lambda: todo_mod.collect_iam_files(report, iam_sync.preview(paths)))
+
+    def _roster():
+        index = backend.people()
+        pending = sum(1 for p in index.people for _ in p.pending)
+        rows, filtered = unlinked_rows(
+            snap, index, backend.labels(), services=backend.service_names()
+        )
+        todo_mod.collect_roster(report, pending, len(rows), filtered)
+
+    part("名册", _roster)
+
+    def _keys():
+        from . import hygiene
+
+        rep = hygiene.build(
+            snap,
+            backend.people().people,
+            services=backend.service_names(),
+            stale_days=backend.stale_days or hygiene.STALE_KEY_DAYS,
+            unused_days=backend.unused_days or hygiene.UNUSED_KEY_DAYS,
+        )
+        todo_mod.collect_keys(report, len(rep.rotate), len(rep.unused))
+
+    part("密钥", _keys)
+
+    def _tickets():
+        if not backend.tickets_path:
+            return
+        rows = []
+        for row in tickets_mod.TicketStore(backend.tickets_path).all():
+            rows.append(
+                {
+                    "state": row.get("status"),
+                    "created_at": row.get("created_at") or row.get("at") or "",
+                    "expires_at_ts": float(row.get("expires_at_ts") or 0),
+                    "who": str((row.get("applicant") or {}).get("email") or ""),
+                    # 号开出来了、登录名还没写进公司 IAM —— 他登不进去，会来问你。
+                    # 这种单子状态是 DONE 不是 FAILED，不单独挑出来在任何一页上都不显眼
+                    "needs_iam": (
+                        row.get("kind") == "account"
+                        and row.get("status") == tickets_mod.DONE
+                        and bool(row.get("user_created"))
+                        and not row.get("iam_written")
+                    ),
+                }
+            )
+        todo_mod.collect_tickets(report, rows)
+        # 到期提醒是双份的：飞书私聊提醒申请人（flows.remind_expiring），这里提醒管理员
+        todo_mod.collect_expiring(report, [r for r in rows if r.get("state") == tickets_mod.DONE])
+
+    part("申请单", _tickets)
+
+    # 「云上有工作空间没登记」这一条**暂不进待办页**：没有算力队列的工作空间是空壳
+    # （开通 PAI 时自动建的默认空间就是这种），线上 10 个里这种占多数，全报出来会把
+    # 待办页变回清单页。判断「有没有卡」要调 PAI 的配额接口，接口还没确认
+    # （docs/collab/research/pai-quota-discovery.md）。在那之前只留一条显式的命令行入口：
+    #   delivery requests regions --discover
+    return report.view()
 
 
 def _offline_view(backend) -> dict:
@@ -692,6 +804,7 @@ _STATIC = {
     "/hygiene.js": ("hygiene.js", "text/javascript; charset=utf-8"),
     "/iam.js": ("iam.js", "text/javascript; charset=utf-8"),
     "/offline.js": ("offline.js", "text/javascript; charset=utf-8"),
+    "/todo.js": ("todo.js", "text/javascript; charset=utf-8"),
     "/storage.js": ("storage.js", "text/javascript; charset=utf-8"),
 }
 #: 页面只加载同源资源。前端不拼 innerHTML，这条 CSP 是第二道闸。
@@ -1044,34 +1157,23 @@ class Backend:
         return self._user_notifier
 
     def admin_todo(self, user) -> dict:
-        """管理员的待办数。**读缓存，不打外部接口** —— 这个方法在每次拿会话时都会跑。
+        """导航角标上的待办数。**和待办页同一份计算**（`_todo_view`）——
+        两处各算一遍的话，角标写 3、点进去列 5，人就再也不信角标了。
 
-        `iam_pending` 是「已离职但云登录名还挂着、且没被稍后处理」的人数。
-        读不到缓存返回 0 而不是报错：待办数拿不到不该让整个面板登不进去。
+        读不到就返回空而不是报错：待办数拿不到不该让整个面板登不进去。
         """
         if self.role(user) != ROLE_ADMIN:
             return {}
-        paths = self.iam_paths()
-        if paths is None:
-            return {}
         try:
-            cached = iam_sync.cached_reconcile(paths)
-        except Exception:  # noqa: BLE001 — 待办数不该让会话失败
+            counts = (_todo_view(self) or {}).get("counts") or {}
+        except Exception:  # noqa: BLE001 — 角标不该让会话失败
             return {}
-        if not cached:
-            return {}
-        held = set()
-        try:
-            held = set(iam_sync.load_snooze(paths))
-        except Exception:  # noqa: BLE001
-            held = set()
-        pending = sum(
-            1
-            for e in (cached.get("apps") or [])
-            for d in (e.get("drift") or [])
-            if d.get("kind") == "inactive" and f"{e.get('app')}/{d.get('union_id')}" not in held
-        )
-        return {"iam_pending": pending, "checked_at": str(cached.get("checked_at") or "")}
+        return {
+            "urgent": int(counts.get("urgent") or 0),
+            "total": int(counts.get("total") or 0),
+            # 老前端还在读这个键：它现在是「要紧的」那一档
+            "iam_pending": int(counts.get("urgent") or 0),
+        }
 
     def iam_paths(self) -> Optional[iam_sync.SyncPaths]:
         """属性表同步要写名册所在目录：路径没配（或过不了写盘守卫）就不开这个功能。"""
@@ -1545,6 +1647,8 @@ def make_handler(
                         backend.people(),
                         backend.labels(),
                         warnings=backend.warnings(),
+                        # 和体检、待办同一份口径：程序发的号不算「对不上人」
+                        services=backend.service_names(),
                     ),
                 )
             if path == "/api/admin/people":
@@ -1557,7 +1661,11 @@ def make_handler(
                 return self._json(
                     200,
                     admin_people(
-                        backend.snapshot(), backend.people(), backend.labels(), filter=wanted
+                        backend.snapshot(),
+                        backend.people(),
+                        backend.labels(),
+                        filter=wanted,
+                        services=backend.service_names(),
                     ),
                 )
             if path.startswith(_ADMIN_PEOPLE):
@@ -1655,6 +1763,10 @@ def make_handler(
                         unused_days=backend.unused_days,
                     )
                 return self._json(200, view)
+            if path == "/api/admin/todo":
+                if self._require(admin=True) is None:
+                    return None
+                return self._json(200, _todo_view(backend))
             if path == "/api/admin/hygiene":
                 if self._require(admin=True) is None:
                     return None

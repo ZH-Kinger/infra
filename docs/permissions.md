@@ -578,6 +578,12 @@ Dataset Version 再调用 `GetDatasetVersion`，交叉检查 `SourceId`、`lakef
 
 唯一的例外是 bootstrap 阶段的临时管理员用户——跑完就应该降权或删除。
 
+以上说的是**本仓库 Terraform 管理的那套身份**。同一仓库里的云权限面板（`src/delivery/`）另有一条路：
+超过 12 小时的数据访问凭证只能发长期 AK（阿里云 `AssumeRole` 的 `DurationSeconds` 硬顶是 43200 秒），
+做法是建一个前缀受限的子账号（`staff-*` / `tempak-*`），把有效期写进策略的 `Condition`，
+服务端逐次调用判时间、到期自动失效，删号只是清理残留。规则见
+[云账号自助平台](cloud-access-platform.md)。
+
 ---
 
 ## 8. 变更流程

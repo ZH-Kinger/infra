@@ -692,3 +692,13 @@ tbody tr.prow:active{background:var(--surface-2)}
   .cred-row{grid-template-columns:minmax(0,1fr) auto}
   .cred-label{grid-column:1 / -1}
 }
+
+/* 待办页。一行一件事：左边说清楚「发生了什么 + 不处理会怎样」，右边一个去处 */
+.todo-row{display:flex; gap:1rem; align-items:flex-start; justify-content:space-between;
+          padding:.7rem var(--pad-x); border-top:1px solid var(--line)}
+.todo-row:first-of-type{border-top:0}
+.todo-main{min-width:0}
+.todo-what{margin:.15rem 0 0; color:var(--ink-2)}
+/* 依据不足的项：还得提醒，但不该看起来和有凭有据的一样确凿 */
+.todo-row.weak{opacity:.72}
+.tab-badge.mute{background:var(--surface-2); color:var(--ink-2)}

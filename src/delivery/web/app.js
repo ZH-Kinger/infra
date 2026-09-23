@@ -9,6 +9,7 @@ import { ApiError, api, apiPost, clear, h, mount, platformTag, requestTitle, saf
 import { renderAssets } from "./assets.js";
 import { renderHealth } from "./health.js";
 import { renderHygiene } from "./hygiene.js";
+import { renderTodo } from "./todo.js";
 import { renderIam } from "./iam.js";
 import { renderOffline } from "./offline.js";
 import { accessRoutes } from "./access.js";
@@ -130,16 +131,19 @@ function renderTopbar(space = "user") {
   const switcher = document.getElementById("space-switch");
   switcher.hidden = !isAdmin;
   switcher.textContent = space === "admin" ? "回到员工视图" : "管理后台";
-  switcher.setAttribute("href", space === "admin" ? "#me" : "#admin/requests");
+  switcher.setAttribute("href", space === "admin" ? "#me" : "#admin/todo");
   document.getElementById("logout").setAttribute("href", safePath(s.logout_url, "/auth/logout"));
   // 待办数标在导航上。**埋在二级页里的待办等于没有待办** ——
   // 对账那件事以前要点进「IAM 属性表」再点一次按钮才看得见，于是没人看
-  const n = ((s.todo || {}).iam_pending) || 0;
-  for (const tab of document.querySelectorAll('.tab[data-tab="admin-iam"]')) {
+  const todo = s.todo || {};
+  const n = todo.urgent || 0;
+  const total = todo.total || 0;
+  for (const tab of document.querySelectorAll('.tab[data-tab="admin-todo"]')) {
     const old = tab.querySelector(".tab-badge");
     if (old) old.remove();
-    if (n > 0) {
-      tab.append(h("span", { class: "tab-badge", title: `${n} 人已离职但云登录名还挂着` }, String(n)));
+    if (total > 0) {
+      const title = n > 0 ? `${n} 件要紧的，共 ${total} 件` : `${total} 件待处理`;
+      tab.append(h("span", { class: `tab-badge${n ? "" : " mute"}`, title }, String(n || total)));
     }
   }
 }
@@ -169,6 +173,7 @@ function parseHash() {
   if (path === "admin/assets") return { page: "admin-assets", space: "admin" };
   if (path === "admin/policies") return { page: "admin-policies", space: "admin" };
   if (path === "admin/health") return { page: "admin-health", space: "admin" };
+  if (path === "admin/todo") return { page: "admin-todo", space: "admin" };
   if (path === "admin/hygiene") return { page: "admin-hygiene", space: "admin" };
   if (path === "admin/iam") return { page: "admin-iam", space: "admin" };
   if (path === "admin/offline") return { page: "admin-offline", space: "admin" };
@@ -218,6 +223,10 @@ function route() {
       () => api(`/api/admin/people/${encodeURIComponent(key)}`),
       (detail) => mount(personPage(detail, { admin: true })),
     );
+  }
+  if (page === "admin-todo") {
+    markTab("admin-todo");
+    return renderTodo({ load });
   }
   if (page === "admin-health") {
     markTab("admin-health");

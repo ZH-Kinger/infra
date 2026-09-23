@@ -478,6 +478,18 @@ dataset-sink reclaim /mnt/cpfs/datasets \
 
 **记住显式 Deny 优先于任何 Allow。** 加了 Allow 还是不通，就去找是哪条 Deny 命中了。
 
+#### S3 兼容客户端（lakeFS / s3fs / rclone）连 OSS 的三个怪现象
+
+2026-09 在真实账号上确认，报错都不指向根因：
+
+| 现象 | 原因 | 怎么办 |
+|---|---|---|
+| 建连就失败，报错和权限看着没关系 | S3 客户端建连先探地域，策略里缺 `oss:GetBucketLocation` | 加上。这个动作不返回任何数据 |
+| 能下载，但带 version id 的 GET/HEAD 回 403 | 桶开了版本控制时，带版本号的请求走 `oss:GetObjectVersion`，不是 `oss:GetObject`。lakeFS 默认带版本号 | 加上 `oss:GetObjectVersion`。它只是读同一个对象的某个版本，不扩大 Resource 范围 |
+| 想做到「只给元信息、不给下载」 | `HeadObject` / `GetObjectMeta` 在 RAM 里**都映射到 `oss:GetObject`** | 做不到，别在授权方案里承诺这个粒度 |
+
+面板发凭证用的动作清单在 `src/delivery/platforms.py`，三条都已补进去。
+
 ### 3.2 OIDC 假设角色失败
 
 | 报错 | 原因 |

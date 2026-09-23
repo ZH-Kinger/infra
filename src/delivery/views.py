@@ -186,6 +186,22 @@ def _person_row(person: Person, snapshot: Optional[Snapshot], labels: Labels) ->
     }
 
 
+def unlinked_rows(
+    snapshot: Optional[Snapshot], index: PeopleIndex, labels: Labels, *, services=()
+) -> tuple:
+    """对不上人的号 + 被滤掉的条数。**和体检的「无主账号」同一份口径**（AC-5）。
+
+    程序自己发的号（`tempak-` / `panel-` 前缀）和登记过的服务号本来就没有「属主」，
+    列进去只会让人每次都得先把它们挑出来。滤掉多少条要说出来，否则两页的数字对不上、
+    又没有任何地方解释。
+    """
+    from . import hygiene
+
+    rows = _unlinked_rows(snapshot, index, labels)
+    keep = [r for r in rows if not hygiene.is_program_account(r.get("name", ""), services)]
+    return keep, len(rows) - len(keep)
+
+
 def _unlinked_rows(snapshot: Optional[Snapshot], index: PeopleIndex, labels: Labels) -> list:
     """快照里有、但名册里没对应到任何人的子账号。名册的 unlinked 提供类型和原因。"""
     known = {(u.platform, u.account, u.name): u for u in index.unlinked}
@@ -224,7 +240,7 @@ def _has_any(row: dict) -> bool:
 
 
 def admin_overview(
-    snapshot: Optional[Snapshot], index: PeopleIndex, labels: Labels, *, warnings=()
+    snapshot: Optional[Snapshot], index: PeopleIndex, labels: Labels, *, warnings=(), services=()
 ) -> dict:
     rows = [_person_row(p, snapshot, labels) for p in index.people]
     per_account: dict = {}
@@ -243,7 +259,10 @@ def admin_overview(
         "totals": {
             "people": sum(1 for r in rows if _has_any(r)),
             "cloud_users": len(snapshot.users) if snapshot else 0,
-            "unlinked_accounts": len(_unlinked_rows(snapshot, index, labels)),
+            # 和体检、待办同一份口径（过滤程序发的号）—— 三处各算一份的话，
+            # 同一个问题在三页给出三个数字，而页面上没有任何地方解释差在哪
+            "unlinked_accounts": len(unlinked_rows(snapshot, index, labels, services=services)[0]),
+            "unlinked_filtered": unlinked_rows(snapshot, index, labels, services=services)[1],
             "multi_account_people": sum(1 for r in rows if r["account_count"] >= 2),
             "high_risk_people": sum(1 for r in rows if r["high_risk"]),
             "unbound_people": sum(1 for r in rows if _has_any(r) and not r["bound"]),
@@ -264,7 +283,12 @@ def admin_overview(
 
 
 def admin_people(
-    snapshot: Optional[Snapshot], index: PeopleIndex, labels: Labels, *, filter: str = "all"
+    snapshot: Optional[Snapshot],
+    index: PeopleIndex,
+    labels: Labels,
+    *,
+    filter: str = "all",
+    services=(),
 ) -> dict:
     if filter not in FILTERS:
         raise ValueError(f"filter 只能是 {', '.join(FILTERS)}")
@@ -285,7 +309,9 @@ def admin_people(
     )
     return {
         "people": picked,
-        "unlinked_accounts": _unlinked_rows(snapshot, index, labels),
+        "unlinked_accounts": unlinked_rows(snapshot, index, labels, services=services)[0],
+        # 滤掉多少条要说出来，否则页面上的数字对不上又没人解释得了
+        "unlinked_filtered": unlinked_rows(snapshot, index, labels, services=services)[1],
         "assignable": assignable,
     }
 

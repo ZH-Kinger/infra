@@ -26,6 +26,7 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
+from . import grants
 from .errors import DeliveryError
 
 #: 组名和登录名都只允许这些字符。**不是洁癖**：这两段会直接拼进 OSS 的 key 和 RAM
@@ -137,7 +138,7 @@ def plan(
         low = login.lower()
         if not login:
             continue
-        if low in svc or low.startswith(("tempak-", "temp-ak-", "panel-")):
+        if low in svc or low.startswith(grants.ISSUED_PREFIXES):
             skipped.append(f"{login}：服务号或程序发的临时凭证，不建个人目录")
             continue
         if login not in known:

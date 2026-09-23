@@ -53,7 +53,7 @@ MAX_AUTO_PEOPLE = 3
 #: 永远不自动停、不删的号。云上的 Deny 策略是第二道
 #: 和云上执行身份策略里的 Deny 名单对齐（阿里、火山两份）。**改一边要改另一边**
 _PROTECTED_CLOUD = re.compile(
-    r"\A(panel-|power-|tempak|wuji-|rl-|finance\Z|data-tran\Z)", re.IGNORECASE
+    r"\A(panel-|power-|tempak|staff-|temp-ak-|wuji-|rl-|finance\Z|data-tran\Z)", re.IGNORECASE
 )
 #: 九章的登录名**全都是 `wuji-` 开头**（`wuji-wangyuran`），套云上那套前缀等于把整个平台挡光。
 #: 九章那边没有服务号的概念，面板也动不了它的号，所以只挡面板自己可能登记的名字

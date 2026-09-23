@@ -34,10 +34,24 @@ from typing import Iterable, Optional
 from . import platforms
 from .errors import DeliveryError
 
-#: 长期凭证的子账号与策略前缀。执行身份的云上策略按这两个前缀收窄授权，
-#: 所以**改名等于绕过那道闸**——要改必须同步改 identity/executor-policy.aliyun-issuer.json。
-USER_PREFIX = "tempak-"
-POLICY_PREFIX = "temp-ak-auto-"
+#: 长期凭证的子账号与策略前缀。执行身份的云上策略按这些前缀收窄授权，
+#: 所以**改名等于绕过那道闸**——要改必须同步改云上 wuji-panel-issuer 那条策略
+#: （现网副本在 deploy/panel/cloud-policies/）。
+#:
+#: **内部和外部分开两套前缀。** 以前两边都是 `tempak-`：面板发给同事的、机器人发给
+#: 供应商的，在 RAM 控制台上长得一模一样，只能靠显示名分辨 —— 而出事那一刻，
+#: 「这把钥匙在公司里还是在公司外」是最先要回答的问题。
+USER_PREFIX = "staff-"  # 面板发给内部同事的
+POLICY_PREFIX = "staff-oss-auto-"
+#: 机器人发给外部使用方的（历史凭证也都是这套，撤销时还要认它）
+EXTERNAL_USER_PREFIX = "tempak-"
+EXTERNAL_POLICY_PREFIX = "temp-ak-auto-"
+_PREFIX_PAIRS = ((USER_PREFIX, POLICY_PREFIX), (EXTERNAL_USER_PREFIX, EXTERNAL_POLICY_PREFIX))
+
+#: **程序发出来的子账号前缀，全仓唯一一份。**（面板发的 + 机器人发的 + 更早的历史写法）
+#: 体检、审计、工作空间、离职保护各处都引用它 —— 这次前缀改名漏掉了其中四处，
+#: 而其中两处是安全边界（受保护名单）。各写各的字面量迟早只改一边
+ISSUED_PREFIXES = (USER_PREFIX, EXTERNAL_USER_PREFIX, "temp-ak-", "panel-")
 
 CAP_LIST, CAP_DOWNLOAD, CAP_WRITE = "list", "download", "write"
 CAPS = (CAP_LIST, CAP_DOWNLOAD, CAP_WRITE)
@@ -87,15 +101,38 @@ def slug(subject: str) -> str:
     return "x" + hashlib.blake2s(name.encode("utf-8"), digest_size=4).hexdigest()
 
 
-def user_name(subject: str, *, rand: Optional[str] = None) -> str:
-    """`tempak-<使用方>-<6hex>`。随机后缀让同一使用方的多次发放互不覆盖。"""
-    return f"{USER_PREFIX}{slug(subject)}-{rand or secrets.token_hex(3)}"
+def readable(subject: str) -> bool:
+    """`slug` 这次是真取出了拉丁字母，还是退化成哈希了。
+
+    **显式问，别靠形状猜**：退化值长成 `x` + 8 位十六进制，而 `xuzhiyuan`（徐志远）
+    这类拼音邮箱前缀恰好也是 x 开头的 9 个字母 —— 按形状判会把他们判成哈希，
+    于是本该可读的名字又被换成一串乱码。
+    """
+    return bool(_SLUG_OK.sub("-", (subject or "").strip().lower()).strip("-"))
+
+
+def user_name(subject: str, *, rand: Optional[str] = None, email: str = "") -> str:
+    """`staff-<谁>-<6hex>`。随机后缀让同一个人的多次发放互不覆盖。
+
+    **优先用邮箱前缀**：中文名转不出拉丁字母时 `slug` 会退化成哈希，
+    于是云上出现 `staff-x090fd8a0-…` 这种名字，运维在 RAM 控制台上根本认不出是谁
+    （线上真出现过）。邮箱前缀可读、稳定、人人都有。
+    """
+    local = str(email or "").split("@", 1)[0]
+    who = slug(local) if readable(local) else ""
+    if not who:
+        who = slug(subject)
+    return f"{USER_PREFIX}{who}-{rand or secrets.token_hex(3)}"
 
 
 def policy_name(user: str) -> str:
-    if not user.startswith(USER_PREFIX):
-        raise GrantError(f"长期凭证的子账号必须以 {USER_PREFIX} 开头：{user}")
-    return POLICY_PREFIX + user
+    """子账号 → 它那条自定义策略的名字。**内外两套前缀都要认**：
+    撤销和到期清理会处理历史上发出去的外部凭证，只认新前缀的话它们永远清不掉。"""
+    for user_prefix, policy_prefix in _PREFIX_PAIRS:
+        if user.startswith(user_prefix):
+            return policy_prefix + user
+    allowed = " / ".join(x for x, _ in _PREFIX_PAIRS)
+    raise GrantError(f"长期凭证的子账号必须以 {allowed} 开头：{user}")
 
 
 def check_bucket(bucket: str) -> str:

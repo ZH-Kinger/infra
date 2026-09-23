@@ -73,7 +73,9 @@ def user_name(ticket_id: str) -> str:
     tail = "".join(c for c in str(ticket_id or "") if c.isalnum())[-20:].lower()
     if not tail:
         raise MoveCredError("没有单号，签不出源端凭证")
-    return f"{grants_mod.USER_PREFIX}move-{tail}"
+    # **按外部算**：这把钥匙是交给对方云的迁移服务去拉数据的，会离开我们的边界，
+    # 不是发给内部同事的（内部那套现在是 staff-，见 grants.USER_PREFIX）
+    return f"{grants_mod.EXTERNAL_USER_PREFIX}move-{tail}"
 
 
 def mint(

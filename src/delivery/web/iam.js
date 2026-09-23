@@ -486,7 +486,9 @@ function offboardSection(items) {
         del.remove();
         keep.remove();
         out.replaceChildren(h("span", { class: "good-text" },
-          op === "offboard_delete" ? "已删除云账号，数据没动" : "已恢复"));
+          op === "offboard_delete"
+            ? "已删除云账号（桶里的文件、数据集、实例都没动）"
+            : "已恢复（登录和 AK 开回去了）"));
       } catch (e) {
         del.disabled = false;
         keep.disabled = false;
@@ -503,13 +505,17 @@ function offboardSection(items) {
       r.state === "disabled"
         ? `恢复 ${r.user}？会把停用时关掉的登录和 AK 开回去，之后不再自动停这个号。`
         : `${r.person} 没离职？这条会从待确认里拿掉。`));
+    // 标签 = 事实 + 谁说的 + 什么时候。「未停用」是在替云上做断言，而面板并不知道云上现在什么样
+    const when = /^\d{4}-\d{2}-\d{2}/.test(String(r.at || "")) ? r.at.slice(5, 10) : "";
     const state = r.state === "disabled"
-      ? h("span", { class: "pill warn" }, "已停用")
-      : h("span", { class: "pill" }, byHand ? "要去控制台停" : "未停用");
+      ? h("span", { class: "pill warn", title: "面板关了控制台登录、禁了 AK，可以恢复" },
+          when ? `已停用（面板 ${when}）` : "已停用（面板）")
+      : h("span", { class: "pill", title: "面板没对这个号做过任何停用动作；云上现在什么样，面板这次没查" },
+          byHand ? "面板动不了它" : "面板没停过它");
     return h("div", { class: "recon-row" },
       h("div", {}, h("b", {}, r.person || r.user), " ", state, " ",
         h("code", {}, `${CLOUD[r.platform] || r.platform} ${r.user}`)),
-      h("div", { class: "hint" }, `${r.signal || ""} · ${fmtTime(r.at)}`),
+      h("div", { class: "hint" }, `${r.signal || ""} · 记于 ${fmtTime(r.at)}`),
       r.left ? h("div", { class: "recon-bad" }, `上次没删干净：${r.left.join("；")}`) : null,
       r.incomplete ? h("div", { class: "recon-bad" }, `停用没做完，下一轮会再试：${r.incomplete}`) : null,
       r.unverified ? h("div", { class: "recon-bad" }, "名册里这个号不归他，面板不删。核实后到云控制台处理。") : null,

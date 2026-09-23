@@ -75,8 +75,17 @@ test("每条记录一组按钮，文案随状态变", () => {
   assert.equal(buttons(root, "确认删除").length, 2);
   assert.equal(buttons(root, "恢复").length, 1);
   assert.equal(buttons(root, "没离职").length, 1);
-  assert.ok(root.textContent.includes("已停用"));
-  assert.ok(root.textContent.includes("未停用"));
+  // 状态标签 = 事实 + 谁说的。面板并不知道云上此刻什么样，所以「没停过」只能说成
+  // 面板没做过这个动作，不能写成「未停用」那种替云上下的断言 —— 那句话在
+  // 「有人已经在控制台停了」的时候是错的，而错的方向恰好是让人以为还有敞口
+  const pills = all(root).filter((n) => (n.className || "").includes("pill"));
+  const labels = pills.map((p) => p.textContent);
+  assert.ok(labels.some((t) => t.includes("已停用")), labels.join(" / "));
+  assert.ok(
+    labels.some((t) => t.includes("面板") && !t.includes("已停用")),
+    `没停用的那条要说清是「面板没停过」：${labels.join(" / ")}`,
+  );
+  assert.ok(!labels.includes("未停用"), "「未停用」是在替云上做断言");
   assert.ok(root.textContent.includes("上次没删干净：摘策略 X：Throttling"));
 });
 
@@ -95,7 +104,10 @@ test("确认删除发的 key 是 platform/account/user", async () => {
       body: { op: "offboard_delete", key: "aliyun/1000000000000001/lisi" },
     },
   ]);
-  assert.ok(root.textContent.includes("已删除云账号，数据没动"));
+  // 「号删了、东西没动」这两半都必须说出来：只说前半句，管理员会以为数据也一起没了，
+  // 于是不敢点；只说后半句则看不出号到底删没删
+  assert.ok(root.textContent.includes("已删除云账号"), root.textContent);
+  assert.ok(root.textContent.includes("没动"), root.textContent);
 });
 
 test("恢复 / 没离职 发 offboard_restore", async () => {

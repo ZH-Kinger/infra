@@ -1,0 +1,78 @@
+{
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateUser",
+        "iam:GetUser",
+        "iam:DeleteUser",
+        "iam:CreateAccessKey",
+        "iam:ListAccessKeys",
+        "iam:DeleteAccessKey",
+        "iam:UpdateAccessKey",
+        "iam:ListAttachedUserPolicies"
+      ],
+      "Resource": [
+        "trn:iam::2111674479:user/tempak-*",
+        "trn:iam::2111674479:user/staff-*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreatePolicy",
+        "iam:GetPolicy",
+        "iam:UpdatePolicy",
+        "iam:DeletePolicy"
+      ],
+      "Resource": [
+        "trn:iam::2111674479:policy/temp-ak-auto-*",
+        "trn:iam::2111674479:policy/staff-oss-auto-*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iam:AttachUserPolicy",
+        "iam:DetachUserPolicy"
+      ],
+      "Resource": [
+        "trn:iam::2111674479:user/tempak-*",
+        "trn:iam::2111674479:policy/temp-ak-auto-*",
+        "trn:iam::2111674479:user/staff-*",
+        "trn:iam::2111674479:policy/staff-oss-auto-*"
+      ]
+    },
+    {
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateLoginProfile",
+        "iam:UpdateLoginProfile",
+        "iam:DeleteLoginProfile",
+        "iam:AddUserToGroup",
+        "iam:RemoveUserFromGroup",
+        "iam:CreateUserGroup",
+        "iam:DeleteUserGroup",
+        "iam:AttachUserGroupPolicy",
+        "iam:DetachUserGroupPolicy",
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:UpdateRole",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:UpdateTrustPolicy",
+        "iam:UpdateUser",
+        "iam:CreateServiceLinkedRole",
+        "iam:CreateSAMLProvider",
+        "iam:UpdateSAMLProvider",
+        "iam:DeleteSAMLProvider",
+        "iam:CreateOIDCProvider",
+        "iam:UpdateOIDCProvider",
+        "iam:DeleteOIDCProvider"
+      ],
+      "Resource": [
+        "*"
+      ]
+    }
+  ]
+}

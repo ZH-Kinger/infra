@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Optional
 
-from . import inventory, offline_accounts, platforms
+from . import grants, inventory, offline_accounts, platforms
 
 #: AK 建出来多久算该轮换。看的是**年龄**不是「最近用没用」——
 #: 一把天天在用的老 AK 才是最该换的那种
@@ -25,7 +25,8 @@ STALE_KEY_DAYS = 180
 UNUSED_KEY_DAYS = 90
 #: 程序发出去的临时凭证子账号。它们**有到期时间、由清理任务负责**，不是「无主」——
 #: 混进无主清单里会让那一栏的一半都是噪音，而一份一半是噪音的清单没人会看第二遍
-_ISSUED_PREFIXES = ("tempak-", "temp-ak-", "panel-")
+#: 见 grants.ISSUED_PREFIXES：**这张表只有那一份**，别在这里另写一份字面量
+_ISSUED_PREFIXES = grants.ISSUED_PREFIXES
 #: 云产品自己建的桶，不该出现在「没登记」那一栏 —— 它们本来就不是给人申请的：
 #: `cri-*-registry` 是容器镜像服务建的，`oss-pai-*` 是 PAI 建的。
 #: 理由同 _ISSUED_PREFIXES：真机上这类占了没登记那一栏的三分之二，
@@ -382,6 +383,12 @@ def load_service_names(path: Optional[str]) -> list:
     return [n.strip() for n in names]
 
 
+def is_program_account(name: str, services) -> bool:
+    """程序发的号 / 登记过的服务号。**体检和人员页共用这一个判据**：
+    各写一份的结果是同一个问题在两页给出两个数字，而页面上没有任何地方解释为什么（AC-5）。"""
+    return _is_service(str(name or ""), {str(x or "").lower() for x in (services or ())} - {""})
+
+
 def _is_service(name: str, services: set) -> bool:
     """服务号（程序用的，本来就没有「属主」这个概念）。
 
@@ -581,9 +588,21 @@ def build(
             report.skipped.append(f"按公司邮箱对通讯录没做成：{exc}")
 
     by_account: dict = {}
+    # **先填已确认的，再填待确认的**：顺序反了的话，A 的「待确认」会盖过 B 的「已确认」，
+    # 属主就看名册里谁排在前面 —— 那是随机的
     for person in people:
         for ref in getattr(person, "accounts", ()):
             by_account[(ref.platform, ref.account, ref.name)] = person
+    for person in people:
+        for ref in getattr(person, "pending", ()):
+            # **只收 review（推断待确认）**：`shared` 是名册发现同一个号被确认给了多个人、
+            # 自己判定自己错了才降级的，它明确拒绝认定属主。收进来等于面板替名册
+            # 做了它拒绝做的断言，还是按排序随机挑一个人署名
+            if getattr(ref, "status", "") != "review":
+                continue
+            # 待确认的归属也算「认得出主人」：名册刚推断完、管理员还没点确认的那段时间，
+            # 每个新号都是这个状态。不算的话同一个号在体检页和人员页给出两个结论
+            by_account.setdefault((ref.platform, ref.account, ref.name), person)
 
     for user in snapshot.users:
         key = (user.platform, user.account, user.name)

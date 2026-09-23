@@ -1597,11 +1597,67 @@ class Flows:
                 print(f"[notify] {ticket.get('id')} {event} 发送失败：{reason}", file=sys.stderr)
         return ticket
 
-    def remind_expiring(self, days: int = 3) -> list:
-        """有期限的权限在 days 天内到期：提醒申请人一次（记 expiry_reminded 事件，不重复提醒）。
+    @staticmethod
+    def _left(ticket, now: float) -> str:
+        """还剩多久到期，照实说。档位是判据，不是事实 —— 台账里写「还有 7 天」
+        而实际只剩 12 小时的话，以后查「为什么没提醒到」会被这句话带偏。"""
+        left = float(ticket.get("expires_at_ts") or 0) - now
+        if left <= 0:
+            return "已经"
+        if left < 86400:
+            return f"还有 {int(left // 3600)} 小时"
+        return f"还有 {int(left // 86400)} 天"
+
+    #: 到期前提醒几次、分别提前几天。**两档**：第一档留出换凭证的时间，第二档是最后通知。
+    #: 只提前 3 天对 90 天的服务凭证太晚 —— 负责人可能正在休假，而到期那天服务直接断。
+    REMIND_TIERS = (7, 1)
+
+    def remind_expiring(self, days: int = 0, tiers=()) -> list:
+        """有期限的权限快到期：按档提醒申请人，每档只提醒一次。
 
         没开通知时什么都不做，也不记事件：以后开了通知，快到期的单子还能收到提醒。
+
+        **每档记一个自己的事件**（`expiry_reminded:7`）。只记一个通用标记的话，
+        第一档发完第二档就永远发不出去 —— 而最后那次才是真正来得及补救的那次。
+        老单子上的 `expiry_reminded`（没有档位）按 3 天档算，见 `_reminded`。
         """
+        want = sorted(
+            {int(x) for x in (tiers or ((days,) if days else self.REMIND_TIERS))}, reverse=True
+        )
+        out = []
+        for i, tier in enumerate(want):
+            # **每一档都要有下界**：下界就是下一个更近的档。没有下界的话，一张只剩
+            # 12 小时的单子会先被 7 天档点一次、再被 1 天档点一次 —— 同一轮两张
+            # 一模一样的卡（sweep 停过几天就会这样）。最近的那一档不设下界
+            floor = want[i + 1] if i + 1 < len(want) else 0
+            out += self._remind_tier(tier, floor=floor)
+        return out
+
+    @staticmethod
+    def _reminded(ticket) -> set:
+        """这张单已经在哪几档**真的提醒到人了**。老单子只有一个无档位的标记，按 3 天档算。
+
+        **发失败的那一档要放回去**：标记是发之前记的（防并发重复发），发失败时
+        如果标记留着，这一档就此作废 —— 而 1 天档那次恰恰是最后一次来得及补救的通知。
+        所以按「记了几次」减「失败几次」算。
+        """
+        marked: dict = {}
+        failed: dict = {}
+        for e in ticket.get("events") or ():
+            name = str(e.get("event") or "")
+            if name == "expiry_reminded":
+                marked[3] = marked.get(3, 0) + 1
+            elif name.startswith("expiry_reminded:"):
+                with contextlib.suppress(ValueError):
+                    tier = int(name.split(":", 1)[1])
+                    marked[tier] = marked.get(tier, 0) + 1
+            elif name.startswith("expiry_remind_failed:"):
+                with contextlib.suppress(ValueError):
+                    tier = int(name.split(":", 1)[1])
+                    failed[tier] = failed.get(tier, 0) + 1
+        return {tier for tier, n in marked.items() if n > failed.get(tier, 0)}
+
+    def _remind_tier(self, days: int, *, floor: int = 0) -> list:
         # 只能发到管理员群（比如这次拿不到飞书令牌）时不提醒，也不记事件，下次再试
         if self._notify is None or not getattr(self._notify, "reaches_applicant", True):
             return []
@@ -1618,41 +1674,90 @@ class Flows:
                     catalog_mod.KIND_RESOURCE,
                 )
                 or ticket.get("status") != t.DONE
-                or not now < expires <= now + days * 86400
+                or not now + floor * 86400 < expires <= now + days * 86400
                 # 本来就只开了几天的权限：开通消息里已经写了到期时间，不再紧接着提醒
                 or (done_at and expires - done_at <= days * 86400)
-                or any(e.get("event") == "expiry_reminded" for e in ticket.get("events") or [])
+                # **已经在更近的那一档提醒过就别补远档**：剩 12 小时的单子不该收到
+                # 一张写着「还有 7 天到期」的卡，台账上也不该这么记
+                or any(done <= days for done in self._reminded(ticket))
             ):
                 continue
-            try:
-                # 先记事件再发：并发的两次定时任务只会有一次发出去
-                updated = self.store.update(
-                    ticket["id"],
-                    actor="system",
-                    expect=[t.DONE],
-                    event="expiry_reminded",
-                    note="已提醒申请人即将到期",
-                )
-            except t.TicketError:
-                continue
-            if sum(e.get("event") == "expiry_reminded" for e in updated.get("events") or []) > 1:
+            marker = f"expiry_reminded:{days}"
+            failed_marker = f"expiry_remind_failed:{days}"
+            # 上一轮这一档刚失败过 → 这一轮是**重试**：先别写标记，直接试发，发成了再补。
+            #
+            # 顺序很要命：判断放在写标记之后的话，飞书挂超过一分钟（= 两轮）时，
+            # 第二轮的错误原因和第一轮一样、被当成「永久失败」跳过，而这一轮开头
+            # 已经写了「已提醒」——账算歪，这一档从此再也不会试，单子上却留着
+            # 「已提醒申请人：还有 5 天到期」。比不修还糟。
+            prev = (ticket.get("events") or [{}])[-1]
+            retrying = prev.get("event") == failed_marker
+            updated = ticket
+            if not retrying:
+                try:
+                    # 先记事件再发：并发的两次定时任务只会有一次发出去
+                    updated = self.store.update(
+                        ticket["id"],
+                        actor="system",
+                        expect=[t.DONE],
+                        event=marker,
+                        note=f"已提醒申请人：{self._left(ticket, now)}到期",
+                    )
+                except t.TicketError:
+                    continue
+            # **和 `_reminded` 同一套算术**：数「没被失败抵消的条数」。
+            # 只数原始条数的话，第一轮发失败、第二轮重试会被自己上一轮的标记吞掉，
+            # 于是「下一轮会再试」这句承诺不成立，而单子上留着两条「已提醒」
+            events = updated.get("events") or []
+            live = sum(e.get("event") == marker for e in events) - sum(
+                e.get("event") == failed_marker for e in events
+            )
+            if not retrying and live > 1:
+                # 另一个 sweep 抢先发了。**把自己刚写的那条标记抵消掉** ——
+                # 不抵消的话 marked 多一条，而真正发失败的那一方写的 failed 抵不平，
+                # 这一档会被算成「已提醒」，实际没人收到（审计 Low-8）
+                with contextlib.suppress(t.TicketError):
+                    self.store.update(
+                        ticket["id"],
+                        actor="system",
+                        expect=[t.DONE],
+                        event=failed_marker,
+                        note="另一个定时任务同时在发，这条作废",
+                    )
                 continue
             try:
                 self._notify("expiring", updated)
             except Exception as exc:  # noqa: BLE001 — 发送失败只记一笔，不改状态
                 reason = describe_error(exc) or type(exc).__name__
+                if retrying and str(prev.get("note") or "").endswith(reason):
+                    # 上一轮同样的失败已经记过了：**照样会在下一轮再试**（这一轮连标记
+                    # 都没写），只是不再往单子上追加事件 —— 申请人没有任何飞书标识
+                    # 这种永久失败，1 分钟一轮的 sweep 七天能堆两万条（审计 Med-2）。
+                    # 范式同 `_revoke_failed`
+                    out.append(f"{ticket['id']}：到期提醒仍然发不出去（{reason}）")
+                    continue
                 print(f"[notify] {ticket['id']} expiring 发送失败：{reason}", file=sys.stderr)
                 with contextlib.suppress(t.TicketError):
                     self.store.update(
                         ticket["id"],
                         actor="system",
                         expect=[t.DONE],
-                        event="expiry_remind_failed",
-                        note="到期提醒没有发出去",
+                        event=failed_marker,
+                        note=f"{self._left(ticket, now)}到期的提醒没有发出去：{reason}",
                     )
                 out.append(f"{ticket['id']}：到期提醒发送失败")
                 continue
-            out.append(f"{ticket['id']}：已提醒即将到期")
+            if retrying:
+                # 重试成功：这时才补上「已提醒」的标记，账才算平
+                with contextlib.suppress(t.TicketError):
+                    self.store.update(
+                        ticket["id"],
+                        actor="system",
+                        expect=[t.DONE],
+                        event=marker,
+                        note=f"已提醒申请人：{self._left(ticket, now)}到期（重试成功）",
+                    )
+            out.append(f"{ticket['id']}：已提醒，{self._left(ticket, now)}到期")
         return out
 
     # ── 到期回收 ──────────────────────────────────────────────────────────
@@ -2515,6 +2620,40 @@ class Flows:
             raise FlowError(said.lstrip("；").replace("**", ""), 502)
         return self.store.get(ticket_id)
 
+    def retry_iam_writes(self) -> list:
+        """定时任务：把「号建好了、登录名没写进公司 IAM」的单子自动补上。返回每张单一行。
+
+        为什么必须自动
+        ──────────────
+        写属性失败的原因大多是临时的（IAM 接口抖、token 过期、那一刻网络不通），
+        而失败的后果是**那个人登不进云控制台**，单子却是绿的 DONE。
+        原先唯一的补救是管理员在面板上点「补写登录名」—— 要人发现、要人记得、要人点。
+        线上真有一张单这么挂了两天没人知道（REQ-20260921，2026-09-23 查出来）。
+
+        **和手点那条路同一份实现**（`_write_iam_attr`），不是第二条执行路径。
+        写属性本身幂等，`iam_written` 守着不会重复写；补不成只记事件，下一轮再试 ——
+        一直补不成的，待办页上会以「他登不进去」出现，那时才需要人。
+        """
+        out = []
+        for ticket in self.store.all():
+            if (
+                ticket.get("kind") != catalog_mod.KIND_ACCOUNT
+                or ticket.get("status") != t.DONE
+                or not ticket.get("user_created")
+                or ticket.get("iam_written")
+            ):
+                continue
+            try:
+                self.push_iam(ticket["id"], actor="system")
+            except FlowError as exc:
+                out.append(f"{ticket['id']}：登录名还是没写进公司 IAM（{exc}）")
+                continue
+            except Exception as exc:  # noqa: BLE001 — 一张单失败不挡其余
+                out.append(f"{ticket['id']}：补写登录名出错（{describe_error(exc)}）")
+                continue
+            out.append(f"{ticket['id']}：已补写登录名进公司 IAM")
+        return out
+
     def _offer_credential(self, tpl: catalog_mod.Template, ticket: dict) -> str:
         """审批通过就签发，把凭证**密封**起来存，评论里给一个带密钥的查看地址。
 
@@ -2683,7 +2822,12 @@ class Flows:
         # 先把要建的子账号名记进单子再动云：进程在建号途中挂掉时，云上留下的东西
         # 还能按这个名字找回来清掉；不记的话就是一个查无此人的残留账号
         issuer = self._issuer_for(tpl.platform, tpl.account)
-        user = str(ticket.get("cred_user") or "") or grants_mod.user_name(subject)
+        user = str(ticket.get("cred_user") or "") or grants_mod.user_name(
+            # 邮箱在 applicant 里，**顶层没有这个字段** —— 读错的话邮箱恒为空，
+            # 名字又退回哈希，而这次改动的全部目的就是消灭那种名字
+            subject,
+            email=str((ticket.get("applicant") or {}).get("email") or ""),
+        )
         if ticket.get("cred_user") != user:
             self.store.update(
                 ticket["id"],
@@ -2695,7 +2839,10 @@ class Flows:
             )
         issued_ak = ""
         try:
-            cred = issuer.issue_long_term(user, f"{subject}-面板数据访问", doc)
+            # 显示名里写明「内部」：RAM 控制台上只有这一栏能一眼分出内外。
+            # **不要带括号**：火山的 IAM 拒绝显示名里的括号（中英文都拒，报
+            # InvalidDisplayName），而火山的每一张凭证都走这条路 —— 真机试出来的
+            cred = issuer.issue_long_term(user, f"{subject}-内部数据访问", doc)
             issued_ak = cred.access_key_id
             self.store.update(
                 ticket["id"],

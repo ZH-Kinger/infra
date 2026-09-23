@@ -591,9 +591,12 @@ class PendingCardTests(unittest.TestCase):
 
     def test_the_state_is_visible(self):
         """「已停用」和「没停过」是两回事：前者点删是收尾，后者点删是第一次动这个号。"""
-        self.assertIn("已停用", json.dumps(notify.pending_card([rec()]), ensure_ascii=False))
+        # 标签只说面板自己做过什么，不替云上做断言（改版方案 5.4）
+        self.assertIn(
+            "已停用（面板停的）", json.dumps(notify.pending_card([rec()]), ensure_ascii=False)
+        )
         text = json.dumps(notify.pending_card([rec(state="suspect")]), ensure_ascii=False)
-        self.assertIn("还开着", text)  # 面板没停过它 —— 点删是第一次动这个号
+        self.assertIn("面板没停过它", text)
         self.assertNotIn("已停用", text)
 
     def test_a_row_without_a_person_name_falls_back_to_the_username(self):

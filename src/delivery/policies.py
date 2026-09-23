@@ -252,7 +252,7 @@ def rules_view(rules: Rules) -> dict:
 
 #: 平台自己那几把身份用的策略名。放开它们等于让员工申请到平台的管理权限，
 #: 所以**不接受**通过接口写进 allow —— 真要放开只能上服务器改文件，那是一道人肉门槛。
-SELF_POLICY = ("wuji-panel-*", "wuji-oss-auto-*", "temp-ak-auto-*")
+SELF_POLICY = ("wuji-panel-*", "wuji-oss-auto-*", "temp-ak-auto-*", "staff-oss-auto-*")
 
 
 def write_rules(path: str, data: Mapping, *, actor: str) -> tuple:

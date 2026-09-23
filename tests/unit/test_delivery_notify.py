@@ -201,11 +201,25 @@ class SendTests(unittest.TestCase):
         self.assertTrue(url.endswith("receive_id_type=user_id"))
         self.assertEqual(body["receive_id"], "u123")
 
-    def test_no_open_id_is_skipped(self):
+    def test_only_a_union_id_still_reaches_the_applicant(self):
+        """老单子和从别处同步来的单子常常只有 union_id。原先直接跳过，而调用方
+        拿不到异常 → 单子记成「已提醒」、人根本没收到（线上两张到期凭证就是这样）。"""
         calls = []
-        notifier = n.FeishuNotifier(lambda: "tok", BASE, transport=lambda *a: calls.append(a))
+
+        def transport(method, url, token, payload):
+            calls.append((url, payload))
+            return {"code": 0}
+
+        notifier = n.FeishuNotifier(lambda: "tok", BASE, transport=transport)
         notifier("done", _ticket(applicant={"union_id": "on_x"}))
-        self.assertEqual(calls, [])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("union_id", calls[0][0])
+        self.assertEqual(calls[0][1]["receive_id"], "on_x")
+
+    def test_no_feishu_id_at_all_raises_instead_of_silently_skipping(self):
+        notifier = n.FeishuNotifier(lambda: "tok", BASE, transport=lambda *a: {"code": 0})
+        with self.assertRaises(n.NotifyError):
+            notifier("done", _ticket(applicant={"email": "x@wuji.tech"}))
 
     def test_errors_are_scrubbed(self):
         refused = n.FeishuNotifier(
@@ -391,10 +405,10 @@ class FlowNotifyTests(unittest.TestCase):
         self.assertEqual(h.flows.remind_expiring(days=3), [])  # 还有 10 天
         h.now[0] += 8 * 86400
         self.assertEqual(len(h.flows.remind_expiring(days=3)), 1)
-        self.assertEqual(h.flows.remind_expiring(days=3), [])  # 不重复提醒
+        self.assertEqual(h.flows.remind_expiring(days=3), [])  # 同一档不重复提醒
         self.assertEqual(h.rec.events(), ["done", "expiring"])
         events = [e["event"] for e in h.store.get(ticket["id"])["events"]]
-        self.assertEqual(events.count("expiry_reminded"), 1)
+        self.assertEqual(events.count("expiry_reminded:3"), 1)
         h.now[0] += 3 * 86400  # 已经过期：交给回收，不提醒
         self.assertEqual(h.flows.remind_expiring(days=3), [])
 
@@ -434,7 +448,7 @@ class FlowNotifyTests(unittest.TestCase):
         with mock.patch("sys.stderr"):
             self.assertIn("失败", h.flows.remind_expiring(days=3)[0])
         events = [e["event"] for e in h.store.get(ticket["id"])["events"]]
-        self.assertIn("expiry_remind_failed", events)
+        self.assertIn("expiry_remind_failed:3", events)  # 档位跟着记，失败那档下轮会重试
         self.assertEqual(h.store.get(ticket["id"])["status"], t.DONE)
 
     def test_remind_without_notifier_records_nothing(self):

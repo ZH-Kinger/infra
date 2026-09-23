@@ -148,7 +148,10 @@
         "acs:ram:*:1704065796538912:user/wuji-rl-acr",
         "acs:ram:*:1704065796538912:user/wuji-rl-dataset",
         "acs:ram:*:1704065796538912:user/wuji-rl-read",
-        "acs:ram:*:1704065796538912:user/tempak*"
+        "acs:ram:*:1704065796538912:user/tempak*",
+        "acs:ram:*:1704065796538912:user/staff-*",
+        "acs:ram:*:1704065796538912:user/temp-ak-*",
+        "acs:ram:*:1704065796538912:user/panel-*"
       ]
     },
     {

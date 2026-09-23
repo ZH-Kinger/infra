@@ -18,6 +18,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
+from .. import grants as _grants
+
 CLASS_OK = "ok"  # 有企业邮箱，且用户名 == 邮箱前缀
 CLASS_MISMATCH = "mismatch"  # 有企业邮箱，但对不上
 CLASS_MISSING_EMAIL = "missing_email"  # 云上没填邮箱
@@ -25,7 +27,8 @@ CLASS_SERVICE = "service"  # 服务号/机器人，不是人
 
 # 服务号的启发式前缀。**只用来打标，不用来删东西**——判错了最坏是漏催一个人，
 # 而反过来（把人当服务号忽略）会让他在 SSO 上线那天登不进去还没人知道。
-SERVICE_PREFIXES = ("tempak-", "mes-", "codex-", "rl-", "wuji-", "svc-", "ci-")
+#: 程序发的号那几个前缀来自 grants.ISSUED_PREFIXES（唯一一份），其余是人工登记的服务号习惯
+SERVICE_PREFIXES = (*_grants.ISSUED_PREFIXES, "mes-", "codex-", "rl-", "wuji-", "svc-", "ci-")
 SERVICE_NAMES = frozenset({"finance", "ci", "admin", "root", "bot"})
 
 _EMAIL_RE = re.compile(r"\A[^@\s]+@[^@\s]+\Z")
