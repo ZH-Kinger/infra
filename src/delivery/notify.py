@@ -524,6 +524,12 @@ def pending_card(records, *, base_url: str = "", title: str = "") -> dict:
     原先卡片只有一个「去确认」链接：人得打开面板、找到那一行、再点一次。一件五秒钟的事
     拆成三步，于是就拖着 —— 而拖着的那几天，离职的人的号一直开着。
 
+    排版
+    ────
+    **一个人一块，不是一行一条**：同一个人在几朵云上的号挨着摆，看的人一眼知道
+    「这个人要处理几个号」。名字加粗，账号和状态压成灰字，按钮小一号 ——
+    信息密度高但不糊，卡片列表里扫一眼就能判断要不要点进去。
+
     **这不是告警，是待办**（蓝色）。真出事的才是红色，见 `_TEMPLATES`。
 
     **1.0 和 2.0 不能混**：2.0 的按钮才能把 `behaviors.callback` 回调到面板（`/feishu/card`）。
@@ -537,31 +543,54 @@ def pending_card(records, *, base_url: str = "", title: str = "") -> dict:
         seen[f"{r.get('platform')}/{r.get('account')}/{r.get('user')}"] = r
     all_rows = list(seen.values())
     rows = all_rows[:CARD_ROWS]
-    elements: list = [
-        md("这些人的云账号还留着。确认删除只删账号本身，**他的数据一个字节都不动**。")
-    ]
+
+    # 按人归拢，人内按平台稳定排序
+    people: dict = {}
     for r in rows:
-        cloud = platforms.name_of(r.get("platform", ""))
-        key = f"{r.get('platform')}/{r.get('account')}/{r.get('user')}"
-        by_hand = manual_platform(r.get("platform", ""))
-        state = "已停用（面板停的）" if r.get("state") == "disabled" else "面板没停过它"
-        elements.append({"tag": "hr"})
-        elements.append(md(f"**{r.get('person') or r.get('user')}** · {cloud} `{r.get('user')}`"))
-        elements.append(note(f"{state} · {_clip(r.get('signal'), 60)}"))
-        if r.get("incomplete"):
-            elements.append(note(f"上一轮停用没做完，下一轮会再试：{_clip(r['incomplete'], 60)}"))
-        if r.get("unverified"):
-            elements.append(note("名册里这个号不归他，面板不删。核实后去控制台处理。"))
-            elements.append(_actions([_keep_button(key)]))
-            continue
-        elements.append(_actions([_delete_button(key, cloud, r, by_hand), _keep_button(key)]))
-    if len(all_rows) > len(rows):
-        elements.append({"tag": "hr"})
-        elements.append(md(f"还有 {len(all_rows) - len(rows)} 个号，去面板处理。"))
+        people.setdefault(r.get("person") or r.get("user") or "", []).append(r)
+
+    elements: list = []
+    for i, (who, mine) in enumerate(people.items()):
+        if i:
+            elements.append({"tag": "hr"})
+        head = f"**{who}**"
+        mail = next((str(r.get("email") or "") for r in mine if r.get("email")), "")
+        if mail:
+            head += f"  <font color=grey>{mail}</font>"
+        elements.append(md(head))
+        for r in mine:
+            cloud = platforms.name_of(r.get("platform", ""))
+            key = f"{r.get('platform')}/{r.get('account')}/{r.get('user')}"
+            by_hand = manual_platform(r.get("platform", ""))
+            bits = [
+                "已停用"
+                if r.get("state") == "disabled"
+                else ("要去控制台停" if by_hand else "还开着"),
+                _clip(r.get("signal"), 44),
+            ]
+            if r.get("incomplete"):
+                bits.append("上轮停用没做完，下轮再试")
+            if r.get("unverified"):
+                bits.append("名册里这个号不归他，面板不删")
+            elements.append(md(f"{cloud} `{r.get('user')}`"))
+            elements.append(md(f"<font color=grey>{' · '.join(x for x in bits if x)}</font>"))
+            keep = _keep_button(key)
+            elements.append(
+                keep
+                if r.get("unverified")
+                else _actions([_delete_button(key, cloud, r, by_hand), keep])
+            )
+
+    left = len(all_rows) - len(rows)
+    tail = f"还有 {left} 个号没列出来。" if left > 0 else ""
+    elements.append({"tag": "hr"})
+    elements.append(
+        md(f"<font color=grey>{tail}删除只删账号本身，桶里的数据一个字节都不动。</font>")
+    )
     link = page_link(base_url)
     if link:
-        elements.append(_actions([link_button("去面板看全部", link)]))
-    return card2("todo", title or f"待确认：{len(all_rows)} 个离职账号", elements)
+        elements.append(link_button("去面板看全部", link))
+    return card2("todo", title or f"待确认 · {len(all_rows)} 个离职账号", elements)
 
 
 def manual_platform(platform: str) -> bool:

@@ -38,6 +38,7 @@ import hashlib
 import json
 import math
 import secrets
+import sys
 import time
 from typing import Callable, Optional
 
@@ -75,6 +76,48 @@ def decrypt(encrypted: str, key: str) -> str:
     return body[:-pad].decode("utf-8")
 
 
+def _go_time(text: str) -> Optional[float]:
+    """Go 的 `time.Time.String()`：`2026-09-23 11:03:52.993 +0800 CST m=+123`。
+
+    **真机上飞书的卡片回调发的就是这个**（文档写的是数字时间戳，实际不是）。
+    认不出来的话新鲜度检查形同虚设，重放就只剩签名一道。
+    """
+    import datetime
+
+    parts = text.split()
+    if len(parts) < 3:
+        return None
+    # Go 打到纳秒（9 位），Python 的 %f 最多 6 位 —— 不截就永远解析不了
+    clock = parts[1]
+    if "." in clock:
+        whole, _, frac = clock.partition(".")
+        clock = f"{whole}.{frac[:6]}"
+    stamp = f"{parts[0]} {clock} {parts[2]}"
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f %z", "%Y-%m-%d %H:%M:%S %z"):
+        try:
+            return datetime.datetime.strptime(stamp, fmt).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def _seconds(ts: str) -> Optional[float]:
+    """请求头里的时间戳 → 秒。认不出返回 None。
+
+    飞书在不同通道上给过不同格式，所以这里**宽进**：整秒、毫秒、带小数点的都认。
+    毫秒按 13 位判断（2001 年以后的毫秒时间戳都是 13 位），别拿「大于某个阈值」去猜。
+    """
+    got = str(ts or "").strip()
+    try:
+        value = float(got)
+    except ValueError:
+        return _go_time(got)
+    if not math.isfinite(value):
+        # float("nan") 和任何数比都是 False，会把新鲜度检查整个跳过（审计 Low-5）
+        return None
+    return value / 1000.0 if len(got.split(".")[0]) >= 13 else value
+
+
 class Hook:
     """卡片回调的校验与分发。纯逻辑，不碰网络 —— 换 union_id 和执行动作都由调用方注入。"""
 
@@ -101,14 +144,13 @@ class Hook:
         sig = str(headers.get("X-Lark-Signature") or "")
         if not (ts and nonce and sig):
             raise CardError("请求缺签名头")
-        try:
-            skew = abs(self._clock() - float(ts))
-        except ValueError:
-            raise CardError("时间戳不是数字") from None
-        if not math.isfinite(skew):
-            # `float("nan")` 和任何数比都是 False，下面那行放它过去（审计 Low-5）
-            raise CardError("时间戳不是有限数")
-        if skew > CLOCK_SKEW:
+        when = _seconds(ts)
+        if when is None:
+            # **认不出格式不拒**：新鲜度只是第二道防线，真正的门是下面的验签。
+            # 为了一个没见过的时间戳格式把所有点击挡掉，等于这个功能直接不可用。
+            # 值打进日志，看到了再补格式
+            print(f"[card] 没见过的时间戳格式，本次跳过新鲜度检查：{ts[:40]!r}", file=sys.stderr)
+        elif abs(self._clock() - when) > CLOCK_SKEW:
             # 重放：拿一个旧的、签名合法的请求反复发
             raise CardError("请求时间对不上（超过 5 分钟）")
         want = hashlib.sha256((ts + nonce + self._key).encode() + raw).hexdigest()

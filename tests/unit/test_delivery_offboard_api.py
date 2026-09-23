@@ -171,7 +171,7 @@ class RemindOffboardTests(unittest.TestCase):
         cards = [t for t in self.texts(sent) if "离职甲" in t]
         self.assertEqual(len(cards), 1, self.texts(sent))
         # 卡片上直接给按钮（回调走 /feishu/card），不是只给一个「去面板」的链接
-        self.assertIn("待确认：2 个离职账号", cards[0])
+        self.assertIn("待确认 · 2 个离职账号", cards[0])
         self.assertIn('"callback"', cards[0])
         self.assertIn(f"aliyun/{ALI_ACC}/jia", cards[0])
         self.assertIn(f"volcano/{VOLC_ACC}/jia", cards[0])
@@ -236,7 +236,7 @@ class RemindOffboardTests(unittest.TestCase):
             [a, b], statuses={"on_a": {"is_resigned": True}, "on_b": {"is_resigned": True}}
         )
         self.assertTrue(
-            any("待确认：1 个离职账号" in t and "离职乙" in t for t in self.texts(sent))
+            any("待确认 · 1 个离职账号" in t and "离职乙" in t for t in self.texts(sent))
         )
 
     def test_a_jiuzhang_only_person_still_gets_a_card(self):
@@ -326,7 +326,7 @@ class RemindOffboardTests(unittest.TestCase):
         self.book.calls.clear()
         _code, sent = self.run_remind([gone], drift=["on_g"])
         self.assertEqual(self.book.of("disable"), [])
-        self.assertFalse(any("待确认：" in t and "个离职账号" in t for t in self.texts(sent)))
+        self.assertFalse(any("待确认 · " in t and "个离职账号" in t for t in self.texts(sent)))
 
     def test_protected_in_roster_never_disabled(self):
         svc = person("服务号", "on_p", ref("aliyun", "panel-executor"), ref("volcano", "power-x"))

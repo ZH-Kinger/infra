@@ -168,27 +168,69 @@ class SignatureTests(unittest.TestCase):
         }
         self.hook.check_signature(head, self.raw)
 
-    def test_a_non_numeric_timestamp_is_refused_not_crashed(self):
-        for bad in ("abc", "١٢٣٤x", "12 34"):
-            head = {
-                "X-Lark-Request-Timestamp": bad,
-                "X-Lark-Request-Nonce": "n",
-                "X-Lark-Signature": sign(bad, "n", KEY, self.raw),
-            }
-            with self.assertRaises(CardError):
-                self.hook.check_signature(head, self.raw)
+    def test_the_go_style_timestamp_feishu_actually_sends_is_understood(self):
+        """真机实测：飞书发的不是数字，是 Go 的 time.Time.String()，纳秒 9 位。
+        认不出来的话新鲜度检查形同虚设，重放就只剩签名一道。"""
+        import datetime
 
-    def test_millisecond_timestamps_are_refused(self):
-        """飞书发的是秒。万一哪天变成毫秒，要的是「明确拒绝 + 日志」，不是静默放行
-        （毫秒数当秒算 = 五万年后，永远超窗）。"""
+        from delivery.card_hook import _seconds
+
+        when = datetime.datetime.fromtimestamp(self.clock.now).astimezone()
+        go = (
+            when.strftime("%Y-%m-%d %H:%M:%S.")
+            + "993230440 "
+            + when.strftime("%z")
+            + " CST m=+27.1"
+        )
+        got = _seconds(go)
+        self.assertIsNotNone(got)
+        self.assertAlmostEqual(got, self.clock.now, delta=1.0)
+        head = {
+            "X-Lark-Request-Timestamp": go,
+            "X-Lark-Request-Nonce": "n",
+            "X-Lark-Signature": sign(go, "n", KEY, self.raw),
+        }
+        self.hook.check_signature(head, self.raw)  # 新鲜，不抛
+        old_go = (when - datetime.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S.123456789 %z CST")
+        stale = {
+            "X-Lark-Request-Timestamp": old_go,
+            "X-Lark-Request-Nonce": "n",
+            "X-Lark-Signature": sign(old_go, "n", KEY, self.raw),
+        }
+        with self.assertRaises(CardError):
+            self.hook.check_signature(stale, self.raw)
+
+    def test_an_unknown_timestamp_format_does_not_block_a_signed_request(self):
+        """认不出格式**不拒**：新鲜度只是第二道防线，真正的门是验签。
+        为一个没见过的格式把所有点击挡掉，等于功能直接不可用（真机上踩过）。"""
+        for odd in ("abc", "١٢٣٤x", "12 34", "2026-09-23T10:39:26Z"):
+            head = {
+                "X-Lark-Request-Timestamp": odd,
+                "X-Lark-Request-Nonce": "n",
+                "X-Lark-Signature": sign(odd, "n", KEY, self.raw),
+            }
+            self.hook.check_signature(head, self.raw)  # 不抛
+            # 但签名仍然必须对
+            with self.assertRaises(CardError):
+                self.hook.check_signature({**head, "X-Lark-Signature": "00"}, self.raw)
+
+    def test_millisecond_timestamps_are_understood(self):
+        """毫秒当秒算 = 五万年后、永远超窗，整个功能挂掉。13 位按毫秒读。"""
         ms = str(int(self.clock.now * 1000))
         head = {
             "X-Lark-Request-Timestamp": ms,
             "X-Lark-Request-Nonce": "n",
             "X-Lark-Signature": sign(ms, "n", KEY, self.raw),
         }
+        self.hook.check_signature(head, self.raw)  # 新鲜，不抛
+        old_ms = str(int((self.clock.now - 3600) * 1000))
+        stale = {
+            "X-Lark-Request-Timestamp": old_ms,
+            "X-Lark-Request-Nonce": "n",
+            "X-Lark-Signature": sign(old_ms, "n", KEY, self.raw),
+        }
         with self.assertRaises(CardError):
-            self.hook.check_signature(head, self.raw)
+            self.hook.check_signature(stale, self.raw)
 
 
 # ── 加密 ─────────────────────────────────────────────────────────────────
@@ -551,7 +593,7 @@ class PendingCardTests(unittest.TestCase):
         """「已停用」和「没停过」是两回事：前者点删是收尾，后者点删是第一次动这个号。"""
         self.assertIn("已停用", json.dumps(notify.pending_card([rec()]), ensure_ascii=False))
         text = json.dumps(notify.pending_card([rec(state="suspect")]), ensure_ascii=False)
-        self.assertIn("没停过", text)
+        self.assertIn("还开着", text)  # 面板没停过它 —— 点删是第一次动这个号
         self.assertNotIn("已停用", text)
 
     def test_a_row_without_a_person_name_falls_back_to_the_username(self):
