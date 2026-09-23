@@ -482,7 +482,10 @@ def offboard_card(report: Mapping, *, base_url: str = "") -> dict:
 
     def who(r):
         cloud = platforms.name_of(r.get("platform", ""))
-        return f"{r.get('person', '')} · {cloud} {r.get('user', '')}"
+        # 自建服务的 `user` 是 union_id（随机串），要显示的是 `account` —— 服务名。
+        # 同 `pending_card`：看卡的人得知道自己在看哪个服务
+        shown = r.get("account") if r.get("platform") == _SERVICE_PLATFORM else r.get("user")
+        return f"{r.get('person', '')} · {cloud} {shown or ''}"
 
     done = report.get("done") or []
     failed = report.get("failed") or []
@@ -490,9 +493,19 @@ def offboard_card(report: Mapping, *, base_url: str = "") -> dict:
     suspects = report.get("suspects") or []
     elements: list = []
     if done:
-        elements.append(md("**已停用**（关登录、禁 AK，可以恢复）"))
-        for r in done[:10]:
-            elements.append(note(f"{who(r)}：{r.get('signal', '')}"))
+        # **按平台分两句**：「关登录、禁 AK」对自建服务逐字都是假的（一行云都不调）。
+        # 而自从上限不再连坐 internal，`done` 和 `held` 第一次可能同时非空，
+        # 这张卡上「已停用」和「一个都没停」会并排出现 —— 文案不分开就自相矛盾
+        cloud_done = [r for r in done if r.get("platform") != _SERVICE_PLATFORM]
+        svc_done = [r for r in done if r.get("platform") == _SERVICE_PLATFORM]
+        if cloud_done:
+            elements.append(md("**已停用**（关登录、禁 AK，可以恢复）"))
+            for r in cloud_done[:10]:
+                elements.append(note(f"{who(r)}：{r.get('signal', '')}"))
+        if svc_done:
+            elements.append(md("**已停用**（记了一笔，云上没动任何东西，随时可恢复）"))
+            for r in svc_done[:10]:
+                elements.append(note(f"{who(r)}：{r.get('signal', '')}"))
     if suspects:
         elements.append(md("**待确认**（没有自动停用）"))
         for r in suspects[:10]:
@@ -502,7 +515,8 @@ def offboard_card(report: Mapping, *, base_url: str = "") -> dict:
         for r in failed[:5]:
             elements.append(note(f"{who(r)}：{_clip(r.get('error'), 80)}"))
     if held:
-        elements.append(md(f"**这一轮有 {len(held)} 人被判离职，超过上限，一个都没停**"))
+        # 「一个都没停」要限定范围：上限拦的是那一类，别的类可能照常停了（见上面的已停用）
+        elements.append(md(f"**这一轮有 {len(held)} 人被判离职，超过上限，这些没有自动停**"))
         elements.append(note("、".join(held[:10]) + " —— 多半是接口出了问题，先核实。"))
     elements.append(note("删号要你在面板或卡片上确认。数据一律不动。"))
     link = page_link(base_url)
@@ -514,6 +528,11 @@ def offboard_card(report: Mapping, *, base_url: str = "") -> dict:
     else:
         title = f"已停用 {len(done)} 个离职账号，待确认删除"
     return card2(kind, title, elements)
+
+
+#: 自建服务那个平台标识。**和 `offboard.SERVICE_PLATFORM` 是同一个值** ——
+#: 这里不 import offboard 是因为 notify 被它 import，会成环
+_SERVICE_PLATFORM = "internal"
 
 
 def pending_card(records, *, base_url: str = "", title: str = "") -> dict:
@@ -573,7 +592,10 @@ def pending_card(records, *, base_url: str = "", title: str = "") -> dict:
                 bits.append("上轮停用没做完，下轮再试")
             if r.get("unverified"):
                 bits.append("名册里这个号不归他，面板不删")
-            elements.append(md(f"{cloud} `{r.get('user')}`"))
+            # 自建服务的 `user` 是 union_id（随机串，人看不懂是哪个服务），
+            # 要显示的是 `account` —— 服务名。人是谁上面那行标题已经写了
+            shown = r.get("account") if r.get("platform") == _SERVICE_PLATFORM else r.get("user")
+            elements.append(md(f"{cloud} `{shown}`"))
             elements.append(md(f"<font color=grey>{' · '.join(x for x in bits if x)}</font>"))
             keep = _keep_button(key)
             elements.append(
@@ -619,15 +641,29 @@ def _actions(buttons: list) -> dict:
 
 def _delete_button(key: str, cloud: str, rec, by_hand: bool) -> dict:
     who = rec.get("user", "")
-    ask = (
-        f"{cloud}没有接口，面板停不了也删不了。确认你已经在{cloud}控制台处理了 {who}？"
-        if by_hand
-        else f"删除{cloud}账号 {who}？会删掉账号本身（出组、摘策略、删 AK）。"
-        "他在桶里的文件、数据集、实例都不动。删了不能恢复。"
-    )
+    if rec.get("platform") == _SERVICE_PLATFORM:
+        # 自建服务：删 = 撤那张授权单，云上一个字都不动。
+        # 套用云那句「出组、摘策略、删 AK」会把人吓着，而且逐字都是假的
+        ask = (
+            f"收回 {rec.get('account') or cloud} 的访问权限？"
+            "会把那张授权单撤掉，他立刻就进不去了。"
+            "他已有的实验记录、数据一个字都不动。要再用得重新申请。"
+        )
+    elif by_hand:
+        ask = f"{cloud}没有接口，面板停不了也删不了。确认你已经在{cloud}控制台处理了 {who}？"
+    else:
+        ask = (
+            f"删除{cloud}账号 {who}？会删掉账号本身（出组、摘策略、删 AK）。"
+            "他在桶里的文件、数据集、实例都不动。删了不能恢复。"
+        )
     return {
         "tag": "button",
-        "text": {"tag": "plain_text", "content": "我已在控制台处理" if by_hand else "确认删除"},
+        "text": {
+            "tag": "plain_text",
+            "content": "我已在控制台处理"
+            if by_hand
+            else ("确认收回" if rec.get("platform") == _SERVICE_PLATFORM else "确认删除"),
+        },
         "type": "danger",
         "behaviors": [{"type": "callback", "value": {"a": "del", "k": key}}],
         "confirm": {

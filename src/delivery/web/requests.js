@@ -124,6 +124,20 @@ export function requestRoutes(ctx) {
     const summary = h("p", { class: "apply-summary muted", "aria-live": "polite" });
     const list = h("div", { class: "apply-list" });
 
+    /** 这一类标签底下那行说明。
+     *
+     * 「内部服务」这种**名字本身不说明里面是什么**的分类，直接把里面有哪几项写出来 ——
+     * 静态文案写「公司自建的服务，比如实验看板」，新人找 MLflow 时根本不会点进去，
+     * 而搜索又是按当前分类过滤的，他在别的标签下搜 mlflow 一无所获。
+     */
+    function kindDesc(k) {
+      if (k !== "service") return KIND_INFO[k].desc;
+      const names = options.filter((o) => o.kind === k).map((o) => o.title).filter(Boolean);
+      if (!names.length) return KIND_INFO[k].desc;
+      const shown = names.slice(0, 3).join("、");
+      return `${shown}${names.length > 3 ? ` 等 ${names.length} 项` : ""}。用飞书账号直接登录，不需要云账号。`;
+    }
+
     function renderTabs() {
       fill(kindTabs,
         ...KIND_ORDER.filter((k) => options.some((o) => o.kind === k)).map((k) => {
@@ -143,7 +157,7 @@ export function requestRoutes(ctx) {
               },
             },
             h("span", { class: "seg-title" }, KIND_INFO[k].title, h("span", { class: "seg-n" }, String(n))),
-            h("span", { class: "seg-desc" }, KIND_INFO[k].desc),
+            h("span", { class: "seg-desc" }, kindDesc(k)),
           );
         }),
       );
@@ -211,12 +225,39 @@ export function requestRoutes(ctx) {
 
     function matchQuery(o, q) {
       if (!q) return true;
-      const hay = [o.title, o.description, o.category, o.id, PLATFORM_NAME[o.platform], o.account, o.account_label, ...(o.groups || [])].join(" ").toLowerCase();
+      const hay = [o.title, o.description, o.category, o.id, o.service, PLATFORM_NAME[o.platform], o.account, o.account_label, ...(o.groups || [])].join(" ").toLowerCase();
       return q
         .toLowerCase()
         .split(/\s+/)
         .filter(Boolean)
         .every((word) => hay.includes(word));
+    }
+
+    /** 当前分类搜不到、但别的分类里有 → 给一行能点的提示。
+     *
+     * 不做的话，「搜索只搜当前分类」这个行为对新人就是个静默的死胡同：
+     * 他搜对了词、看到一片空白，然后以为公司没这个东西。
+     */
+    function elsewhere() {
+      const q = filters.q.trim();
+      if (!q) return [];
+      const hits = KIND_ORDER.filter((k) => k !== filters.kind)
+        .map((k) => [k, options.filter((o) => o.kind === k && matchQuery(o, q))])
+        .filter(([, list]) => list.length);
+      if (!hits.length) return [];
+      return hits.map(([k, list]) =>
+        h("p", {},
+          `「${q}」在`,
+          h("button", {
+            type: "button",
+            class: "linkbtn",
+            onclick: () => {
+              Object.assign(filters, { kind: k, category: "all", state: "all" });
+              renderAll();
+            },
+          }, `${KIND_INFO[k].title}`),
+          `里有 ${list.length} 项：${list.slice(0, 3).map((o) => o.title).join("、")}`,
+        ));
     }
 
     function renderList() {
@@ -237,6 +278,9 @@ export function requestRoutes(ctx) {
             "div",
             { class: "card empty" },
             h("h2", {}, anyFilter ? "没有符合条件的项目" : "这一类暂时没有可申请的项目"),
+            // **搜索是按当前分类过滤的**：新人在「云账号权限」下搜 mlflow 会一无所获，
+            // 而他根本不知道该去点「内部服务」。所以这里主动指过去，而不是让他自己猜
+            ...elsewhere(),
             h("p", {}, "找不到需要的权限，可以联系管理员新增申请模板。"),
             anyFilter
               ? h(

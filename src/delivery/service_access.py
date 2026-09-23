@@ -58,6 +58,71 @@ class Decision:
         return "你还没有这个服务的访问权限"
 
 
+def active_grants(tickets: Iterable[dict], now: float):
+    """**「一条单子算不算当前有效的授权」的唯一判据**，产出
+        `(单子, 到期时间戳, union_id, 服务名)`。
+
+    **身份和服务名带多余空白的单子在这里就被当脏行拒掉**，两个消费者因此对它给出
+        同一个结论（都说「没有」）。
+
+        为什么是拒、不是 strip 了照用：**union_id 是精确标识，不做归一化** —— 归一化过的
+        比对早晚会把两个人认成一个，而这套判定的全部意义就是「按 union_id 严格相等」。
+        原先的 bug 是不对称：`allowed()` strip 入参、却拿去和单子里的原始值比，于是台账里
+        带空白的那一行 `holdings` 算「他有」、`allowed` 永远算「他没有」。修法是让两边
+        对它**同样地说没有**，而不是让两边同样地放宽。
+        代价是那张单谁也用不了 —— 台账里本来就不该有这种行，而 fail-closed 是安全那侧。
+
+        放行判定（`allowed`）和「这个人手上有哪些服务」（`holdings`，离职回收和
+        面板展示都用它）**必须共用这一段** —— 两处各判各的话，最先背离的就是
+        「放行说有、回收说没有」，而那一次没有任何地方会报错。
+
+        到期时间戳 0 = 不设期限。
+    """
+    for ticket in tickets or ():
+        # **一行脏数据不该锁死所有人。** 这里每一步都先确认形状再取字段：
+        # 直接 `.get()` 的话，`template` 或 `applicant` 不是 dict（手工改坏、
+        # 旧版本写下的单子）就会 AttributeError → 整个判定 500 → 网关 fail-closed
+        # → **所有人**都进不去，而罪魁只是台账里的一行
+        if not isinstance(ticket, Mapping):
+            continue
+        if ticket.get("kind") != "service" or ticket.get("status") != "done":
+            continue
+        if not isinstance(ticket.get("template"), Mapping):
+            continue
+        if not isinstance(ticket.get("applicant"), Mapping):
+            continue
+        raw = ticket.get("expires_at_ts")
+        expires = _ts(raw)
+        # **坏数据当作没有授权，不当作「不限期」。** 0 在这里的语义是「永久有效」，
+        # 所以把解析不出来的值兜底成 0 等于给一条脏记录发永久通行证
+        # （`expires_at_ts: "2026-10-01"` 这种写法就会踩上）。撤销那边同一个兜底
+        # 的方向是「宁可多拒」，这边也必须是 —— 同一个字段两种方向，迟早有人统一错
+        if raw not in (None, "", 0) and not expires:
+            continue
+        if expires and expires <= now:
+            continue
+        uid = str((ticket.get("applicant") or {}).get("union_id") or "")
+        service = str((ticket.get("template") or {}).get("service") or "")
+        if not uid or not service:
+            continue
+        # 带多余空白 = 脏行，两边一致地拒（理由见 docstring）。**不要改成 strip 了照用**
+        if uid != uid.strip() or service != service.strip():
+            continue
+        yield ticket, expires, uid, service
+
+
+def holdings(tickets: Iterable[dict], now: float) -> dict:
+    """`{union_id: [(服务名, 单号, 到期时间戳)]}` —— 每个人手上现在有哪些服务访问。
+
+    离职回收和面板的「这个人有什么」共用它。判据和放行侧是同一段
+    （`active_grants`），所以不会出现「页面上写着有、网关说没有」。
+    """
+    out: dict = {}
+    for ticket, expires, uid, service in active_grants(tickets, now):
+        out.setdefault(uid, []).append((service, str(ticket.get("id") or ""), expires))
+    return out
+
+
 def allowed(
     *,
     union_id: str,
@@ -83,31 +148,9 @@ def allowed(
         return Decision(False, NOT_IN_ROSTER)
 
     best: Optional[dict] = None
-    for ticket in tickets or ():
-        # **一行脏数据不该锁死所有人。** 这里每一步都先确认形状再取字段：
-        # 直接 `.get()` 的话，`template` 或 `applicant` 不是 dict（手工改坏、
-        # 旧版本写下的单子）就会 AttributeError → 整个判定 500 → 网关 fail-closed
-        # → **所有人**都进不去，而罪魁只是台账里的一行
-        if not isinstance(ticket, Mapping):
-            continue
-        if ticket.get("kind") != "service" or ticket.get("status") != "done":
-            continue
-        tpl = ticket.get("template")
-        if not isinstance(tpl, Mapping) or str(tpl.get("service") or "") != service:
-            continue
-        # **按 union_id 严格相等。** 邮箱会变、姓名会重，union_id 不会
-        who = ticket.get("applicant")
-        if not isinstance(who, Mapping) or str(who.get("union_id") or "") != union_id:
-            continue
-        raw = ticket.get("expires_at_ts")
-        expires = _ts(raw)
-        # **坏数据当作没有授权，不当作「不限期」。** 0 在这里的语义是「永久有效」，
-        # 所以把解析不出来的值兜底成 0 等于给一条脏记录发永久通行证
-        # （`expires_at_ts: "2026-10-01"` 这种写法就会踩上）。撤销那边同一个兜底
-        # 的方向是「宁可多拒」，这边也必须是 —— 同一个字段两种方向，迟早有人统一错
-        if raw not in (None, "", 0) and not expires:
-            continue
-        if expires and expires <= now:
+    for ticket, expires, uid, svc in active_grants(tickets, now):
+        # **按 union_id 严格相等**（两边都已归一化）。邮箱会变、姓名会重，union_id 不会
+        if svc != service or uid != union_id:
             continue
         # 有多张有效的就挑到期最晚的那张：续期时新旧会并存一段。
         # **「不限期最优」这一条靠下面那个 break 兜住**：去掉 break 的话，
@@ -127,7 +170,16 @@ def allowed(
 
 
 def _ts(value: object) -> float:
+    """到期时间戳。解析不出来返回 0，调用方把 0 之外的"解析失败"当脏行拒掉。
+
+    **`nan` / `inf` 也算解析不出来**：`float("nan")` 是合法的，而 `nan <= now`
+    恒为假 —— 那张单就成了永不过期的通行证，且台账上看着是个正常数字。
+    负数同理（1970 年之前的到期时间只可能是写坏的）。
+    """
     try:
-        return float(value or 0)
+        out = float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+    if out != out or out in (float("inf"), float("-inf")) or out < 0:
+        return 0.0
+    return out

@@ -243,6 +243,25 @@ ENV_PROXY_HOPS = "DELIVERY_PROXY_HOPS"
 _DEFAULT_HOPS = 2
 
 
+def _offboard_executor(backend):
+    """离职停用 / 删除 / 恢复的执行体工厂。**飞书卡片和网页面板共用这一个。**
+
+    分两处写过一次，结果只改了网页那条，而飞书卡片那条（`executor_from_env`）对
+    `internal` 直接抛「不支持的平台」—— 偏偏卡片上那行「自建服务 `mlflow`」的
+    两个按钮是这批新写的，唯一的落点就在那里：点「确认收回」报错 toast、
+    记录永远留在待办里，误判的人在飞书上没有任何办法恢复。
+    """
+
+    def make(platform: str, account: str):
+        if platform == offboard_mod.SERVICE_PLATFORM:
+            return offboard_mod.ServiceAccess(
+                revoke=lambda uid, _svc: backend.revoke_service_grants(uid, account)
+            )
+        return executor_from_env(platform, account)
+
+    return make
+
+
 def _client_ip(peer: str, forwarded: str, hops: int = 0) -> str:
     """反向代理后面的真实来源 IP。
 
@@ -1208,6 +1227,62 @@ class Backend:
             offboarded=union_id in gone,
         )
 
+    def service_holdings(self, union_id: str) -> list:
+        """这个人现在有哪些自建服务的访问权限 → `[{service, ticket, expires_at}]`。
+
+        **判据和网关那条放行接口是同一段**（`service_access.active_grants`）——
+        页面上写着「有」而网关说「没有」是最难查的那种不一致，两处各判各的迟早会这样。
+
+        读不了台账就回空：这只是展示，不该让整个「我的账号」页打不开。
+        """
+        from . import service_access as sa
+
+        if not self.tickets_path or not union_id:
+            return []
+        try:
+            # **只缓存文件内容，`now` 每次现取。** 把 `time.time()` 求值在 lambda 里面
+            # 就等于把"现在几点"一起冻进缓存，而 `_cached` 只按文件 mtime 失效、没有 TTL
+            # —— 台账不是每天都写，于是一张昨天缓存过的单到期之后：`allowed()` 拒（新 now）、
+            # 这里仍然报「有」。而管理员的离职确认就是看着这一页点的
+            tickets = self._cached(
+                "service-tickets",
+                self._stamp(self.tickets_path),
+                lambda: tickets_mod.TicketStore(self.tickets_path).all(),
+            )
+            rows = sa.holdings(tickets, time.time())
+        except Exception:  # noqa: BLE001 — 展示用，读不了就当没有
+            return []
+        return [
+            # **时间戳原样给前端**（epoch 秒），字段名带 `_ts` 说明单位 ——
+            # 叫 `expires_at` 的话前端会拿去喂 `fmtTime(iso)`（`new Date(串)`），
+            # 数字被当毫秒解释，2030 年的到期会渲染成 1970 年
+            {"service": svc, "ticket": tid, "expires_at_ts": exp}
+            for svc, tid, exp in rows.get(str(union_id), ())
+        ]
+
+    def revoke_service_grants(self, union_id: str, service: str) -> list:
+        """撤销这个人在某个自建服务上的全部有效授权。返回**没撤掉的**，空 = 干净。
+
+        离职确认（「确认删除」）走它。**撤单和停用是两件事**：停用只是离职记录里
+        记一笔（判定侧读到就拒），撤单是把单子推成 REVOKED —— 即使有人把离职记录
+        删掉，访问也回不来。
+        """
+        from . import service_access as sa
+
+        flows = self.flows()
+        if flows is None:
+            return ["面板没有配置申请单存储，撤不了"]
+        left: list = []
+        rows = tickets_mod.TicketStore(self.tickets_path).all()
+        for svc, ticket_id, _exp in sa.holdings(rows, time.time()).get(str(union_id), ()):
+            if service and svc != service:
+                continue
+            try:
+                flows.revoke_now(ticket_id, actor="offboard")
+            except Exception as exc:  # noqa: BLE001 — 一张撤不掉不挡其余
+                left.append(f"{ticket_id}：{provision_describe(exc) or type(exc).__name__}")
+        return left
+
     def admins(self) -> Admins:
         return self._cached(
             "admins", self._stamp(self.admins_path), lambda: load_admins(self.admins_path)
@@ -1513,7 +1588,7 @@ def make_handler(
             offboard_mod.path_beside(paths.people),
             key,
             "delete" if action == "del" else "restore",
-            lambda platform, account: executor_from_env(platform, account),
+            _offboard_executor(backend),
             actor=actor,
             log=(
                 (lambda op, rows, who: review_mod.log_offboard(rp, op, rows, actor=who))
@@ -1820,6 +1895,11 @@ def make_handler(
                 mine_res = _owned_by(backend, found.person.email if found.person else "")
                 for card in detail.get("accounts") or []:
                     card["resources"] = mine_res.get((card["platform"], card["account"]), [])
+                # 自建服务（MLflow 这类）也算他名下的东西：申请走同一套流程、
+                # 离职走同一套回收，所以它就该和云账号列在一起
+                detail["services"] = backend.service_holdings(
+                    found.person.union_id if found.person else ""
+                )
                 if backend.role(user) != ROLE_ADMIN:
                     # 采集错误原文可能带接口返回片段；普通用户只需要知道「哪个账号没采全」
                     detail["snapshot_incomplete"] = [
@@ -1928,17 +2008,18 @@ def make_handler(
                 if person is None:
                     return self._json(404, {"error": "名册里没有这个人"})
                 bound = bool(person.union_id)
-                return self._json(
-                    200,
-                    person_detail(
-                        person,
-                        backend.snapshot(),
-                        backend.labels(),
-                        binding=BIND_UNION_ID if bound else BIND_NONE,
-                        note="" if bound else "此人还没有绑定 union_id，本人首次登录后自动绑定。",
-                        include_pending=True,
-                    ),
+                detail = person_detail(
+                    person,
+                    backend.snapshot(),
+                    backend.labels(),
+                    binding=BIND_UNION_ID if bound else BIND_NONE,
+                    note="" if bound else "此人还没有绑定 union_id，本人首次登录后自动绑定。",
+                    include_pending=True,
                 )
+                # 管理员判「这个人还剩什么」时，自建服务必须在同一页上 ——
+                # 离职确认就是看着这一页点的，漏了它等于确认了一个不完整的清单
+                detail["services"] = backend.service_holdings(person.union_id)
+                return self._json(200, detail)
             if _is_requests_path(path):
                 return self._requests("GET", path, None)
             if path == "/api/admin/health":
@@ -2290,8 +2371,8 @@ def make_handler(
                 if rp is not None:
                     review_mod.log_offboard(rp, op_, rows_, actor=actor_)
 
-            def _executor(platform, account):
-                return executor_from_env(platform, account)
+            # 和飞书卡片那条共用同一个工厂：分两处写迟早再漂一次（这次就漂了）
+            _executor = _offboard_executor(backend)
 
             if op == "reclaim":
                 # 管理员确认某人离职 → 删他的 cloud_accounts 属性，**再删云上的号**。

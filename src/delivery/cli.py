@@ -304,6 +304,11 @@ def build_parser() -> argparse.ArgumentParser:
     iamn.add_argument("--attributes", default="identity/iam-attributes.json")
     iamn.add_argument("--admins", default="identity/admins.json")
     iamn.add_argument(
+        "--tickets",
+        default="identity/tickets.json",
+        help="申请单台账。自建服务（MLflow 这类）的访问权限记在这里，离职时要一起收",
+    )
+    iamn.add_argument(
         "--every-hours",
         type=float,
         default=24.0,
@@ -1304,6 +1309,35 @@ def _iam_push_hints(bad: list) -> None:
             print(f"    · {code}：{hints[code]}")
 
 
+def _offboard_executor(platform: str, account: str):
+    """离职停用的执行体。自建服务不调云 —— 记录本身就是生效的那个东西。"""
+    from . import offboard, provision
+
+    if platform == offboard.SERVICE_PLATFORM:
+        return offboard.ServiceAccess()
+    return provision.executor_from_env(platform, account)
+
+
+def _service_holdings(tickets_path: str) -> dict:
+    """`{union_id: [(服务, 单号, 到期)]}`。读不了就当**没有** —— 这里不能 fail-closed：
+
+    读不了台账时把人当成「手上有 MLflow」会去写一条离职记录，而那条记录会
+    立刻挡掉他的访问；读不了当成「没有」只是这一轮不收，下一轮还会再来，
+    而且云账号那一路照常。宁可晚一轮收，不要凭一次读盘失败就断人访问。
+    """
+    from . import service_access
+    from . import tickets as tickets_mod
+
+    if not tickets_path:
+        return {}
+    try:
+        rows = tickets_mod.TicketStore(tickets_path).all()
+    except Exception as exc:  # noqa: BLE001 — 云账号那一路不该被它挡住
+        print(f"★ 申请单台账读不了，这一轮不收自建服务的权限：{exc}", file=sys.stderr)
+        return {}
+    return service_access.holdings(rows, time.time())
+
+
 def _review_paths_or_none(people: str):
     """回收要落 review.log，而那个路径由 ReviewPaths 算（名册同目录）。
     提案/人工记录这一轮用不到，给同目录的默认名即可。"""
@@ -1408,7 +1442,7 @@ def _cmd_identity_iam_remind(args) -> int:
     """
     import hashlib
 
-    from . import hygiene, iam_sync, offboard, provision
+    from . import hygiene, iam_sync, offboard
     from . import notify as notify_mod
     from . import people as people_mod
     from . import review as review_mod
@@ -1484,7 +1518,8 @@ def _cmd_identity_iam_remind(args) -> int:
                 rep = offboard.auto_disable(
                     offboard.path_beside(args.people),
                     cands,
-                    lambda platform, account: provision.executor_from_env(platform, account),
+                    _offboard_executor,
+                    holdings=_service_holdings(getattr(args, "tickets", "")),
                     log=_olog,
                 )
             except (DeliveryError, OSError, ValueError) as exc:
@@ -1497,7 +1532,7 @@ def _cmd_identity_iam_remind(args) -> int:
             for r in rep["failed"]:
                 print(f"  ✗ 停用失败 {r['platform']}/{r['user']}：{r['error']}", file=sys.stderr)
             if rep["held"]:
-                print(f"★ {len(rep['held'])} 人超过自动停用上限，一个都没停", file=sys.stderr)
+                print(f"★ {len(rep['held'])} 人超过自动停用上限，这些没有自动停", file=sys.stderr)
             failed = failed or bool(rep["failed"])
             # 停了号每次都说；只有「没停成 / 被上限拦下」的，同一批 24 小时说一次
             stuck = sorted(

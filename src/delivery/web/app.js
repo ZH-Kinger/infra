@@ -5,7 +5,7 @@
 //   · 身份和权限数据只存在内存里，不写 localStorage / sessionStorage。
 //   · 非管理员永远不发 /api/admin/* 请求——不靠后端 403 兜底来「隐藏」页面。
 
-import { ApiError, api, apiPost, clear, h, mount, platformTag, requestTitle, safeHttps, safePath } from "./core.js";
+import { ApiError, api, apiPost, clear, fmtTime, h, mount, platformTag, requestTitle, safeHttps, safePath } from "./core.js";
 import { renderAssets } from "./assets.js";
 import { renderHealth } from "./health.js";
 import { renderHygiene } from "./hygiene.js";
@@ -656,6 +656,41 @@ function personPage(detail, { admin }) {
     nodes.push(h("div", { class: "banner good" }, "已按企业邮箱关联到你的账号并记录 union_id。之后登录只按 union_id 识别。"));
   }
 
+  // 自建服务：申请走同一套流程、离职走同一套回收，所以和云账号列在一起。
+  //
+  // **必须排在下面那两个「没有云账号就提前 return」之前。** 放在它们后面的话，
+  // 没有云账号的人这一块一个字都看不到 —— 而那批人正是自建服务的目标人群
+  //（这个功能的立项理由就是「最需要 MLflow 的人恰恰没有云子账号」）。
+  //
+  // 不塞进云账号那张卡片是因为那张卡的形状是「云账号 + 策略 + 资源」，
+  // 服务访问这三样都没有，硬塞会渲染出一排空壳
+  const services = detail.services || [];
+  if (services.length) {
+    nodes.push(
+      h(
+        "section",
+        { class: "group" },
+        h("div", { class: "group-head" }, h("div", { class: "group-label" }, "内部服务")),
+        // **把陷阱说破**：这一块是展示，而管理员那条「确认离职」只删云账号、不碰它。
+        // 页面上明明列着、动作却不管，比压根不显示更误导 —— 完整修法（reclaim 里
+        // 一并记一条待确认）在下一批，在那之前这句话是唯一的防线
+        admin ? h("p", { class: "muted" }, "「确认离职」不会自动收回这里的权限，要单独处理。") : null,
+        h("div", { class: "accounts" }, services.map((s) =>
+          h("div", { class: "card account-card" },
+            h("div", { class: "account-head" },
+              h("span", { class: "pill" }, "自建服务"),
+              h("b", {}, SERVICE_NAMES[s.service] || s.service),
+            ),
+            // `expires_at_ts` 是 **epoch 秒**，不能直接喂 fmtTime(iso)（`new Date(串)`）
+            // —— 数字会被当毫秒，2030 年的到期渲染成 1970 年
+            h("div", { class: "muted" },
+              s.expires_at_ts ? `用到 ${fmtTime(new Date(s.expires_at_ts * 1000).toISOString())}` : "长期有效，离职时收回"),
+            s.ticket ? h("a", { class: "linkbtn", href: `#request=${encodeURIComponent(s.ticket)}` }, "看这张申请 →") : null,
+          ))),
+      ),
+    );
+  }
+
   if (admin && detail.binding === "unbound") {
     // 管理员视角：未绑定只是状态，账号照常列出
     nodes.push(h("div", { class: "banner warn" }, detail.binding_note || "此人还没有绑定 union_id。"));
@@ -919,6 +954,8 @@ function adminPage(overview, people, records) {
 }
 
 const RECORD_KIND = { link: "人工确认给", rejected: "驳回对应", service: "服务号" };
+//: 自建服务的显示名。键是模板里的 `service`（`mlflow` 这种短键，网关拿它去比对）
+const SERVICE_NAMES = { mlflow: "MLflow 实验跟踪" };
 
 function recordsSection(items) {
   const rows = items.map((r) =>

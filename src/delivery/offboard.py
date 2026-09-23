@@ -30,6 +30,7 @@ import os
 import re
 import tempfile
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -44,11 +45,25 @@ PLATFORMS = ("aliyun", "volcano")
 #: 没有接口、只能人去控制台处理的平台。**照样要列出来**：九章的号以前完全不进离职流程，
 #: 一个离职的人在九章上的号没有任何地方会提醒去停（王昱然就是这么漏掉的）
 MANUAL_PLATFORMS = ("jiuzhang",)
-ALL_PLATFORMS = PLATFORMS + MANUAL_PLATFORMS
+
+#: 自建服务（MLflow 这类）。**不是云平台，但一样要进离职流程** —— 它的用户恰恰是
+#: 那批没有云子账号的人，只按云子账号记的话，这些人离职后一条记录都不会有，
+#: 而「没有记录」和「没有东西要收」长得一模一样（审计 High-3）
+SERVICE_PLATFORM = "internal"
+ALL_PLATFORMS = PLATFORMS + MANUAL_PLATFORMS + (SERVICE_PLATFORM,)
 
 #: 一轮最多自动停几个人。**超了就一个都不停，只提醒**：IT 的接口或飞书抖一下，
 #: 可能一次性把一批在职的人标成离职，那时候停得越多事故越大
 MAX_AUTO_PEOPLE = 3
+
+#: 自建服务那边一轮最多停几个人。**独立的、宽得多的上限，但不能没有。**
+#: 「不占云的额度」不等于「不需要熔断」—— 上限防的是「IT 接口或飞书抖一下，
+#: 一次性把一批在职的人标成离职」，而**那个故障源对自建服务是同一个**
+#: （`strong_candidates` 吃的是同一份 statuses / drift_rows）。
+#: 没有它的话：云账号被上限拦住了，而几百人的 MLflow 当场全断 ——
+#: 正在跑的训练写不进实验记录，恢复还要管理员一条条点。
+#: 宽得多是因为这边的动作可逆、不打断任何东西，不该像云那样一碰就全停。
+MAX_AUTO_SERVICE_PEOPLE = 20
 
 #: 永远不自动停、不删的号。云上的 Deny 策略是第二道
 #: 和云上执行身份策略里的 Deny 名单对齐（阿里、火山两份）。**改一边要改另一边**
@@ -58,10 +73,42 @@ _PROTECTED_CLOUD = re.compile(
 #: 九章的登录名**全都是 `wuji-` 开头**（`wuji-wangyuran`），套云上那套前缀等于把整个平台挡光。
 #: 九章那边没有服务号的概念，面板也动不了它的号，所以只挡面板自己可能登记的名字
 _PROTECTED_MANUAL = re.compile(r"\A(panel-|power-)", re.IGNORECASE)
+#: 自建服务这边不能自动停的身份。**按 union_id 精确匹配，不是前缀正则。**
+#:
+#: 这里不能借用云那套（`_PROTECTED_CLOUD`）有两个理由：
+#:   · union_id 是 `on_` 开头的随机串，**前缀规则对它没有任何意义** —— 要么挡不住，
+#:     要么误挡一片，两种都不是想要的；
+#:   · 借用会真的误挡：曾经用邮箱当标识时实测 `protected("wuji-wang@wuji-tech.com")`
+#:     返回 True，因为云那套里有 `wuji-` 而**公司域名就是 wuji-tech.com**。
+#:     而这种误挡的后果是「这个人的服务访问永远不会被回收」，且没有任何地方报错。
+#:
+#: **默认空集 = 没有豁免，所有人照常回收。** 方向是有意的：多停是可恢复的
+#: （有 `restored` 状态、有待确认卡片），漏停是永久残留且静默的。
+#:
+#: 要豁免就配 `DELIVERY_PROTECTED_SERVICE_IDS`（逗号或空白分隔的 union_id）。
+#: **在 panel.env 里给每个 id 写一行注释说明是谁、为什么不能停** —— 写不出这两样
+#: 的条目不该存在，半年后没人敢删的豁免名单比没有名单更糟。
+ENV_PROTECTED_SERVICE = "DELIVERY_PROTECTED_SERVICE_IDS"
+_PROTECTED_SERVICE: frozenset = frozenset()
+
+
+@lru_cache(maxsize=1)
+def _protected_service_ids(raw: str) -> frozenset:
+    """`DELIVERY_PROTECTED_SERVICE_IDS` 解析成集合。逗号或空白分隔。
+
+    **解析不出来的条目直接丢掉，不报错也不整条作废** —— 这里的失效方向是
+    「那个人照常被回收」，是安全的那一侧；而把整份名单作废同样安全。
+    反过来（解析失败就谁都不停）才是要避免的。
+    """
+    return frozenset(x for x in re.split(r"[,\s]+", str(raw or "")) if x)
 
 
 def protected(user: str, platform: str = "") -> bool:
-    """这个号是不是不能碰。**按平台分**：见 `_PROTECTED_MANUAL` 的说明。"""
+    """这个号是不是不能碰。**按平台分**：见 `_PROTECTED_MANUAL` / `_PROTECTED_SERVICE`。"""
+    if platform == SERVICE_PLATFORM:
+        # 自建服务按 union_id 精确匹配，**不落进下面那套前缀正则**（理由见常量注释）
+        ids = _PROTECTED_SERVICE | _protected_service_ids(os.environ.get(ENV_PROTECTED_SERVICE, ""))
+        return str(user or "") in ids
     rule = _PROTECTED_MANUAL if platform in MANUAL_PLATFORMS else _PROTECTED_CLOUD
     return bool(rule.match(str(user or "")))
 
@@ -171,6 +218,76 @@ def manual(platform: str) -> bool:
     return platform in MANUAL_PLATFORMS
 
 
+def service_targets(person, holdings) -> list:
+    """这个人手上的自建服务 → `[(internal, 服务名, 标识)]`，形状和云子账号那套一致。
+
+    `holdings` 是 `service_access.holdings()` 的结果（`{union_id: [(服务, 单号, 到期)]}`）。
+    **判据来自那一份，不在这里另写** —— 「面板说他有、回收说他没有」这种背离，
+    最先出问题的就是离职这一侧，而它不会报错。
+
+    标识用 **union_id**，和判定侧（`service_access`）那条「按 union_id 严格相等」
+    对齐，**不用邮箱**：
+      · 邮箱会变（改名、换域名），而 `key_of` 拿它拼键 —— 人改了邮箱之后旧记录的键
+        就对不上新目标，结果是重复写一条、旧那条永远清不掉；
+      · `protected()` 对 internal 走的是**云那套前缀正则**（`wuji-`/`staff-`/`rl-`…），
+        而那些前缀撞得上真实邮箱 —— 一个 `wuji-` 开头的邮箱会被静默判成「受保护、
+        不自动停」，后果是那个人的服务访问**永远不会被回收**，且没有任何地方报错。
+        union_id 是 `on_` 开头的随机串，撞不上。
+
+    人能认的那部分（姓名、邮箱）在记录的 `person` / `email` 字段里，卡片照样显示得出来。
+    """
+    uid = str(getattr(person, "union_id", "") or "")
+    if not uid:
+        return []
+    # **豁免名单要在这里过一道**，和云那一路在 `targets_of` 里做的是同一件事。
+    # 漏了这道的表现特别坏：运维在 panel.env 里配了 `DELIVERY_PROTECTED_SERVICE_IDS`
+    # （文档写的就是「不自动停这个人」），那个人**照样被停**，而配置看起来是生效的
+    # —— 因为 `decide()` 那边确实认这个集合，于是停完之后管理员反而动不了这条记录
+    if protected(uid, SERVICE_PLATFORM):
+        return []
+    return [(SERVICE_PLATFORM, service, uid) for service, _tid, _exp in holdings.get(uid, ())]
+
+
+class ServiceAccess:
+    """自建服务的停用 / 删除 / 恢复执行体。接口形状和云那套一致。
+
+    **停用 = 把这条记进离职记录，不需要调任何接口。** 判定侧
+    （`server.Backend.service_access`）每个请求都读那份记录里的 `union_id`，
+    记上了访问立刻就没了 —— 所以 `disable_user` 什么都不做、直接返回成功，
+    记录由 `auto_disable` 自己写。不是"假装成功"：**记录就是生效的那个东西**。
+
+    **`delete_user` 才真的撤那张授权单**，对应「确认才删」那一步：管理员在卡片上
+    点了确认，才把单子推成 REVOKED。撤单之后即使有人把离职记录删掉，访问也回不来
+    —— 这正是"删"和"停用"的区别。实验数据一个字不动。
+
+    `revoke(union_id, service) -> list[str]` 由调用方注入（它要拿到申请单存储）。
+    返回没撤掉的东西，空列表 = 干净。**没注入时 `delete_user` 直接报错，不静默成功**：
+    静默成功会让管理员看到「已删除」，而那张单还开着、人照样进得去。
+    """
+
+    def __init__(self, revoke: Optional[Callable[[str, str], list]] = None):
+        self._revoke = revoke
+
+    def disable_user(self, user: str) -> dict:  # noqa: ARG002 — 接口形状要和云那套一致
+        return {}
+
+    def delete_user(self, user: str) -> list:
+        """撤销这个人在这个服务上的授权。返回没撤掉的，空 = 干净。"""
+        if self._revoke is None:
+            # 调用方没接上撤销能力。**报错而不是返回空** —— 返回空等于告诉
+            # `decide()` "删干净了"，记录会被置成 DELETED，而那张单还开着
+            return ["面板没接上撤销能力，这条要人工处理"]
+        return list(self._revoke(user, "") or [])
+
+    def enable_user(self, user: str, **_kw) -> dict:  # noqa: ARG002
+        """恢复。同样不需要调接口 —— 记录被置回 RESTORED，`gone` 里就没有他了。
+
+        **前提是还没走到「删」那一步**：`decide()` 只在 `state == DISABLED` 时调它，
+        已经 DELETED 的单子撤都撤了，恢复要重新申请。
+        """
+        return {}
+
+
 def resigned(status) -> str:
     """飞书状态里**只有「已离职」算强信号**。冻结是暂停（长假、临时封禁），退出企业语义不清，
     这两种停了号会误伤在职的人 —— 只提醒，见 `weak_statuses`。"""
@@ -219,7 +336,9 @@ def auto_disable(
     candidates,
     executor: Callable,
     *,
+    holdings: Optional[dict] = None,
     max_people: int = MAX_AUTO_PEOPLE,
+    max_service_people: int = MAX_AUTO_SERVICE_PEOPLE,
     log: Optional[Callable] = None,
 ) -> dict:
     """强信号的人：停用他的号，记 `disabled`。返回 `{done, skipped, failed, held}`。
@@ -245,7 +364,11 @@ def auto_disable(
             return rec.get("state") == DISABLED and bool(rec.get("incomplete"))
 
         for person, signal in candidates:
-            todo_all = [t for t in targets_of(person) if open_(t)]
+            # 云子账号 + 自建服务一起算。**只算云账号的话，没有云子账号的人
+            # `fresh` 为空 → 进 report["skipped"] → 一条记录都不写**，而他手上
+            # 可能正拿着 MLflow 的访问权限（审计 High-3）
+            own = targets_of(person) + service_targets(person, holdings or {})
+            todo_all = [t for t in own if open_(t)]
             # 九章这类没接口的：只记一条待办，不算进「这一轮停几个人」的上限。
             # **新记的要放进 report**：卡片只发 report 里的东西，不放等于这个人在飞书上
             # 一个字都不会出现 —— 而那正是这次要解决的漏网（审计 Med-1）
@@ -261,16 +384,53 @@ def auto_disable(
                 todo.append((person, signal, fresh))
             else:
                 report["skipped"].append(person.name)
-        if len(todo) > max_people:
-            # 一个都不停，全部交给人。见 MAX_AUTO_PEOPLE。**记成嫌疑**，面板上才有东西可点
-            report["held"] = [p.name for p, _s, _t in todo]
-            for person, signal, fresh in todo:
-                for t in fresh:
+
+        # **上限只数「名下有云账号」的人。** 这个上限的理由是「IT 接口或飞书抖一下
+        # 可能批量误判，那时停得越多事故越大」—— 而"越大"指的是云上那些动作：
+        # 关登录、摘 AK，会当场打断在跑的任务，恢复也要一步步开回去。
+        # 停一个自建服务只是写一条记录，随时能恢复、也不会打断任何东西，
+        # 它不该占这份风险额度。
+        #
+        # 不这么分的话，**加了 MLflow 反而让云账号的回收更容易卡住**：3 个有云账号的人
+        # 加 1 个只有 MLflow 的人就是 4 > 3 → 一个都不停，连那 3 个云账号也不停。
+        def _risky(fresh) -> list:
+            return [t for t in fresh if t[0] != SERVICE_PLATFORM]
+
+        risky = [x for x in todo if _risky(x[2])]
+        if len(risky) > max_people:
+            # **云上那些号一个都不停，全部交给人**。见 MAX_AUTO_PEOPLE。
+            # 记成嫌疑，面板上才有东西可点。
+            #
+            # **自建服务不在这里被连坐**：它既然不占额度，就不该受这个上限影响 ——
+            # 否则同一个人的结果取决于"那一轮还有谁离职"，而他自己什么都没变。
+            # 它照常走下面的正常流程（只是写一条记录，随时能恢复）
+            report["held"] = [p.name for p, _s, _t in risky]
+            for person, signal, fresh in risky:
+                for t in _risky(fresh):
                     records.setdefault(
                         key_of(*t),
                         _suspect(person, t, f"{signal}（这一轮判离职的人太多，没有自动停用）"),
                     )
-            return report
+            todo = [
+                (p, sig, [t for t in fresh if t[0] == SERVICE_PLATFORM]) for p, sig, fresh in todo
+            ]
+            todo = [x for x in todo if x[2]]
+
+        # 自建服务自己那道熔断（见 MAX_AUTO_SERVICE_PEOPLE）。宽得多，但不能没有
+        svc = [x for x in todo if any(pl == SERVICE_PLATFORM for pl, _a, _u in x[2])]
+        if len(svc) > max_service_people:
+            report["held"] = report["held"] + [p.name for p, _s, _t in svc]
+            for person, signal, fresh in svc:
+                for t in [x for x in fresh if x[0] == SERVICE_PLATFORM]:
+                    records.setdefault(
+                        key_of(*t),
+                        _suspect(person, t, f"{signal}（这一轮判离职的人太多，没有自动停用）"),
+                    )
+            todo = [
+                (p, sig, [t for t in fresh if t[0] != SERVICE_PLATFORM]) for p, sig, fresh in todo
+            ]
+            todo = [x for x in todo if x[2]]
+
         for person, signal, fresh in todo:
             for platform, account, user in fresh:
                 rec = {
