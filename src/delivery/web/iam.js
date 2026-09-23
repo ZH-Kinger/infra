@@ -465,12 +465,16 @@ function reconcileSection(ui, data) {
 // 离职的人的云账号：检测到离职已自动停用（关登录、禁 AK）的，和通讯录里找不到、
 // 等人判断的。「确认删除」删云上的号，**不删任何数据**；「恢复」把停用时关掉的开回去，
 // 之后不再自动停这个号。
-const CLOUD = { aliyun: "阿里", volcano: "火山" };
+const CLOUD = { aliyun: "阿里", volcano: "火山", jiuzhang: "九章" };
+// 九章没有接口：面板停不了也删不了，只能记下来提醒人去九章控制台处理，处理完点一下销账
+const BY_HAND = new Set(["jiuzhang"]);
 
 function offboardSection(items) {
   const rows = items.map((r) => {
     const out = h("span", { class: "hint" });
-    const del = h("button", { type: "button", class: "btn tiny", hidden: !!r.unverified }, "确认删除");
+    const byHand = BY_HAND.has(r.platform);
+    const del = h("button", { type: "button", class: "btn tiny", hidden: !!r.unverified },
+      byHand ? "我已在控制台处理" : "确认删除");
     const keep = h("button", { type: "button", class: "btn tiny ghost" },
       r.state === "disabled" ? "恢复" : "没离职");
     const act = async (op, ask) => {
@@ -490,13 +494,18 @@ function offboardSection(items) {
       }
     };
     del.addEventListener("click", () => act("offboard_delete",
-      `删除 ${r.person} 的${CLOUD[r.platform] || r.platform}账号 ${r.user}？\n\n`
-      + "会删掉这个云账号本身（先移出用户组、摘掉策略、删 AK）。他在桶里的文件、数据集、实例都不动。删了不能恢复。"));
+      byHand
+        ? `${CLOUD[r.platform] || r.platform}没有接口，面板停不了也删不了。\n\n`
+          + `确认你已经在${CLOUD[r.platform] || r.platform}控制台停用或删除了 ${r.user}？这条会从待办里消掉。`
+        : `删除 ${r.person} 的${CLOUD[r.platform] || r.platform}账号 ${r.user}？\n\n`
+          + "会删掉这个云账号本身（先移出用户组、摘掉策略、删 AK）。他在桶里的文件、数据集、实例都不动。删了不能恢复。"));
     keep.addEventListener("click", () => act("offboard_restore",
       r.state === "disabled"
         ? `恢复 ${r.user}？会把停用时关掉的登录和 AK 开回去，之后不再自动停这个号。`
         : `${r.person} 没离职？这条会从待确认里拿掉。`));
-    const state = r.state === "disabled" ? h("span", { class: "pill warn" }, "已停用") : h("span", { class: "pill" }, "未停用");
+    const state = r.state === "disabled"
+      ? h("span", { class: "pill warn" }, "已停用")
+      : h("span", { class: "pill" }, byHand ? "要去控制台停" : "未停用");
     return h("div", { class: "recon-row" },
       h("div", {}, h("b", {}, r.person || r.user), " ", state, " ",
         h("code", {}, `${CLOUD[r.platform] || r.platform} ${r.user}`)),
@@ -508,7 +517,7 @@ function offboardSection(items) {
   });
   return h("section", { class: "group" },
     h("div", { class: "group-label" }, `离职人员的云账号，待确认删除 ${items.length}`),
-    h("p", { class: "hint pad" }, "检测到离职会自动停用（关登录、禁 AK）。通讯录里找不到的只提醒，不自动停。确认后删号，数据一律不动。"),
+    h("p", { class: "hint pad" }, "检测到离职会自动停用阿里、火山的号（关登录、禁 AK）。九章没有接口，只提醒你去它的控制台处理。通讯录里找不到的也只提醒。确认后才删号，数据一律不动。"),
     ...rows);
 }
 

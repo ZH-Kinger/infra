@@ -1453,6 +1453,7 @@ def _cmd_identity_iam_remind(args) -> int:
         except (DeliveryError, OSError, ValueError) as exc:
             print(f"★ 飞书在职状态没查成，这一路本次不判断：{exc}", file=sys.stderr)
             failed = True
+    fresh: list = []  # 这一轮新出现的待处理账号 —— 卡片上直接给按钮
     if roster is not None:
         rp = _review_paths_or_none(args.people)
 
@@ -1471,17 +1472,7 @@ def _cmd_identity_iam_remind(args) -> int:
                 failed, added = True, []
             for r in added:
                 print(f"  待确认（没停用）{r['platform']}/{r['user']}：{r['signal']}")
-            if added:
-                # 只有新记下的才发：记录本身就是去重
-                cards.append(
-                    (
-                        f"{len(added)} 个号待确认",
-                        notify_mod.offboard_card(
-                            {"done": [], "failed": [], "held": [], "suspects": added},
-                            base_url=base,
-                        ),
-                    )
-                )
+            fresh += added  # 只有新记下的才发：记录本身就是去重
         rep = None
         if cands:
             try:
@@ -1508,15 +1499,14 @@ def _cmd_identity_iam_remind(args) -> int:
                 [f"f:{r['platform']}/{r['user']}" for r in rep["failed"]]
                 + [f"h:{n}" for n in rep["held"]]
             )
-            if rep["done"] or (
-                stuck
-                and iam_sync.claim_remind(paths, "off:" + sig_of(stuck), hours=args.every_hours)
+            # 九章那类没接口的也要进卡片（rep["manual"]）—— 不然只有打开面板才看得到
+            fresh += rep["done"] + (rep.get("manual") or [])
+            # 「没停成 / 被上限拦下」单独一张说明卡，同一批 24 小时一次（停成了的走下面那张按钮卡）
+            if stuck and iam_sync.claim_remind(
+                paths, "off:" + sig_of(stuck), hours=args.every_hours
             ):
                 cards.append(
-                    (
-                        f"停用 {len(rep['done'])} 个号",
-                        notify_mod.offboard_card(rep, base_url=base),
-                    )
+                    (f"{len(stuck)} 个号没停成", notify_mod.offboard_card(rep, base_url=base))
                 )
 
     # ── 弱信号：通讯录里找不到 → 只记下来等人确认，不自动停
@@ -1532,23 +1522,21 @@ def _cmd_identity_iam_remind(args) -> int:
             gone = []
         if gone:
             try:
-                offboard.note_suspects(offboard.path_beside(args.people), gone)
+                fresh += offboard.note_suspects(offboard.path_beside(args.people), gone)
             except (DeliveryError, OSError, ValueError) as exc:
                 print(f"★ 离职待确认没记上：{exc}", file=sys.stderr)
                 failed = True
         if not gone:
             if not failed:
                 print("没有「通讯录里找不到、云账号还在」的人")
-        elif not iam_sync.claim_remind(
-            paths, "dir:" + sig_of(p.key for p in gone), hours=args.every_hours
-        ):
-            print(f"通讯录里找不到的 {len(gone)} 人最近提醒过了，本次跳过")
         else:
+            # 提醒去重靠离职记录本身（同一个号只会新记一次），不用再压一层时间窗
             for p in gone:
                 print(f"  通讯录里找不到：{p.name} {p.email}")
-            cards.append(
-                (f"{len(gone)} 人通讯录里找不到", notify_mod.not_found_card(gone, base_url=base))
-            )
+
+    if fresh:
+        # 按钮卡：确认删除 / 没离职都能在飞书里直接点（回调走 /feishu/card）
+        cards.append((f"{len(fresh)} 个号待处理", notify_mod.pending_card(fresh, base_url=base)))
 
     if not cards:
         return 1 if failed else 0

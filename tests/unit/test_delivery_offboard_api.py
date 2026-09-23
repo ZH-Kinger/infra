@@ -79,8 +79,9 @@ class Book:
         return [c for c in self.calls if c[0].startswith("OTHER:")]
 
 
-def ref(platform, name):
-    return AccountRef(platform, ALI_ACC if platform == "aliyun" else VOLC_ACC, name)
+def ref(platform, name, account=""):
+    default = {"aliyun": ALI_ACC, "volcano": VOLC_ACC}.get(platform, "wuji")
+    return AccountRef(platform, account or default, name)
 
 
 def person(name, uid, *refs, email=""):
@@ -167,9 +168,13 @@ class RemindOffboardTests(unittest.TestCase):
         self.assertEqual(set(recs), {f"aliyun/{ALI_ACC}/jia", f"volcano/{VOLC_ACC}/jia"})
         self.assertTrue(all(r["state"] == "disabled" for r in recs.values()))
         self.assertEqual(recs[f"aliyun/{ALI_ACC}/jia"]["signal"], "IT 的 IAM 标记离职")
-        cards = [t for t in self.texts(sent) if "已停用" in t and "离职甲" in t]
+        cards = [t for t in self.texts(sent) if "离职甲" in t]
         self.assertEqual(len(cards), 1, self.texts(sent))
-        self.assertIn("已停用 2 个离职人员的云账号", cards[0])
+        # 卡片上直接给按钮（回调走 /feishu/card），不是只给一个「去面板」的链接
+        self.assertIn("待确认：2 个离职账号", cards[0])
+        self.assertIn('"callback"', cards[0])
+        self.assertIn(f"aliyun/{ALI_ACC}/jia", cards[0])
+        self.assertIn(f"volcano/{VOLC_ACC}/jia", cards[0])
         # 停用走开通身份，不走凭证发放身份
         self.assertTrue(all(c[3] == () for c in self.book.of("factory")))
         self.assertEqual(self.book.of("delete"), [])
@@ -200,16 +205,16 @@ class RemindOffboardTests(unittest.TestCase):
         self.assertEqual(len(recs), n)
         self.assertTrue(all(r["state"] == "suspect" for r in recs.values()))
         self.assertTrue(all("这一轮判离职的人太多" in r["signal"] for r in recs.values()))
-        texts = [t for t in self.texts(sent) if "超过自动停用的上限" in t]
+        texts = [t for t in self.texts(sent) if "超过上限" in t]
         self.assertEqual(len(texts), 1, self.texts(sent))
         self.assertIn(f"这一轮有 {n} 人被判离职", texts[0])
-        self.assertIn("离职停号需要你看一下", texts[0])
+        self.assertIn("没处理成", texts[0])  # 被上限拦下算「要留意」，不是待确认
         self.assertEqual(code, 0)
         # 同一批被拦下的，24 小时内不再发卡；也还是一个都不停
         _code, again = self.run_remind(
             roster, statuses={f"on_{i}": {"is_resigned": True} for i in range(n)}
         )
-        self.assertFalse(any("超过自动停用的上限" in t for t in self.texts(again)))
+        self.assertFalse(any("超过上限" in t for t in self.texts(again)))
         self.assertEqual(self.book.of("disable"), [])
 
     def test_held_batch_change_sends_again(self):
@@ -220,7 +225,7 @@ class RemindOffboardTests(unittest.TestCase):
         _code, sent = self.run_remind(
             roster, statuses={f"on_{i}": {"is_resigned": True} for i in range(n + 1)}
         )
-        self.assertTrue(any("超过自动停用的上限" in t for t in self.texts(sent)))
+        self.assertTrue(any("超过上限" in t for t in self.texts(sent)))
 
     def test_rounds_that_disable_always_send(self):
         """停了号每次都要说，不走 24 小时去重。"""
@@ -231,8 +236,33 @@ class RemindOffboardTests(unittest.TestCase):
             [a, b], statuses={"on_a": {"is_resigned": True}, "on_b": {"is_resigned": True}}
         )
         self.assertTrue(
-            any("已停用 1 个离职人员的云账号" in t and "离职乙" in t for t in self.texts(sent))
+            any("待确认：1 个离职账号" in t and "离职乙" in t for t in self.texts(sent))
         )
+
+    def test_a_jiuzhang_only_person_still_gets_a_card(self):
+        """审计 Med-1：强信号 + 只有九章号 → 以前 report 里什么都没有，卡片一张不发，
+        人就只能靠自己打开面板才看得到。王昱然当初漏掉就是这条路。"""
+        gone = person("离职丁", "on_j", ref("jiuzhang", "wuji-ding"))
+        code, sent = self.run_remind([gone], statuses={"on_j": {"is_resigned": True}})
+        self.assertEqual(code, 0)
+        self.assertEqual(self.book.of("disable"), [])  # 九章没接口，不碰云
+        texts = [t for t in self.texts(sent) if "wuji-ding" in t]
+        self.assertEqual(len(texts), 1, self.texts(sent))
+        self.assertIn("我已在控制台处理", texts[0])
+        # 第二轮不再重复发
+        _again, sent2 = self.run_remind([gone], statuses={"on_j": {"is_resigned": True}})
+        self.assertEqual([t for t in self.texts(sent2) if "wuji-ding" in t], [])
+
+    def test_the_same_account_is_not_listed_twice_on_one_card(self):
+        """审计 Low-2：被冻结（弱）+ IAM 标离职（强）会先后写同一个号，
+        卡片上会出现两行、两对按钮，还占掉两个名额。"""
+        both = person("两头沾", "on_two", ref("aliyun", "liang"))
+        _code, sent = self.run_remind(
+            [both], drift=["on_two"], statuses={"on_two": {"is_frozen": True}}
+        )
+        texts = [t for t in self.texts(sent) if "liang" in t]
+        self.assertEqual(len(texts), 1, self.texts(sent))
+        self.assertEqual(texts[0].count(f'"k": "aliyun/{ALI_ACC}/liang"'), 2)  # 一对按钮
 
     def test_frozen_status_records_suspect_never_disables(self):
         """H-1：冻结不是离职（长假、临时封禁）→ 只记嫌疑，不停。"""
@@ -296,7 +326,7 @@ class RemindOffboardTests(unittest.TestCase):
         self.book.calls.clear()
         _code, sent = self.run_remind([gone], drift=["on_g"])
         self.assertEqual(self.book.of("disable"), [])
-        self.assertFalse(any("已停用" in t and "个离职人员" in t for t in self.texts(sent)))
+        self.assertFalse(any("待确认：" in t and "个离职账号" in t for t in self.texts(sent)))
 
     def test_protected_in_roster_never_disabled(self):
         svc = person("服务号", "on_p", ref("aliyun", "panel-executor"), ref("volcano", "power-x"))
@@ -339,7 +369,7 @@ class RemindOffboardTests(unittest.TestCase):
         gone = person("离职甲", "on_g", ref("aliyun", "jia"))
         code, sent = self.run_remind([gone], drift=["on_g"])
         self.assertEqual(code, 1)
-        self.assertTrue(any("已离职" in t for t in self.texts(sent)), self.texts(sent))
+        self.assertTrue(any("云登录名还挂着" in t for t in self.texts(sent)), self.texts(sent))
 
 
 # ── 面板接口 ─────────────────────────────────────────────────────────────

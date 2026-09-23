@@ -33,12 +33,18 @@ import time
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from . import platforms
 from .errors import DeliveryError
 
 FILENAME = "offboard.json"
 
-#: 能被停、被删的平台。九章没有接口，只能提醒人去控制台
+#: 面板能自己停、自己删的平台
 PLATFORMS = ("aliyun", "volcano")
+
+#: 没有接口、只能人去控制台处理的平台。**照样要列出来**：九章的号以前完全不进离职流程，
+#: 一个离职的人在九章上的号没有任何地方会提醒去停（王昱然就是这么漏掉的）
+MANUAL_PLATFORMS = ("jiuzhang",)
+ALL_PLATFORMS = PLATFORMS + MANUAL_PLATFORMS
 
 #: 一轮最多自动停几个人。**超了就一个都不停，只提醒**：IT 的接口或飞书抖一下，
 #: 可能一次性把一批在职的人标成离职，那时候停得越多事故越大
@@ -46,7 +52,28 @@ MAX_AUTO_PEOPLE = 3
 
 #: 永远不自动停、不删的号。云上的 Deny 策略是第二道
 #: 和云上执行身份策略里的 Deny 名单对齐（阿里、火山两份）。**改一边要改另一边**
-PROTECTED = re.compile(r"\A(panel-|power-|tempak|wuji-|rl-|finance\Z|data-tran\Z)", re.IGNORECASE)
+_PROTECTED_CLOUD = re.compile(
+    r"\A(panel-|power-|tempak|wuji-|rl-|finance\Z|data-tran\Z)", re.IGNORECASE
+)
+#: 九章的登录名**全都是 `wuji-` 开头**（`wuji-wangyuran`），套云上那套前缀等于把整个平台挡光。
+#: 九章那边没有服务号的概念，面板也动不了它的号，所以只挡面板自己可能登记的名字
+_PROTECTED_MANUAL = re.compile(r"\A(panel-|power-)", re.IGNORECASE)
+
+
+def protected(user: str, platform: str = "") -> bool:
+    """这个号是不是不能碰。**按平台分**：见 `_PROTECTED_MANUAL` 的说明。"""
+    rule = _PROTECTED_MANUAL if platform in MANUAL_PLATFORMS else _PROTECTED_CLOUD
+    return bool(rule.match(str(user or "")))
+
+
+class _Protected:
+    """兼容旧写法 `PROTECTED.match(name)`（默认按云上那套判）。"""
+
+    def match(self, user):
+        return _PROTECTED_CLOUD.match(str(user or ""))
+
+
+PROTECTED = _Protected()
 
 DISABLED = "disabled"
 SUSPECT = "suspect"
@@ -122,18 +149,26 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime())
 
 
-def targets_of(person, platforms: Iterable[str] = PLATFORMS) -> list:
-    """这个人名下可以停的号：`[(platform, account, user)]`。只取已确认归属的。"""
+def targets_of(person, platforms: Iterable[str] = ALL_PLATFORMS) -> list:
+    """这个人名下要处理的号：`[(platform, account, user)]`。只取已确认归属的。
+
+    默认**包含九章**：面板停不了它，但记下来才有人去控制台停。
+    """
     out = []
     for ref in getattr(person, "accounts", ()) or ():
         if ref.platform not in platforms:
             continue
         if getattr(ref, "status", "confirmed") != "confirmed":
             continue
-        if PROTECTED.match(ref.name):
+        if protected(ref.name, ref.platform):
             continue
         out.append((ref.platform, ref.account, ref.name))
     return out
+
+
+def manual(platform: str) -> bool:
+    """这个平台只能人去控制台处理。"""
+    return platform in MANUAL_PLATFORMS
 
 
 def resigned(status) -> str:
@@ -210,7 +245,18 @@ def auto_disable(
             return rec.get("state") == DISABLED and bool(rec.get("incomplete"))
 
         for person, signal in candidates:
-            fresh = [t for t in targets_of(person) if open_(t)]
+            todo_all = [t for t in targets_of(person) if open_(t)]
+            # 九章这类没接口的：只记一条待办，不算进「这一轮停几个人」的上限。
+            # **新记的要放进 report**：卡片只发 report 里的东西，不放等于这个人在飞书上
+            # 一个字都不会出现 —— 而那正是这次要解决的漏网（审计 Med-1）
+            for t in [x for x in todo_all if manual(x[0])]:
+                k = key_of(*t)
+                if k in records:
+                    continue
+                where = platforms.name_of(t[0])
+                records[k] = _suspect(person, t, f"{signal}（{where}没有接口，要去控制台停用）")
+                report.setdefault("manual", []).append(records[k])
+            fresh = [t for t in todo_all if not manual(t[0])]
             if fresh:
                 todo.append((person, signal, fresh))
             else:
@@ -341,13 +387,28 @@ def decide(path, key: str, action: str, executor: Callable, *, actor: str, log=N
             raise OffboardError("没有这条离职记录")
         if rec.get("state") not in PENDING:
             raise OffboardError(f"这条已经处理过了（{rec.get('state')}）")
-        if PROTECTED.match(str(rec.get("user") or "")):
+        if protected(str(rec.get("user") or ""), str(rec.get("platform") or "")):
             raise OffboardError("这个号受保护，面板不停也不删")
         if action == "delete" and rec.get("unverified"):
-            # 名册里这个号不归这个人（IT 那边的属性值可能导错了）。一键删掉的可能是别人在用的号
+            # 名册里这个号不归这个人（IT 那边的属性值可能导错了）。一键删掉的可能是别人在用的号。
+            # **排在 manual 分支之前**：否则九章那种「我已在控制台处理」会绕过这条警告，
+            # 而那正是管理员去控制台动手之前最该看到的一句（审计 Low-1）
             raise OffboardError(
                 "名册里这个号不归他，面板不删。核实归属后到云控制台处理，这里点「没离职」拿掉"
             )
+        if manual(str(rec.get("platform") or "")):
+            # 面板调不了这个平台（九章）。管理员点的是「我在控制台处理完了」，这里只记账。
+            # **不碰云**：这个平台没有接口，记成已处理是为了它别一直挂在待办里
+            rec.update(
+                state=DELETED if action == "delete" else DISMISSED,
+                decided_at=_now(),
+                decided_by=actor,
+                by_hand=platforms.name_of(rec.get("platform", "")),
+            )
+            records[key] = rec
+            if log is not None:
+                log(f"offboard_{action}_by_hand", [rec], actor)
+            return rec
         ex = executor(rec["platform"], rec["account"])
         if action == "delete":
             left = ex.delete_user(rec["user"])

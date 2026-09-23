@@ -8,6 +8,8 @@
 Description=Cloud panel: collect cloud asset snapshot (read-only)
 Wants=network-online.target
 After=network-online.target
+# 崩溃 / 超时被杀 / 非零退出时私聊管理员 —— 任务自己发不出告警的那几种情况
+OnFailure=delivery-unit-failed@%n.service
 
 [Service]
 Type=oneshot

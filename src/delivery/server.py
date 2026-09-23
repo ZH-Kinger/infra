@@ -53,6 +53,7 @@ from . import access as access_mod
 from . import alerts, iam_api, iam_sync, inventory
 from . import approval_hook as hook_mod
 from . import assets as assets_mod
+from . import card_hook as card_hook_mod
 from . import health as health_mod
 from . import notify as notify_mod
 from . import nudge as nudge_mod
@@ -1122,6 +1123,62 @@ def make_handler(
         platforms={**platforms_mod.NAMES, **{p.id: p.display for p in registry}}
     )
 
+    card_hook = card_hook_mod.Hook(
+        encrypt_key=os.environ.get(card_hook_mod.ENV_ENCRYPT_KEY, ""),
+        verify_token=os.environ.get(card_hook_mod.ENV_VERIFY_TOKEN, ""),
+    )
+    _card_token = _tenant_token_cache(app_id, app_secret) if app_id and app_secret else None
+
+    def _card_admin(open_id: str) -> str:
+        """点按钮的人是不是管理员。返回 `admin:<union_id>`，不是就抛。
+
+        **open_id 来自请求体**（飞书带过来的），所以只有验签通过才走到这里；
+        再拿它去飞书换 union_id，和名单比 —— 名单里存的是 union_id，open_id 比不了。
+        """
+        from .identity import directory
+
+        if _card_token is None:
+            raise DeliveryError("面板没配飞书应用凭证，认不出你是谁")
+        uid = directory.union_id_of(open_id, app_id, app_secret, token=_card_token())
+        if not uid or backend.admins().role_of(union_id=uid) != ROLE_ADMIN:
+            raise DeliveryError("只有管理员能在卡片上处理离职")
+        return f"admin:{uid}"
+
+    def _card_action(open_id: str, value: dict) -> dict:
+        """卡片按钮 → 动作。**只认离职那两个按钮**，别的一律不理。"""
+        action = str(value.get("a") or "")
+        key = str(value.get("k") or "")
+        if action not in ("del", "keep") or not key:
+            return card_hook_mod.toast("error", "这个按钮面板不认识")
+        paths = backend.iam_paths()
+        if paths is None:
+            raise DeliveryError("服务端没配置名册路径")
+        actor = _card_admin(open_id)
+        rp = backend.review_paths()
+        rec = offboard_mod.decide(
+            offboard_mod.path_beside(paths.people),
+            key,
+            "delete" if action == "del" else "restore",
+            lambda platform, account: executor_from_env(platform, account),
+            actor=actor,
+            log=(
+                (lambda op, rows, who: review_mod.log_offboard(rp, op, rows, actor=who))
+                if rp is not None
+                else None
+            ),
+        )
+        who = f"{rec.get('person') or rec.get('user')} 的 {rec.get('user')}"
+        if action == "keep":
+            return card_hook_mod.toast(
+                "success",
+                f"已记下 {who} 没离职" if rec.get("state") == "dismissed" else f"已恢复 {who}",
+            )
+        if rec.get("by_hand"):
+            return card_hook_mod.toast(
+                "success", f"已销账：{who}（{rec['by_hand']}控制台那边你已处理）"
+            )
+        return card_hook_mod.toast("success", f"已删除 {who}，数据没动")
+
     def _claim_resources(platform: str, account: str, ids: list, email: str) -> None:
         """资源登记完把实例指给申请人。**开通那一刻是唯一确定主人的时机**，错过只能靠猜。
 
@@ -1649,6 +1706,16 @@ def make_handler(
                     return "跨站请求被拒绝"
             return None
 
+        def _raw_body(self, max_body: int = _REVIEW_MAX_BODY):
+            """原始字节。**验签要的就是它** —— 重新序列化出来的 JSON 差一个空格签名就对不上。"""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if length < 0 or length > max_body:
+                return None, self._json(400, {"error": "请求体过大"})
+            return self.rfile.read(length) if length else b"", None
+
         def _json_body(self, *, allow_empty: bool = False, max_body: int = _REVIEW_MAX_BODY):
             """读 JSON 请求体。返回 (dict, None) 或 (None, 已发送的错误响应)。"""
             try:
@@ -1882,7 +1949,7 @@ def make_handler(
                     user = offboard_mod.cloud_user(row.get("previous") or row.get("value"))
                     if not (platform and account and user):
                         return dict(row, cloud="没认出云上的用户名，云账号没动")
-                    if offboard_mod.PROTECTED.match(user):
+                    if offboard_mod.protected(user, platform):
                         return dict(row, cloud=f"{user} 受保护，云账号没动")
                     # **删之前核对归属**：IAM 里的属性值可能被导错成别人的登录名。
                     # 只有名册里这个人名下确认的号才删；对不上就只记下来等人看
@@ -1950,6 +2017,53 @@ def make_handler(
                     "offboard_delete 或 offboard_restore"
                 },
             )
+
+        def _feishu_card(self):
+            """飞书卡片按钮回调：管理员在卡片上点「确认删除」「没离职」。
+
+            **三道门**（见 card_hook 的说明）：验签（没配 Encrypt Key 一律拒）、
+            Verification Token、点的人必须在管理员名单里（open_id 换 union_id 再比）。
+
+            **3 秒内必须回**，所以这里只做一件事就返回，不去刷新卡片。
+            """
+            raw, sent = self._raw_body(64 * 1024)
+            if raw is None:
+                return sent
+            try:
+                if card_hook.configured:
+                    # **先验签再解密、再看 token**：签的是加密后的原始字节，所以验得了；
+                    # 反过来的话，解密会拿攻击者可控的密文当输入（补位预言机），
+                    # 而 token 的对错在验签之前就能被试出来（审计 Low-3 / Low-4）
+                    card_hook.check_signature(self.headers, raw)
+                body = card_hook.payload(raw)
+                got = card_hook.challenge(body)
+                if got is not None:
+                    # 地址校验要能在还没配 Encrypt Key 时通过，否则回调地址根本存不下来
+                    return self._json(200, {"challenge": got})
+                if not card_hook.configured:
+                    print(f"[card] 未配置 {card_hook_mod.ENV_ENCRYPT_KEY}，拒绝", file=sys.stderr)
+                    return self._json(403, {"error": "未配置回调加密"})
+                card_hook.check_token(body)
+            except card_hook_mod.CardError as exc:
+                print(f"[card] 拒绝：{exc}", file=sys.stderr)
+                return self._json(exc.status, {"error": str(exc)})
+            except Exception as exc:  # noqa: BLE001 — 解密/解析里的意外不该把细节回给外面
+                print(f"[card] {type(exc).__name__}: {exc}", file=sys.stderr)
+                return self._json(400, {"error": "回调处理失败"})
+
+            if card_hook.event_type(body) != "card.action.trigger":
+                return self._json(200, {})
+            if not card_hook.claim(body):
+                # 飞书重投（3 秒没收到就重发）。**回 200 别再执行一次**
+                return self._json(200, card_hook_mod.toast("info", "刚刚已经处理过了"))
+            who, value = card_hook.action(body)
+            try:
+                return self._json(200, _card_action(who, value))
+            except DeliveryError as exc:
+                return self._json(200, card_hook_mod.toast("error", str(exc).splitlines()[0]))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[card] 执行失败 {type(exc).__name__}: {exc}", file=sys.stderr)
+                return self._json(200, card_hook_mod.toast("error", "处理失败，去面板看看"))
 
         def _feishu_approval(self):
             """飞书审批回调。审批人一点同意，这里立刻把对应的单子同步一次。
@@ -2547,6 +2661,8 @@ def make_handler(
             path = urllib.parse.urlsplit(self.path).path
             if path == _FEISHU_HOOK:
                 return self._feishu_approval()
+            if path == "/feishu/card":
+                return self._feishu_card()
             if path == "/api/pickup":
                 return self._pickup()
             if path == _ADMIN_POLICY_RULES:

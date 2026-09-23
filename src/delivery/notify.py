@@ -355,6 +355,53 @@ def notify_admins(notifier, union_ids, card: dict) -> list:
     return problems
 
 
+#: 卡片分三类，**颜色是有语义的**：
+#:   todo  待你处理的事（蓝）—— 系统没出问题，只是轮到人了。这类占绝大多数
+#:   warn  要留意但不用立刻动手的（橙）
+#:   alert 真出事了：任务挂了、权限没了、数据可能不对（红）
+#: 什么都用红色的话，红色就不再意味着任何事 —— 收的人一周之后就不看了
+_TEMPLATES = {"todo": "blue", "warn": "orange", "alert": "red", "done": "green", "mute": "grey"}
+
+
+#: 一张卡最多摆几个人的按钮。再多只给链接 —— 卡片太长没人看得完，飞书对卡片体积也有限制
+CARD_ROWS = 5
+
+
+def card2(kind: str, title: str, elements: list) -> dict:
+    """Card JSON 2.0 的外壳。按钮要能回调面板（`behaviors`），只有 2.0 支持。"""
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "template": _TEMPLATES.get(kind, "blue"),
+            "title": {"tag": "plain_text", "content": _clip(title, 60)},
+        },
+        "body": {"elements": elements},
+    }
+
+
+def md(text: str) -> dict:
+    return {"tag": "markdown", "content": str(text)}
+
+
+def note(text: str) -> dict:
+    """小灰字：补充说明、采集时间这类。正文和注脚分开，卡片才不是一堵墙。
+
+    **2.0 里没有 `note` 组件**（真机试出来的：`tag: note` 会被回 200861，
+    `plain_text` 当元素用回 200621），灰字只能靠 markdown 的 font 标签。
+    """
+    return md(f"<font color=grey>{_clip(text, _LINE_MAX)}</font>")
+
+
+def link_button(label: str, url: str, kind: str = "default") -> dict:
+    return {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": label},
+        "type": kind,
+        "behaviors": [{"type": "open_url", "default_url": url}],
+    }
+
+
 def alert_card(title: str, text: str) -> dict:
     """定时任务出问题时私聊管理员的卡片。正文就是报告原文，一行一段。
 
@@ -362,16 +409,13 @@ def alert_card(title: str, text: str) -> dict:
     全文在 journal 里，卡片要做的只是让人知道出事了、大概是什么事。
     """
     lines = [ln for ln in str(text or "").splitlines() if ln.strip()]
-    if len(lines) > 30:
-        lines = lines[:30] + [f"…还有 {len(lines) - 30} 行，见服务器日志"]
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {"template": "red", "title": {"tag": "plain_text", "content": _clip(title, 60)}},
-        "elements": [
-            {"tag": "div", "text": {"tag": "plain_text", "content": _clip(ln, _LINE_MAX)}}
-            for ln in lines or ["（没有更多信息）"]
-        ],
-    }
+    tail = ""
+    if len(lines) > 24:
+        tail, lines = f"还有 {len(lines) - 24} 行，见服务器日志", lines[:24]
+    elements: list = [md(_clip(ln, _LINE_MAX)) for ln in lines or ["（没有更多信息）"]]
+    if tail:
+        elements.append(note(tail))
+    return card2("alert", title, elements)
 
 
 def drift_card(report: Mapping, *, base_url: str = "") -> dict:
@@ -422,111 +466,153 @@ def drift_card(report: Mapping, *, base_url: str = "") -> dict:
     return {
         "config": {"wide_screen_mode": True},
         "header": {
-            "template": "orange",
-            "title": {"tag": "plain_text", "content": f"{len(rows)} 人已离职，云登录名还挂着"},
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": f"待确认：{len(rows)} 人的云登录名还挂着"},
         },
         "elements": elements,
     }
 
 
 def offboard_card(report: Mapping, *, base_url: str = "") -> dict:
-    """自动停用了谁、为什么没停，私聊管理员。**删号要管理员到面板上确认。**"""
+    """自动停用的结果：停了谁、谁没停成、为什么一个都没停。**删号仍要人确认。**
+
+    只有「没停成 / 被上限拦下」才是橙色 —— 正常停用是按计划做完的事，不该长得像事故。
+    """
     from . import platforms
 
     def who(r):
         cloud = platforms.name_of(r.get("platform", ""))
         return f"{r.get('person', '')} · {cloud} {r.get('user', '')}"
 
-    lines = []
-    for r in (report.get("done") or [])[:10]:
-        lines.append(f"已停用 {who(r)}（{r.get('signal', '')}）")
-    for r in (report.get("failed") or [])[:5]:
-        lines.append(f"停用失败 {who(r)}：{_clip(r.get('error'), 80)}")
-    for r in (report.get("suspects") or [])[:10]:
-        lines.append(f"待确认 {who(r)}：{r.get('signal', '')}")
+    done = report.get("done") or []
+    failed = report.get("failed") or []
     held = report.get("held") or []
+    suspects = report.get("suspects") or []
+    elements: list = []
+    if done:
+        elements.append(md("**已停用**（关登录、禁 AK，可以恢复）"))
+        for r in done[:10]:
+            elements.append(note(f"{who(r)}：{r.get('signal', '')}"))
+    if suspects:
+        elements.append(md("**待确认**（没有自动停用）"))
+        for r in suspects[:10]:
+            elements.append(note(f"{who(r)}：{r.get('signal', '')}"))
+    if failed:
+        elements.append(md("**没停成**，下一轮会再试"))
+        for r in failed[:5]:
+            elements.append(note(f"{who(r)}：{_clip(r.get('error'), 80)}"))
     if held:
-        lines.append(
-            f"这一轮有 {len(held)} 人被判离职，超过自动停用的上限，一个都没停："
-            + "、".join(held[:10])
-            + "。多半是接口出了问题，先核实。"
-        )
-    lines.append("停用只关登录、禁 AK，可以恢复。到面板确认后才删号，数据一律不动。")
-    elements: list = [
-        {"tag": "div", "text": {"tag": "plain_text", "content": _clip(line, _LINE_MAX)}}
-        for line in lines
-    ]
+        elements.append(md(f"**这一轮有 {len(held)} 人被判离职，超过上限，一个都没停**"))
+        elements.append(note("、".join(held[:10]) + " —— 多半是接口出了问题，先核实。"))
+    elements.append(note("删号要你在面板或卡片上确认。数据一律不动。"))
     link = page_link(base_url)
     if link:
-        elements.append(
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "type": "primary",
-                        "text": {"tag": "plain_text", "content": "去确认"},
-                        "url": link,
-                    }
-                ],
-            }
-        )
-    done = len(report.get("done") or [])
-    title = f"已停用 {done} 个离职人员的云账号，待确认删除" if done else "离职停号需要你看一下"
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {"template": "orange", "title": {"tag": "plain_text", "content": title}},
-        "elements": elements,
-    }
+        elements.append(_actions([link_button("去面板", link)]))
+    kind = "warn" if (failed or held) else "todo"
+    if failed or held:
+        title = f"离职停号：{len(failed) + len(held)} 个没处理成"
+    else:
+        title = f"已停用 {len(done)} 个离职账号，待确认删除"
+    return card2(kind, title, elements)
 
 
-def not_found_card(people, *, base_url: str = "") -> dict:
-    """名下有云账号、在飞书通讯录里却找不到的人，私聊管理员。**只提醒，不停号。**
+def pending_card(records, *, base_url: str = "", title: str = "") -> dict:
+    """待确认的离职账号，**按钮直接能点**：确认删除 / 没离职。
 
-    `drift_card` 只管 IT 的 IAM 里标了离职、按 union_id 对得上的人。名册里没有 union_id、
-    或者 IAM 里压根没他属性的人（九章这种没接 SSO 的平台只有这一种），那张卡永远不会提到他。
+    为什么按钮要带在卡片上
+    ──────────────────────
+    原先卡片只有一个「去确认」链接：人得打开面板、找到那一行、再点一次。一件五秒钟的事
+    拆成三步，于是就拖着 —— 而拖着的那几天，离职的人的号一直开着。
+
+    **这不是告警，是待办**（蓝色）。真出事的才是红色，见 `_TEMPLATES`。
+
+    **1.0 和 2.0 不能混**：2.0 的按钮才能把 `behaviors.callback` 回调到面板（`/feishu/card`）。
     """
     from . import platforms
 
-    rows = list(people)
-    lines = []
-    for p in rows[:8]:
-        accs = "、".join(f"{platforms.name_of(r.platform)} {r.name}" for r in p.accounts)
-        lines.append(f"{p.name} {p.email}：{_clip(accs, 120)}")
-    if len(rows) > 8:
-        lines.append(f"…还有 {len(rows) - 8} 人")
-    lines.append(
-        "飞书对「已离职」和「不在应用可见范围内」给的是同一个结果，所以没有自动停用。"
-        "确认离职的话到面板点「确认删除」；九章要在九章控制台停，停完到「人工登记」重新保存名单。"
-    )
+    # 同一个号可能两条都沾（先被弱信号记下、同一轮又被强信号停用）——
+    # 不去重的话卡片上会出现两行、两对按钮，还占掉两个名额（审计 Low-2）。后写的赢
+    seen: dict = {}
+    for r in records:
+        seen[f"{r.get('platform')}/{r.get('account')}/{r.get('user')}"] = r
+    all_rows = list(seen.values())
+    rows = all_rows[:CARD_ROWS]
     elements: list = [
-        {"tag": "div", "text": {"tag": "plain_text", "content": line}} for line in lines
+        md("这些人的云账号还留着。确认删除只删账号本身，**他的数据一个字节都不动**。")
     ]
+    for r in rows:
+        cloud = platforms.name_of(r.get("platform", ""))
+        key = f"{r.get('platform')}/{r.get('account')}/{r.get('user')}"
+        by_hand = manual_platform(r.get("platform", ""))
+        state = "已停用（面板停的）" if r.get("state") == "disabled" else "面板没停过它"
+        elements.append({"tag": "hr"})
+        elements.append(md(f"**{r.get('person') or r.get('user')}** · {cloud} `{r.get('user')}`"))
+        elements.append(note(f"{state} · {_clip(r.get('signal'), 60)}"))
+        if r.get("incomplete"):
+            elements.append(note(f"上一轮停用没做完，下一轮会再试：{_clip(r['incomplete'], 60)}"))
+        if r.get("unverified"):
+            elements.append(note("名册里这个号不归他，面板不删。核实后去控制台处理。"))
+            elements.append(_actions([_keep_button(key)]))
+            continue
+        elements.append(_actions([_delete_button(key, cloud, r, by_hand), _keep_button(key)]))
+    if len(all_rows) > len(rows):
+        elements.append({"tag": "hr"})
+        elements.append(md(f"还有 {len(all_rows) - len(rows)} 个号，去面板处理。"))
     link = page_link(base_url)
     if link:
-        elements.append(
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "type": "primary",
-                        "text": {"tag": "plain_text", "content": "去确认"},
-                        "url": link,
-                    }
-                ],
-            }
-        )
+        elements.append(_actions([link_button("去面板看全部", link)]))
+    return card2("todo", title or f"待确认：{len(all_rows)} 个离职账号", elements)
+
+
+def manual_platform(platform: str) -> bool:
+    """面板动不了的平台（九章）。按钮文案和确认语都不一样。"""
+    from . import offboard
+
+    return offboard.manual(str(platform or ""))
+
+
+def _actions(buttons: list) -> dict:
+    """一行按钮。
+
+    **2.0 里没有 `action` 容器**（真机试出来的：`{"tag":"action","actions":[...]}` 回 200861）——
+    按钮本身就是元素，要并排就用 `column_set` 摆。1.0 的写法照搬过来会让整张卡发不出去，
+    而发不出去 = 管理员什么通知都收不到。
+    """
+    if len(buttons) == 1:
+        return buttons[0]
     return {
-        "config": {"wide_screen_mode": True},
-        "header": {
-            "template": "orange",
-            "title": {
-                "tag": "plain_text",
-                "content": f"{len(rows)} 人在通讯录里找不到，云账号还在",
-            },
+        "tag": "column_set",
+        "horizontal_spacing": "8px",
+        "columns": [{"tag": "column", "width": "auto", "elements": [b]} for b in buttons],
+    }
+
+
+def _delete_button(key: str, cloud: str, rec, by_hand: bool) -> dict:
+    who = rec.get("user", "")
+    ask = (
+        f"{cloud}没有接口，面板停不了也删不了。确认你已经在{cloud}控制台处理了 {who}？"
+        if by_hand
+        else f"删除{cloud}账号 {who}？会删掉账号本身（出组、摘策略、删 AK）。"
+        "他在桶里的文件、数据集、实例都不动。删了不能恢复。"
+    )
+    return {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": "我已在控制台处理" if by_hand else "确认删除"},
+        "type": "danger",
+        "behaviors": [{"type": "callback", "value": {"a": "del", "k": key}}],
+        "confirm": {
+            "title": {"tag": "plain_text", "content": "再确认一次"},
+            "text": {"tag": "plain_text", "content": ask},
         },
-        "elements": elements,
+    }
+
+
+def _keep_button(key: str) -> dict:
+    return {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": "没离职 / 恢复"},
+        "type": "default",
+        "behaviors": [{"type": "callback", "value": {"a": "keep", "k": key}}],
     }
 
 

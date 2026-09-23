@@ -182,6 +182,8 @@ class VolcanoCloud:
             return self.err(self.fail[act], 400)
         if not self.exists:
             return self.err("EntityNotExist.User")
+        if act == "GetUser":
+            return self.ok({"User": {"UserName": "u"}})
         if act == "GetLoginProfile":
             if not self.profile:
                 # 没有登录配置时火山回全零 stub，不是 NotExist
@@ -446,6 +448,16 @@ class VolcanoDisableTests(unittest.TestCase):
         self.assertNotIn("UpdateLoginProfile", cloud.actions)
         self.assertNotIn("UpdateAccessKey", cloud.actions)
 
+    def test_login_profile_notexist_but_user_alive_is_not_gone(self):
+        """火山对「有用户、没登录配置」的报错码里可能也带 user + notexist。
+        只看它就把号记成「云上已不存在」，一个还开着 AK 的离职号会从待办里消失。"""
+        cloud = VolcanoCloud(keys={"AKLTa1": "active"})
+        cloud.fail["GetLoginProfile"] = "EntityNotExist.User.LoginProfile"
+        got = cloud.executor().disable_user("lisi")
+        self.assertNotIn("gone", got)
+        self.assertEqual(got["keys"], ["AKLTa1"])
+        self.assertIn("GetUser", cloud.actions)
+
     def test_partial_disable_carries_what_was_done(self):
         cloud = VolcanoCloud(keys={"AKLTa1": "active"})
         cloud.fail["ListAccessKeys"] = "InternalError"
@@ -666,10 +678,27 @@ class TargetsTests(unittest.TestCase):
             ref("jiuzhang", "lisi", account="wuji"),
             ref("aliyun", "lisi-pending", status="pending"),
         )
+        # 九章也要列出来（面板停不了，但要提醒人去控制台）；pending 的不算
         self.assertEqual(
             offboard.targets_of(p),
+            [
+                ("aliyun", ALI_ACC, "lisi"),
+                ("volcano", VOLC_ACC, "lisi"),
+                ("jiuzhang", "wuji", "lisi"),
+            ],
+        )
+        self.assertEqual(
+            offboard.targets_of(p, offboard.PLATFORMS),
             [("aliyun", ALI_ACC, "lisi"), ("volcano", VOLC_ACC, "lisi")],
         )
+
+    def test_jiuzhang_logins_are_not_protected_by_the_cloud_prefixes(self):
+        """九章所有人都叫 wuji-xxx。套云上那套前缀 = 整个平台被挡光，一个都检测不到。"""
+        self.assertFalse(offboard.protected("wuji-wangyuran", "jiuzhang"))
+        self.assertTrue(offboard.protected("wuji-ci", "aliyun"))
+        self.assertTrue(offboard.protected("panel-executor", "jiuzhang"))
+        p2 = person("王昱然", "on_w", ref("jiuzhang", "wuji-wangyuran", account="wuji"))
+        self.assertEqual(offboard.targets_of(p2), [("jiuzhang", "wuji", "wuji-wangyuran")])
 
     def test_protected_names_never_targets(self):
         p = person(
@@ -1366,8 +1395,72 @@ class UnverifiedAndGoneTests(_Base):
             }
         )
         text = json.dumps(card, ensure_ascii=False)
-        self.assertIn("待确认 甲", text)
+        self.assertIn("待确认", text)
+        self.assertIn("甲", text)
         self.assertIn("账号被冻结", text)
+        # 没有失败、没有被拦下 → 这不是告警，是待办
+        self.assertEqual(card["header"]["template"], "blue")
+
+
+class ManualPlatformTests(_Base):
+    """九章：面板停不了也删不了，只记待办；管理员在控制台处理完点一下销账。"""
+
+    KEY = "jiuzhang/wuji/wuji-wangyuran"
+
+    def cand(self):
+        return (
+            person("王昱然", "on_w", ref("jiuzhang", "wuji-wangyuran", account="wuji")),
+            "IT 的 IAM 标记离职",
+        )
+
+    def test_auto_disable_records_it_without_touching_any_cloud(self):
+        rep = offboard.auto_disable(self.path, [self.cand()], self.book)
+        self.assertEqual(self.book.calls, [])
+        self.assertEqual(rep["done"], [])
+        # **要进 report**：卡片只发 report 里的东西，不放等于九章的人在飞书上
+        # 一个字都不会出现（审计 Med-1，正是王昱然那一类）
+        self.assertEqual([r["user"] for r in rep["manual"]], ["wuji-wangyuran"])
+        rec = self.records()[self.KEY]
+        self.assertEqual(rec["state"], offboard.SUSPECT)
+        self.assertIn("控制台", rec["signal"])
+
+    def test_an_already_recorded_manual_account_is_not_re_announced(self):
+        """记录本身就是去重：第二轮不该再把同一个号塞进卡片。"""
+        offboard.auto_disable(self.path, [self.cand()], self.book)
+        again = offboard.auto_disable(self.path, [self.cand()], self.book)
+        self.assertEqual(again.get("manual") or [], [])
+
+    def test_manual_does_not_eat_the_auto_disable_limit(self):
+        many = [
+            (person(f"人{i}", f"on_{i}", ref("jiuzhang", f"wuji-u{i}", account="wuji")), "s")
+            for i in range(6)
+        ]
+        rep = offboard.auto_disable(self.path, many, self.book)
+        self.assertEqual(rep["held"], [])
+        self.assertEqual(len(self.records()), 6)
+
+    def test_confirm_marks_handled_without_cloud_calls(self):
+        offboard.auto_disable(self.path, [self.cand()], self.book)
+        logged = []
+        rec = offboard.decide(
+            self.path,
+            self.KEY,
+            "delete",
+            self.book,
+            actor="admin:x",
+            log=lambda op, rows, actor: logged.append(op),
+        )
+        self.assertEqual(rec["state"], offboard.DELETED)
+        self.assertEqual(rec["by_hand"], "九章")
+        self.assertEqual(self.book.calls, [])
+        self.assertEqual(logged, ["offboard_delete_by_hand"])
+        self.assertEqual(offboard.pending(self.path), [])
+
+    def test_not_departed_dismisses_it(self):
+        offboard.auto_disable(self.path, [self.cand()], self.book)
+        rec = offboard.decide(self.path, self.KEY, "restore", self.book, actor="admin:x")
+        self.assertEqual(rec["state"], offboard.DISMISSED)
+        self.assertEqual(self.book.calls, [])
 
 
 if __name__ == "__main__":

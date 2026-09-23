@@ -994,8 +994,11 @@ class VolcanoExecutor:
                 closed = True
         except volcano.VolcanoError as exc:
             if _volcano_user_missing(exc):
-                return {"login": False, "keys": [], "gone": True}
-            if "notexist" not in _volcano_code(exc):
+                # **再查一次 GetUser 确认**：错误码来自 GetLoginProfile，
+                # 判错的话，一个还活着、AK 还开着的离职号会被记成「云上已不存在」而不再处理
+                if not self.user_exists(user):
+                    return {"login": False, "keys": [], "gone": True}
+            elif "notexist" not in _volcano_code(exc):
                 raise
         keys = []
         try:

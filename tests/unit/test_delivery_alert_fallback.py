@@ -8,6 +8,7 @@
 """
 
 import argparse
+import json
 import os
 import unittest
 
@@ -77,10 +78,12 @@ class UnitFailedTests(unittest.TestCase):
 class CardTests(unittest.TestCase):
     def test_a_long_report_is_trimmed_but_says_so(self):
         card = notify.alert_card("标题", "\n".join(f"第 {i} 行" for i in range(50)))
-        texts = [e["text"]["content"] for e in card["elements"]]
-        self.assertEqual(len(texts), 31)
-        self.assertIn("还有 20 行", texts[-1])
+        elements = card["body"]["elements"]
+        self.assertEqual(len(elements), 25)  # 24 行正文 + 一行「还有多少行」
+        self.assertIn("还有 26 行", json.dumps(elements[-1], ensure_ascii=False))
+        # 真出事才是红的；待办类的卡是蓝的（见 notify._TEMPLATES）
         self.assertEqual(card["header"]["template"], "red")
+        self.assertEqual(card["schema"], "2.0")
 
 
 class UnitFileTests(unittest.TestCase):

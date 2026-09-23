@@ -219,6 +219,23 @@ def from_feishu(
 NO_AUTHORITY = 41050
 
 
+def union_id_of(open_id: str, app_id: str, app_secret: str, *, get=None, token: str = "") -> str:
+    """open_id → union_id。卡片回调只带 open_id，而管理员名单里存的是 union_id。
+
+    **不在这里判断是不是管理员**：这里只做翻译，判断在调用方（名单在别处）。
+    查不到就返回空串 —— 调用方据此拒绝，不要当成「查到了一个空的」。
+    """
+    get = get or _get
+    token = token or tenant_token(app_id, app_secret)
+    oid = urllib.parse.quote(str(open_id or ""), safe="")
+    if not oid:
+        return ""
+    body = get(f"{API}/contact/v3/users/{oid}?user_id_type=open_id", token)
+    if body.get("code"):
+        raise FeishuError(f"按 open_id 查用户失败：code={body.get('code')} msg={body.get('msg')}")
+    return str(((body.get("data") or {}).get("user") or {}).get("union_id") or "")
+
+
 def status_of(union_ids, app_id: str, app_secret: str, *, get=None, token: str = "") -> dict:
     """按 union_id 逐个查在职状态。`{union_id: 状态字典 或 None}`，None 表示查不到。
 

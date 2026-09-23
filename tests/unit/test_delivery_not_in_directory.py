@@ -113,15 +113,27 @@ class BuildTests(unittest.TestCase):
 
 
 class CardTests(unittest.TestCase):
-    def test_card_lists_person_and_every_account(self):
-        card = notify.not_found_card([GONE], base_url="https://cloud.example.com")
+    def test_card_carries_buttons_that_call_back(self):
+        """按钮要能在飞书里直接点 —— 只给链接的话，人得开面板再找一遍那一行。"""
+        rec = {
+            "platform": "jiuzhang",
+            "account": "wuji",
+            "user": "wuji-gone",
+            "person": "王昱然",
+            "signal": "飞书通讯录里找不到（没有自动停用）",
+            "state": "suspect",
+        }
+        card = notify.pending_card([rec], base_url="https://cloud.example.com")
         text = json.dumps(card, ensure_ascii=False)
+        self.assertEqual(card["schema"], "2.0")  # 1.0 的按钮回调不到新通道
         self.assertIn("王昱然", text)
-        self.assertIn("九章 wuji-gone", text)
-        # 按钮改成去 IAM 页确认删除（离职停号那一节在那里）
+        self.assertIn("wuji-gone", text)
+        self.assertIn('"callback"', text)
+        self.assertIn("jiuzhang/wuji/wuji-gone", text)
+        # 九章没有接口：按钮是「我已在控制台处理」，不是「确认删除」
+        self.assertIn("我已在控制台处理", text)
+        self.assertIn("没离职", text)
         self.assertIn("#admin/iam", text)
-        self.assertIn("确认删除", text)
-        self.assertIn("1 人", card["header"]["title"]["content"])
 
 
 class RemindTests(unittest.TestCase):
@@ -169,10 +181,12 @@ class RemindTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(len(sent), 1)
             self.assertIn("王昱然", json.dumps(sent[0], ensure_ascii=False))
-            # 他名下只有九章号：九章没有接口，不进离职停号记录（只能提醒人去控制台）
+            # 他名下只有九章号：面板停不了，但要记成待确认，提醒人去九章控制台处理
             from delivery import offboard
 
-            self.assertEqual(offboard.load(offboard.path_beside(str(Path(tmp, "people.json")))), {})
+            recs = offboard.load(offboard.path_beside(str(Path(tmp, "people.json"))))
+            self.assertEqual(list(recs), ["jiuzhang/wuji/wuji-gone"])
+            self.assertEqual(recs["jiuzhang/wuji/wuji-gone"]["state"], offboard.SUSPECT)
             _code, again = self._run(tmp, STAFF)
             self.assertEqual(again, [])
 
