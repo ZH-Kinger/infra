@@ -222,3 +222,281 @@ API 建出来的定义「无法从审批管理后台或以 API 方式停用、�
   https://www.feishu.cn/hc/zh-CN/articles/360049067392
 - 管理员设置审批修改规则（流程中的审批不支持修改）
   https://www.feishu.cn/hc/zh-CN/articles/230164856321
+
+---
+---
+
+# 第二轮：API 建的定义为什么在审批后台列表里看不到？
+
+> 调研日期 2026-09-23 / researcher。**全程只读**：只查了官方文档、下载并解包了官方 SDK `lark-oapi 1.7.3` 读它的请求体 model、抓了一份帮助中心 HTML 解析正文。**没有调用任何飞书接口（读接口也没调），没有创建/修改/覆盖任何审批定义。**
+
+## 结论先行
+
+| 问题 | 结论 | 可信度 |
+|---|---|---|
+| 「没设分组 → 后台列表看不见」这个假设 | **证伪**。原生「创建审批定义」接口**根本没有分组字段**（不是漏传，是不存在）；而「分组」管的是**审批发起页**的分区，不是后台列表 | 【文档】+【SDK 实测】 |
+| `form_widget_relation` 里的 `groups` 是不是「审批分组」 | **不是**。官方对它的定义是「组件之间值关联关系」，即控件联动/选项关联。与审批分组无关 | 【文档】 |
+| 能不能用接口给原生定义设分组 | **不能**。`group_code`/`group_name` 只存在于**三方审批定义** `POST /approval/v4/external_approvals`，原生定义没有对应参数 | 【文档】+【SDK 实测】 |
+| 有没有别的接口能给已存在的定义挪分组 | **没有**。approval v4 的「审批定义」资源下总共只有 4 个端点：create / get / subscribe / unsubscribe | 【SDK 实测】+【文档】 |
+| 那真正原因是什么 | **极可能是「这条定义没有任何流程管理员」**。后台能看到并管理哪些审批，由**管理员权限范围**决定；`process_manager_ids`（= 审批流程管理员）不传 = 谁都不是这条定义的流程管理员 | 【文档】，**待一次只读 GET 坐实** |
+| 怎么让它出现在后台 | **创建时传 `process_manager_ids`**（覆盖重建时补上）。这是接口侧唯一能影响「谁能在后台管这条定义」的字段 | 【文档】+【推测：能否因此出现在列表未经实证】 |
+| `icon` 不传 | 默认 0，只影响图标长相，**与列表可见性无关** | 【文档】 |
+
+---
+
+## ① 「分组」假设：证伪
+
+### 1.1 原生创建接口的请求体，一个字段不漏
+
+我把官方 Python SDK `lark-oapi 1.7.3` 下载解包（只读，装在 scratchpad，没进项目），读 `lark_oapi/api/approval/v4/model/approval_create.py` 的字段声明 —— SDK 的 model 是按官方 API spec 生成的，比网页渲染更不容易漏：
+
+```
+ApprovalCreate 的全部字段（11 个）：
+  approval_name / approval_code / description / viewers / form /
+  node_list / settings / config / icon / i18n_resources / process_manager_ids
+```
+
+**没有 group / group_code / group_name / category / folder / 任何近似字段。**（`help_url` 在 `config` 里，不是顶层。）
+
+查询参数（`create_approval_request.py`）只有两个：`user_id_type`、`department_id_type`。
+
+→ 你查到的入参清单是全的，**不是你漏看了**。【SDK 实测】
+
+### 1.2 分组只属于「三方审批定义」
+
+同一个 SDK，`external_approval.py`（`POST /approval/v4/external_approvals` 的请求体）：
+
+```
+approval_name / approval_code / group_code / group_name / description /
+external / viewers / managers
+```
+
+官方对这两个字段的原文【文档】：
+
+> `group_code`：审批定义所属审批分组，用户自定义。**如果传入的 group_code 当前不存在，则会新建审批分组**
+> `group_name`：审批分组名称，**审批发起页**的审批定义分组名称来自该字段
+
+注意最后五个字：**审批发起页**。分组管的是发起页的分区渲染 —— 而发起页**你本来就看得到**。这条假设自己把自己否掉了：如果缺分组会让发起页渲染不出来，你那两条新定义在「发起审批」列表里也该消失，但实测是能发起的。
+
+三方审批定义概述页同样把分组归在「三方审批接入飞书**审批中心**后，在审批中心内的名称、分组、可见范围等基础信息」里。【文档】
+
+### 1.3 `form_widget_relation.groups` 不是它
+
+「查看指定审批定义」对该字段的原文描述是【文档】：
+
+> `form_widget_relation`：**组件之间值关联关系**
+
+即飞书帮助中心说的「选项关联 / 控件联动」（选了 A 控件某项，联动限制 B 控件的可选范围）。它的 `groups` 是**联动规则分组**，和审批分组没有任何关系。
+
+而且它**是创建接口可以传的**：SDK 的 `ApprovalForm` 有两个字段 `form_content` 和 `widget_relation`。所以老定义 `{"groups":[]}` / 新定义 `null` 这个差异的解释是：**老那条被人在后台图形化编辑器里保存过**（编辑器会写出一个空的联动规则容器），纯 API 建的不写这个字段就是 null。**它是「被后台编辑过」的痕迹，不是「可见性」的原因** —— 因果方向反了。【文档】+【推测：后台保存会写出空容器，未实证】
+
+---
+
+## ② 真正的解释：**流程管理员 / 权限范围**（你的新假设，文档层面站得住）
+
+### 2.1 `process_manager_ids` 就是「审批流程管理员」
+
+创建接口原文【文档】：
+
+> `process_manager_ids`：**审批流程管理员**的用户 ID 列表。**ID 类型与查询参数 `user_id_type` 取值一致**，列表最大长度为 200
+
+- 类型：string 数组，**选填**；
+- id 形态由 query 参数 `user_id_type` 决定，**默认 `open_id`** —— 也就是说你不显式传 `user_id_type` 时，数组里要放 `ou_xxx` 的 open_id；
+- 不传 = 不设置任何流程管理员。文档没有一句「不传会自动把创建者/应用设为管理员」。
+
+### 2.2 后台能看到/管到哪些审批，由权限范围决定（官方表格）
+
+帮助中心《管理员设置审批管理员》原文表格（我抓 HTML 解出来的正文，逐字）【文档】：
+
+> 在飞书审批中，审批管理员可以通过审批管理后台对企业中的审批进行管理，包括表单设计、流程设计、数据查看等。审批管理员分为以下 3 类：
+
+| 类型 | 说明 | **权限范围** | 操作权限 |
+|---|---|---|---|
+| **审批应用管理员** | 飞书管理后台中设置的：超级管理员 / 权限范围包括「审批」的管理员 | **全部审批** | 创建新审批；编辑/停用/删除审批（全部）；查看/导出数据（全部）；增删流程管理员（全部）；增删子管理员 |
+| **审批子管理员** | 审批管理后台中设置的子管理员 | **全部审批 或 限制范围（仅自己作为负责人的审批）** | 创建新审批；编辑/停用/删除（全部或限定）；查看/导出（限定）；增删流程管理员（全部或限定）。不可增删子管理员 |
+| **审批流程管理员** | 审批管理后台中，**针对单个审批**所设置的流程管理员 | **单个审批** | 编辑/停用/删除审批（限定）；查看/导出数据（限定）；增删流程管理员（限定）。不可创建新审批、不可增删子管理员 |
+
+> 设置审批流程管理员：进入 **审批管理后台 > 审批管理** 页面 …… 在 **基础信息** 页面，找到 **流程管理员** 设置项
+
+出处：https://www.feishu.cn/hc/zh-CN/articles/360035662614
+
+**这张表直接解释了三个现象**：
+
+1. 用户如果不是「审批应用管理员（权限范围=全部审批）」，而是**子管理员（限制范围）或只是某些审批的流程管理员**，那他在后台看到的就只有「自己有份」的那些审批；
+2. 老定义 `301E99EB` 他能看见、能编辑、能改审批人 → 他是**那一条**的流程管理员（或那条在他的负责范围内）；
+3. 新建的两条没有任何流程管理员 → 不在他的范围内 → **列表里没有，直开编辑页 `noPermission`**。
+
+`noPermission` 这个结果尤其关键：**它是权限判定，不是渲染缺失**。分组缺失不可能产出 `noPermission`（顶多是不分区/落到默认区）。你的判断是对的，**分组那条线可以放下了**。
+
+### 2.3 一个必须一起排掉的替代解释
+
+上表同时说明：**如果用户本人是超级管理员 / 审批应用管理员，权限范围是「全部审批」，那他应该看得见所有审批（包括 API 建的）**。所以在下结论前请确认一句：
+
+> 用户在 **飞书管理后台 > 企业设置 > 管理员权限** 里是不是超级管理员、或有没有含「审批」的管理员角色？
+
+- 如果**是**超级管理员却仍然 `noPermission` → 「没有流程管理员」解释不了，得换方向（那时更可能是「API 建的定义在后台被整体排除在管理面之外」，见 ③）；
+- 如果**不是**（只是子管理员/流程管理员）→ 流程管理员假设基本坐实，补 `process_manager_ids` 大概率能解决。
+
+---
+
+## ③ 决定性的只读验证（**一条 GET 就能判**，我没替你跑）
+
+「查看指定审批定义」有个默认关闭的开关【文档】：
+
+> `approval_admin_ids`：**有数据管理权限的审批流程管理员的 open_id**，由参数 `with_admin_id` 控制是否返回（默认 `false`）
+
+```
+GET /open-apis/approval/v4/approvals/301E99EB-A4BC-4F08-AFAF-46906A006C08?with_admin_id=true
+GET /open-apis/approval/v4/approvals/98039779-906B-493F-946A-B96E685FB640?with_admin_id=true
+```
+
+判读：
+
+- 老那条返回**非空** `approval_admin_ids`（里面应该有用户自己的 open_id）、新那条**空/缺** → **假设坐实**，直接补 `process_manager_ids` 重建；
+- 两条**都空** → 老那条的可见性来自别处（用户是子管理员且那条在他负责范围内、或他其实是应用管理员），补 `process_manager_ids` 不一定管用 —— 那就别赌，见 ④ 的兜底路径。
+
+> 顺带修正上一轮的一个细节：你那份 `/tmp/approval-backup-*.json` 只有 6 个键、没有 `approval_admin_ids`，**不是因为老定义没有管理员**，而是因为当时没传 `with_admin_id=true`。那份备份对这个问题**不能作证**。
+
+---
+
+## ④ 回答第二轮提的 5 个问题
+
+### Q1 管理员字段叫什么、什么形状
+
+`process_manager_ids`，顶层字段，string 数组，最大 200；id 类型跟随 query 参数 `user_id_type`（默认 `open_id`）。建议**显式**带上 `?user_id_type=open_id`，别吃默认值 —— 这类默认值改起来你不会收到通知。
+
+```
+POST /open-apis/approval/v4/approvals?user_id_type=open_id
+{
+  ...,
+  "process_manager_ids": ["ou_xxxxxxxx"]      // 用户本人的 open_id；可多个
+}
+```
+
+### Q2 不传的后果，官方有没有明说
+
+**没有明说**。文档只说这个字段是选填、是「审批流程管理员的用户 ID 列表」，**没有**任何一句「不传则某某人自动成为管理员」，也**没有**一句「不传则后台不可见」。
+
+「不传 = 这条定义没有流程管理员」是字面推论【文档】；「没有流程管理员 ⇒ 非应用管理员看不见也进不去」是把上面那张权限范围表接上去的推论【推测，但与你观察到的三个现象全部吻合】。
+
+### Q3 后台列表是不是只显示「我是管理员」的那些
+
+**按权限范围显示**，不完全等于「我是管理员的那些」：
+
+- 审批应用管理员（超管/带审批权限的角色）：**全部审批**；
+- 子管理员：全部 或 仅自己作为负责人的；
+- 流程管理员：仅被指定的单个审批。
+
+所以准确表述是：**列表是按当前操作者的权限范围过滤的**。对非应用管理员来说，效果就是「只看得到我有份的」。【文档】
+
+### Q4 覆盖重建时该一起补的
+
+| 字段 | 要不要补 | 说明 |
+|---|---|---|
+| `process_manager_ids` | **必补** | 本轮的核心修复；放用户本人 open_id（建议把值班的第二个人也加上，避免单点） |
+| `user_id_type=open_id` | **必带**（query） | 决定上面那个数组的 id 形态 |
+| `icon` | 可补 | 枚举 0~24，**默认 0**。原文：「审批图标枚举，默认为 0」。**只影响图标，与列表可见性无关** —— 不传不会导致看不见 |
+| `kind` 控件 | 必补 | 见下 |
+| `summary` 控件 | 必补 | 见下 |
+| `form.widget_relation` | 不用 | 「组件之间值关联关系」，你没有控件联动需求就别传 |
+| `config.can_update_form/process/viewer/revert` | 建议 `true` | 语义是「**允许在后台修改**表单/流程/可见范围/撤回设置」。你已经试过它不能解决可见性，但一旦可见性修好，它决定后台还能不能改 —— 保持 true |
+| `description` / `settings` | 按原样给 | 全量覆盖，不给就没了 |
+
+**「还有没有别的不传就没法管理/没法显示的字段」**：把 11 个字段过了一遍，**没有第二个**。`viewers` 管的是「谁能发起/看到发起入口」（你已实测正常）；`config` 管「后台能改什么」；`icon` 管图标；其余都是内容。**唯一与「谁能在后台管这条定义」相关的，就是 `process_manager_ids`。**【SDK 实测 + 文档】
+
+#### `kind` / `summary` 控件形状
+
+控件 JSON 的可用 type【文档】：`input` / `textarea` / `text`(纯说明) / `number` / `amount` / `telephone` / `date` / `dateInterval` / `radioV2` / `checkboxV2` / `contact` / `address` / `image` / `attachmentV2` / `connect` / `fieldList`。
+
+面板侧的约束（`src/delivery/approval.py`）：
+
+- `WIDGET_TEXT = ("input", "textarea")`、`WIDGET_PICK = ("radioV2", "radio")`；
+- `_DEFAULT_TYPES = {"summary": "textarea", "reason": "textarea"}` —— **`summary` 走 `textarea`，配置里不写 type 也是这个默认**；
+- `kind` 没有默认映射 → 落到 `"input"`。
+
+所以最省事、与面板现状**完全对齐**的形状就是：
+
+```json
+{"id":"kind",   "type":"input",    "required":true, "name":"@i18n@w_kind"}
+{"id":"summary","type":"textarea", "required":true, "name":"@i18n@w_summary"}
+```
+
+（`form_content` 里的 `id` 用可读串 = 它就是稳定的 custom_id；`name` 必须 `@i18n@` 开头，中文放 `i18n_resources`。）
+
+**`kind` 要不要做成只有一个选项的 `radioV2`？——不建议。**
+
+- 面板 `_field()` 对 `radioV2` 和 `input` 的 value 形状处理不同（`WIDGET_PICK` 那条分支），做成单选就得同步配置里的 `type`，多一处能漂的东西；
+- 单选只有一个选项对填单人没有任何约束价值，反而在后台编辑时更难加值；
+- `kind` 是**面板自己塞进去的**机器字段（`service`），不是人填的 —— 用 `input` + 建议加 `"required":false` 或直接 `required:true` 由面板写死值即可。
+
+> 如果希望人工发起时也不误填，正解是用 `"type":"text"`（纯说明控件）另加一行提示，而不是把 `kind` 改成单选。
+
+### Q5 覆盖时这些字段要不要全量给
+
+**要。** 创建接口原文【文档】：
+
+> 该参数传入指定审批定义 Code 时，表示调用该接口更新该审批定义内容，**更新方式为覆盖原定义内容的全量更新**。
+
+「全量覆盖」= **你没传的就没了**。具体到这次：
+
+- 不传 `process_manager_ids` → 管理员清空（这正是你现在的状态）；
+- 不传 `icon` → 回落默认 0；
+- 不传 `description` / `settings` / `config` → 按未设置处理；
+- `approval_name` / `viewers` / `form` / `node_list` / `i18n_resources` 是**必填**，漏了直接参数错误。
+
+另外两条覆盖时必须心里有数的（上一轮已详述，这里只列结论）：
+
+- **widget id 会漂**：官方只保证 `custom_id` 不变，不保证默认 id 不变。覆盖后**必须重跑 `delivery approval widgets --write`**，否则面板会拿旧 id 取单号 → 所有审批被判「申请单号不一致」；
+- **API 建的定义，后台和 API 都停用不了、删不掉**（官方原文）。覆盖失败你没有「删了重来」这条退路，只能再覆盖一次。
+
+---
+
+## ⑤ 那到底「有没有办法让 API 建的定义出现在后台列表里」
+
+给一个分层的答复，按确定性从高到低：
+
+1. **【文档】接口层面唯一能试的就是 `process_manager_ids`。** 它是 11 个字段里唯一与「谁能在后台管这条定义」挂钩的，语义（审批流程管理员）与后台权限范围表严丝合缝。建议**先跑 ③ 那条 GET 坐实，再覆盖重建**。
+2. **【文档】「分组」这条路不存在**，别再找了：原生创建接口没有该字段，也没有任何 update/patch/分组端点（approval v4 定义资源只有 create/get/subscribe/unsubscribe）。
+3. **【文档】官方从未承诺 API 建的定义会出现在后台列表里。** 官方对这类定义的唯一明确表述是两条**负面**的：
+   > 通过该 API 创建的审批定义，**无法从审批管理后台或以 API 方式停用、删除**，请谨慎调用。
+   > **不推荐企业自建应用使用该 API 创建审批定义**，如有需要，尽量联系企业管理员在审批管理后台创建定义。
+
+   这两句**不构成**「后台根本看不到」的明说 —— 「无法从后台停用、删除」在字面上更像是「看得到但这两个操作不给你」。但它确实表明：**后台对 API 建的定义有专门的、被削弱的管理面**，所以即使补了流程管理员，**也不保证 `停用/删除` 按钮会出现**（编辑大概率可以，因为老那条就是被编辑过的）。
+4. **【推测】补了 `process_manager_ids` 之后仍然看不见**，是有可能的。真到那一步，**兜底路径只有一条**：**让企业管理员在审批管理后台手工建这条定义**（官方推荐路径），面板只消费它的 `approval_code`；代价是表单/流程改动要人工同步，收益是它从此是一条「正常」的后台定义，可编辑、可停用、可删、有版本管理。
+
+**一句话给用户**：分组不是原因，别等分组；原因大概率是「这条定义没有流程管理员」，补 `process_manager_ids` 重建一次即可；如果补了还看不见，就改走「请管理员在后台手工建」这条官方推荐路径，不要继续在 API 上试。
+
+---
+
+## ⑥ 残余不确定（明确列出来，别当已证实）
+
+| 项 | 状态 |
+|---|---|
+| 补了 `process_manager_ids` 后，定义是否真的出现在后台列表 | **未实证**。文档无明说，只有权限范围表的推论 |
+| 用户当前到底是哪一类管理员 | **未确认**，决定 ②2.3 的分支。请在 飞书管理后台 > 企业设置 > 管理员权限 看一眼 |
+| 后台保存会写出 `form_widget_relation={"groups":[]}` | 【推测】。是对老/新定义差异的最合理解释，但没实证 |
+| 即使可见，`停用/删除` 按钮是否可用 | **官方明说不可用**（对 API 建的定义） |
+| 覆盖后 widget id 会不会漂 | 官方只保证 custom_id 不变 → **按会漂处理**，覆盖完必须重跑 widgets |
+
+---
+
+## 第二轮出处一览
+
+- 创建审批定义（`process_manager_ids` 原文、`icon` 默认 0、query 参数 `user_id_type`/`department_id_type`、全量覆盖、API 定义不可停用删除、不推荐自建应用使用）
+  https://open.feishu.cn/document/server-docs/approval-v4/approval/create?lang=zh-CN
+- 查看指定审批定义（`approval_admin_ids` = 审批流程管理员 open_id，由 `with_admin_id` 控制返回，默认 false；`form_widget_relation` = 组件之间值关联关系）
+  https://open.feishu.cn/document/server-docs/approval-v4/approval/get?lang=zh-CN
+- 创建三方审批定义（`group_code`/`group_name` 原文：不存在则新建分组；发起页分组名来自 group_name）
+  https://open.feishu.cn/document/server-docs/approval-v4/external_approval/create?lang=zh-CN
+- 三方审批定义概述（分组/名称/可见范围属于「审批中心」基础信息）
+  https://open.feishu.cn/document/server-docs/approval-v4/external_approval/overview?lang=zh-CN
+- 审批概述（v4 端点全集；审批定义下只有 create + get + subscribe + unsubscribe）
+  https://open.feishu.cn/document/server-docs/approval-v4/approval-overview?lang=zh-CN
+- **管理员设置审批管理员**（3 类管理员与权限范围表；流程管理员在「审批管理 > 基础信息」设置）
+  https://www.feishu.cn/hc/zh-CN/articles/360035662614
+- 管理员设置审批选项关联（控件联动 = form_widget_relation 的业务含义）
+  https://www.feishu.cn/hc/zh-CN/articles/270021758316
+- 审批定义表单控件参数（可用 type 清单）
+  https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/approval-v4/approval/approval-definition-form-control-parameters
+- 官方 SDK `lark-oapi` 1.7.3（请求体 model 逐字段：`ApprovalCreate` 11 字段无分组；`ExternalApproval` 有 group_code/group_name；approval 资源只有 create/get/subscribe/unsubscribe）
+  https://pypi.org/project/lark-oapi/

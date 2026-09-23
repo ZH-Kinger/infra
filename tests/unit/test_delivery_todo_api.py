@@ -25,6 +25,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
+from delivery import catalog as catalog_mod
 from delivery import server as server_mod
 from delivery import tickets as tickets_mod
 from delivery import todo as todo_mod
@@ -912,6 +913,52 @@ class RevokedOrphanTests(Base):
             todo_mod.collect_expiring(louder, [row], now=env.now[0])
         self.assertEqual([i.kind for i in louder.items], ["cred_orphan"])
         self.assertEqual(louder.items[0].group, todo_mod.URGENT)
+
+
+class ServiceTicketTests(Base):
+    """自建服务的单子在这一页上算什么。
+
+    「快到期 / 已过期」那一栏的文案是**按凭证写的**（「过期的凭证留在云上就是一把没人
+    管的密钥」），而服务访问云上没有任何东西：到期由 `flows.revoke_expired` 自己推成
+    已收回。把它放进来只会得到一条措辞不对、而且十分钟后自己消失的待办 ——
+    那种条目会教会人忽略整页待办。
+    """
+
+    def service_ticket(self, **over):
+        row = {
+            "id": "REQ-SVC",
+            "kind": catalog_mod.KIND_SERVICE,
+            "status": tickets_mod.DONE,
+            "template": {"id": "svc-mlflow", "kind": "service", "service": "mlflow"},
+            "expires_at": iso(self.clock() + 2 * DAY),
+            "expires_at_ts": self.clock() + 2 * DAY,
+            "done_at_ts": self.clock() - DAY,
+            "created_at": iso(self.clock() - DAY),
+        }
+        row.update(over)
+        return row
+
+    def test_a_service_ticket_never_shows_up_as_an_expiring_credential(self):
+        self.tickets(self.service_ticket())
+        self.assertNotIn("cred_expiring", self.kinds())
+        # 已经过期的也一样：那一栏说的是「云上还留着东西」，服务访问没有
+        self.tickets(self.service_ticket(expires_at_ts=self.clock() - DAY))
+        self.assertNotIn("cred_expired", self.kinds())
+
+    def test_a_permission_ticket_still_does(self):
+        """上面那条不是把整栏关掉了 —— 同样快到期的权限单照样要报。"""
+        self.tickets(
+            {
+                "id": "REQ-PERM",
+                "kind": "permission",
+                "status": tickets_mod.DONE,
+                "expires_at": iso(self.clock() + 2 * DAY),
+                "expires_at_ts": self.clock() + 2 * DAY,
+                "done_at_ts": self.clock() - DAY,
+                "created_at": iso(self.clock() - DAY),
+            }
+        )
+        self.assertIn("cred_expiring", self.kinds())
 
 
 class ExecutorTests(Base):

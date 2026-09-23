@@ -37,7 +37,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
@@ -204,6 +204,56 @@ class ApprovalConfig:
     #: open_id 按应用隔离，拿别的应用的 open_id 过来会回 `open_id cross app`。
     comment_open_id: str = ""
 
+    #: 这套配置的名字。`""` = 老配置（文件顶层那份），也就是今天所有申请走的那条。
+    #: **它是记在申请单上的历史事实**，不是活值 —— 见 `load_map` 的说明
+    name: str = ""
+
+    @classmethod
+    def load_map(cls, path: Optional[str]) -> dict:
+        """读出这个文件里的**全部**审批定义，`{名字: 配置}`。老配置的名字是 `""`。
+
+        为什么要多定义：一条定义的表单要伺候所有申请类型，15 个控件里大半对每张单子
+        都是空的，而「申请类型」那一栏在单选里没有对应选项时是**静默留空**的 ——
+        审批人看到一张类型不明、装着两个通用字段的单子，而他正是那道门。
+
+        **加法式**：`load()` 一个字没改，老配置文件不动也能跑。新定义写在可选的
+        `definitions` 里：
+
+            {"approval_code": "…", "widgets": {…},            ← 老的，行为逐字不变
+             "definitions": {                                  ← 新增，可以没有
+               "service": {"approval_code": "…", "widgets": {…}}}}
+
+        **每条定义自带整套 widgets，不共用。** 曾经有人只放宽 `approval_code` 的比对
+        （那个 `also_accept`），结果下一道门拿**当前**配置的 widget id 去表单里取单号，
+        在途单照样全拒、报错还变成「单号不一致」，把人引去查工单。code 和控件映射是
+        一对，必须绑在一起。
+        """
+        base = cls.load(path)
+        if base is None:
+            return {}
+        out = {"": base}
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        extra = data.get("definitions") or {}
+        if not isinstance(extra, dict):
+            raise ApprovalError("审批配置的 definitions 必须是对象")
+        for name, spec in extra.items():
+            if not isinstance(name, str) or not name.strip():
+                raise ApprovalError("definitions 的键必须是非空字符串")
+            if name.strip() in out:
+                raise ApprovalError(f"definitions 里的 {name!r} 和已有定义重名")
+            if not isinstance(spec, dict):
+                raise ApprovalError(f"definitions.{name} 必须是对象")
+            # 没写的项继承顶层那份（链接模板、自审开关、评论身份通常是一样的），
+            # 但 approval_code 和 widgets **必须自己给** —— 继承它们就是上面说的那个坑
+            merged = {k: v for k, v in data.items() if k != "definitions"}
+            merged.update(spec)
+            for key in ("approval_code", "widgets"):
+                if key not in spec:
+                    raise ApprovalError(f"definitions.{name} 必须自己给 {key}（不能继承）")
+            one = cls._from_dict(merged, where=f"definitions.{name}")
+            out[name.strip()] = replace(one, name=name.strip())
+        return out
+
     @classmethod
     def load(cls, path: Optional[str]) -> Optional[ApprovalConfig]:
         if not path or not Path(path).exists():
@@ -214,27 +264,37 @@ class ApprovalConfig:
             raise ApprovalError(f"读不了审批配置 {path}：{exc}") from exc
         if not isinstance(data, dict):
             raise ApprovalError("审批配置必须是对象")
+        return cls._from_dict(data, where="审批配置")
+
+    @classmethod
+    def _from_dict(cls, data: Mapping, *, where: str) -> ApprovalConfig:
+        """一份配置字典 → ApprovalConfig。**校验逐字照搬自原来的 `load`**，没有放宽。
+
+        抽出来只为让 `load_map` 里的每条新定义走同一套校验 —— 两套校验迟早会分叉，
+        而分叉的那一天，松的那边发出去的是一条没人核对过的审批配置。
+        `where` 只进错误消息，让人知道是顶层那份还是 definitions 里的哪一条。
+        """
         code = data.get("approval_code")
         widgets = data.get("widgets")
         if not isinstance(code, str) or not code.strip():
-            raise ApprovalError("审批配置缺 approval_code")
+            raise ApprovalError(f"{where}缺 approval_code")
         if not isinstance(widgets, dict):
-            raise ApprovalError("审批配置的 widgets 必须是对象")
+            raise ApprovalError(f"{where}的 widgets 必须是对象")
         widgets = {k: _widget(k, v) for k, v in widgets.items()}
         if any(k not in widgets for k in WIDGET_KEYS):
-            raise ApprovalError(f"审批配置的 widgets 必须包含 {', '.join(WIDGET_KEYS)}")
+            raise ApprovalError(f"{where}的 widgets 必须包含 {', '.join(WIDGET_KEYS)}")
         urls = {}
         for key in ("instance_url", "instance_url_mobile"):
             url = data.get(key, "")
             if url and not valid_instance_url(url):
-                raise ApprovalError(f"审批配置的 {key} 必须是 https 地址，且包含 {{instance_code}}")
+                raise ApprovalError(f"{where}的 {key} 必须是 https 地址，且包含 {{instance_code}}")
             urls[key] = url or ""
         self_ok = data.get("allow_self_approval", False)
         if not isinstance(self_ok, bool):
-            raise ApprovalError("审批配置的 allow_self_approval 必须是 true / false")
+            raise ApprovalError(f"{where}的 allow_self_approval 必须是 true / false")
         commenter = data.get("comment_open_id", "")
         if not isinstance(commenter, str) or (commenter and not commenter.startswith("ou_")):
-            raise ApprovalError("审批配置的 comment_open_id 必须是 ou_ 开头的 open_id")
+            raise ApprovalError(f"{where}的 comment_open_id 必须是 ou_ 开头的 open_id")
         return cls(
             approval_code=code.strip(),
             widgets=dict(widgets),

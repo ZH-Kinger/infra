@@ -299,10 +299,18 @@ class Harness:
         self.now = [1_800_000_000.0]
         self.store = t.TicketStore(str(self.dir / "tickets.json"), clock=lambda: self.now[0])
         self.approval = FeishuApproval(CONFIG, lambda: "tenant-token", transport=self.feishu)
+        #: **额外的**审批定义，模拟 approval.json 里的 `definitions`。
+        #: 空名不放这里 —— 它实时读 `self.approval`，因为好几条用例是在构造之后
+        #: 才替换 `self.approval` 的（换成必失败的那个、或置成 None）。
+        #: 在这儿存一份快照的话，那些用例就换了个寂寞。
+        #: **认不出的名字返回 None**，和线上一样 —— 回落到老那条的话，
+        #: 「模板指向一条没配的定义」这种错在用例里就永远暴露不出来
+        self.approvals = {}
         self.flows = Flows(
             store=self.store,
             catalog=lambda: catalog_mod.parse(self.templates),
             approval=lambda: self.approval,
+            approvals=self._approval_by_name,
             roster=_roster,
             executor=lambda platform, account: self.executor,
             issuer=lambda platform, account: self.issuer or self.executor,
@@ -312,6 +320,25 @@ class Harness:
             write_iam=self._write_iam,
             clock=lambda: self.now[0],
         )
+
+    def _approval_by_name(self, name):
+        """按名字取审批定义，模拟线上 `Backend.approvals`。
+
+        空名 = 老那条，**实时读 `self.approval`**（用例会在构造之后替换它）。
+        显式注册过的优先（用例要验「两条定义是两个不同对象」时往 `self.approvals`
+        里塞）；没注册但**模板自己声明了**这个名字的，当作 approval.json 里配了它 ——
+        线上 `health.approval()` 正是强制这一点（模板指向一条没配的定义会报 CRIT）。
+
+        **两者都不是的名字返回 None，不回落到老那条。** 回落的话，
+        「模板指向一条根本没配的定义」这类错在用例里就永远暴露不出来。
+        """
+        name = str(name or "")
+        if not name:
+            return self.approval
+        if name in self.approvals:
+            return self.approvals[name]
+        declared = {spec.get("approval") for spec in self.templates.get("templates", ())}
+        return self.approval if name in declared else None
 
     def _write_iam(self, union_id, platform, account, username):
         if self.iam_fail:

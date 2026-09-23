@@ -433,6 +433,7 @@ class Env:
             store=self.store,
             catalog=lambda: catalog_mod.parse(TEMPLATES),
             approval=lambda: self.approval,
+            approvals=lambda name: self.approval if not name else None,
             roster=_roster,
             executor=lambda platform, account: self.executor,
             issuer=lambda platform, account: self.executor,

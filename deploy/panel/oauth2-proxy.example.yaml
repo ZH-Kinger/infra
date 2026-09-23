@@ -15,7 +15,8 @@
 #     --skip-auth-route='^/c/' \
 #     --skip-auth-route='^/api/pickup$' \
 #     --skip-auth-route='^/pickup\.js$' \
-#     --skip-auth-route='^/app\.css$'
+#     --skip-auth-route='^/app\.css$' \
+#     --skip-auth-route='^/api/service-access$'
 # 环境变量：
 #   PANEL_PROXY_SECRET   和面板 DELIVERY_PROXY_SECRET 同一个值
 #
@@ -36,6 +37,10 @@
 #                        生产上不通 —— 而开发机和单测里看不出来。
 #                        这几条路径本身不泄露任何东西：密钥在链接的 # 之后，浏览器不会发给
 #                        服务端，密钥是 256 位随机数、服务端不存也解不开密文。
+#                        `/api/service-access` 同理：调它的是自建服务的网关（跑在自己的
+#                        公网机器上），没有、也不该有公司 IAM 账号。不放行的话网关拿到的是
+#                        登录重定向或 401，而它是 fail-closed 的 —— 表现为「那个服务全员
+#                        进不去，面板一切正常」。它的门是专用令牌，不是登录态。
 #                        **注意这是命令行参数**，alpha 配置文件里没有对应字段。
 #                        改完用一个未登录的浏览器真开一次 /c/... 链接确认。
 

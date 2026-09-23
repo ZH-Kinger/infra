@@ -133,5 +133,59 @@ class AllowlistTests(unittest.TestCase):
             self.assertFalse(h.mine(body))
 
 
+class BackendAllowlistTests(unittest.TestCase):
+    """白名单是从 `approval.json` 里**所有**定义的 code 拼出来的，不只是老那条。
+
+    漏了新定义的后果很安静：飞书那边批完了，回调打过来被 `mine()` 判成「别人的单子」
+    直接丢掉 —— 面板永远不知道它批了，单子停在「审批中」不动。两边各自看都正常
+    （飞书说已通过，面板说在等审批），没有任何一处报错。
+    """
+
+    OLD = "301E99EB-A4BC-4F08-AFAF-46906A006C08"
+    SVC = "9A1B2C3D-0000-4F08-AFAF-46906A006C08"
+
+    def backend(self, data):
+        import json
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from delivery import approval_hook as hook_mod
+        from delivery.server import Backend
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "approval.json"
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        patch = mock.patch.dict(os.environ, {hook_mod.ENV_VERIFY_TOKEN: "t"})
+        patch.start()
+        self.addCleanup(patch.stop)
+        return Backend(approval_path=str(path), platforms={})
+
+    def config(self, code):
+        return {
+            "approval_code": code,
+            "widgets": {"ticket_id": "w1", "kind": "w2", "summary": "w3", "reason": "w4"},
+        }
+
+    def test_every_definition_in_the_file_is_accepted(self):
+        data = dict(self.config(self.OLD), definitions={"service": self.config(self.SVC)})
+        hook = self.backend(data).approval_hook()
+        self.assertTrue(hook.mine({"event": {"approval_code": self.OLD}}), "老那条")
+        self.assertTrue(hook.mine({"event": {"approval_code": self.SVC}}), "服务访问那条")
+        self.assertFalse(hook.mine({"event": {"approval_code": "SOMEONE-ELSES-LEAVE"}}))
+
+    def test_without_extra_definitions_nothing_changes(self):
+        hook = self.backend(self.config(self.OLD)).approval_hook()
+        self.assertTrue(hook.mine({"event": {"approval_code": self.OLD}}))
+        self.assertFalse(hook.mine({"event": {"approval_code": self.SVC}}))
+
+    def test_an_unreadable_config_still_fails_closed(self):
+        """配置读不了 → 白名单为空 → 一条都不处理（而不是全都处理）。"""
+        hook = self.backend([]).approval_hook()
+        self.assertFalse(hook.mine({"event": {"approval_code": self.OLD}}))
+
+
 if __name__ == "__main__":
     unittest.main()

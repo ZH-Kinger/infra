@@ -193,6 +193,13 @@ NAMES = {p.id: p.name for p in ALL}
 #: 没有采集接口、账号靠人工登记的平台（见 offline_accounts）。**只有显示名**：
 #: 它们不是可申请的平台，不进 ALL / IDS —— 放进去的话申请模板、凭证发放都会以为能用
 NAMES.update({"jiuzhang": "九章"})
+#: 自建服务（MLflow 这类）。同样**只有显示名、不进 ALL / IDS** —— 它没有云账号、
+#: 没有子账号、没有策略，凡是按 IDS 遍历云的地方都不该看到它。
+#: 之所以给它一个 platform 而不是借一个真实云账号当占位：借了的话台账和审批单上会
+#: 显示「阿里云 · 某账号」，而那张单和那个云账号毫无关系 —— 在台账里说假话，
+#: 日后对账的人要为此查半天
+INTERNAL = "internal"
+NAMES.update({INTERNAL: "自建服务"})
 
 
 def get(platform: str) -> Platform:

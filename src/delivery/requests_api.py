@@ -30,7 +30,7 @@ from typing import Callable, Optional
 from . import platforms
 from . import tickets as t
 from .approval import Applicant, ApprovalError
-from .catalog import KIND_LABELS
+from .catalog import KIND_LABELS, KIND_SERVICE
 from .errors import DeliveryError
 from .flows import FlowError, Flows, password_claims
 
@@ -211,10 +211,21 @@ def ticket_view(ticket: dict, *, viewer: Caller, links: Optional[dict] = None) -
             # 要求「还有东西可作废」：清干净之后按钮还亮着的话，再点一次就是空转
             # 申请人也能作废自己的：发现外泄的第一个人通常是他，
             # 让他等管理员等于把泄漏窗口拉长；而作废只会减少权限，没有提权风险
+            # 服务访问也要有这个按钮，而且它比凭证更需要：模板可以配成不限期
+            # （MLflow 就是），到期不会自动收，页面上再没有按钮的话，唯一的收回
+            # 途径就是 curl —— 「撤不掉」这个症状在运维真正会用的界面上依然成立。
+            # 它的条件更简单：没有云上的东西要清，只要单子还开通着就能收回
             "revoke": (viewer.admin or own)
-            and ticket.get("kind") == "credential"
-            and status in (t.DONE, t.FAILED, t.CLOSED)
-            and bool(ticket.get("cred_user") or (ticket.get("sealed") or {}).get("ciphertext")),
+            and (
+                (
+                    ticket.get("kind") == "credential"
+                    and status in (t.DONE, t.FAILED, t.CLOSED)
+                    and bool(
+                        ticket.get("cred_user") or (ticket.get("sealed") or {}).get("ciphertext")
+                    )
+                )
+                or (ticket.get("kind") == KIND_SERVICE and status == t.DONE)
+            ),
         },
     }
     links = links if (own or viewer.admin) and links else {}

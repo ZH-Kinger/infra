@@ -147,6 +147,39 @@ def collect(
                 "在 identity/approval.json 里配 comment_open_id（本应用下某个管理员的 open_id）；"
                 "飞书评论接口的 user_id 必填，没有「以应用名义发」的选项",
             )
+        # 多审批定义：definitions 块写坏、或模板指向一个不存在的定义名，
+        # **不检查的话一律绿灯**，故障只在员工点提交的那一刻以 503 出现。
+        # 而 definitions 写坏还会连累回调白名单（见 server.approval_hook）
+        try:
+            table = ApprovalConfig.load_map(backend.approval_path)
+        except Exception as exc:  # noqa: BLE001 — 就是要把它报出来
+            return Check(
+                "登录与审批",
+                "飞书审批",
+                CRIT,
+                f"approval.json 的 definitions 块读不了：{exc}",
+                "修好它。写坏的时候不只是那条新定义不能用 —— 审批回调的 code 白名单"
+                "也建不起来，飞书那边批了面板收不到，单子会一直停在「审批中」",
+            )
+        try:
+            missing = sorted(
+                {
+                    tpl.approval
+                    for tpl in backend.catalog().templates
+                    if tpl.approval and tpl.approval not in table
+                }
+            )
+        except Exception:  # noqa: BLE001 — 模板读不了，templates 那条会报
+            missing = []
+        if missing:
+            return Check(
+                "登录与审批",
+                "飞书审批",
+                CRIT,
+                f"有模板指向不存在的审批定义：{'、'.join(missing)}，这些申请一提交就被拒",
+                f"在 identity/approval.json 的 definitions 里补上 {'、'.join(missing)}"
+                "（每条都要自带 approval_code 和 widgets），或者把模板的 approval 字段去掉",
+            )
         if config.allow_self_approval:
             return Check(
                 "登录与审批",
@@ -155,7 +188,13 @@ def collect(
                 "已配置，但允许申请人自己审批（allow_self_approval）",
                 "除非审批定义本身有他人把关，否则去掉 allow_self_approval",
             )
-        return Check("登录与审批", "飞书审批", OK, "已配置，开通前要求申请人以外的审批人同意")
+        extra = f"，另有 {len(table) - 1} 条独立审批定义" if len(table) > 1 else ""
+        return Check(
+            "登录与审批",
+            "飞书审批",
+            OK,
+            f"已配置，开通前要求申请人以外的审批人同意{extra}",
+        )
 
     checks.append(_safe("登录与审批", "飞书审批", approval))
 

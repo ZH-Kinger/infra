@@ -161,6 +161,7 @@ class Env:
             store=self.store,
             catalog=lambda: catalog_mod.parse(self.templates),
             approval=lambda: self.approval,
+            approvals=lambda name: self.approval if not name else None,
             roster=_roster,
             executor=self._exec,
             issuer=self._issue,

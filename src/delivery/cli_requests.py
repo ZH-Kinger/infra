@@ -758,6 +758,7 @@ def _sweep(args) -> int:
     app_id = os.environ.get("DELIVERY_FEISHU_APP_ID", "")
     secret = os.environ.get("DELIVERY_FEISHU_APP_SECRET", "")
     approval = None
+    approvals: dict = {}
     token_fn = None
     # 飞书不可用（密钥轮换、接口故障、审批配置写坏）只影响审批同步和通知；到期回收照常执行
     try:
@@ -768,6 +769,32 @@ def _sweep(args) -> int:
             token_fn = lambda: token  # noqa: E731
             if config is not None:
                 approval = FeishuApproval(config, token_fn)
+                # 空名那条**就是 approval 本身**，不另建一个：两处真相迟早会背离，
+                # 而最先背离的就是下面那条异常路径
+                approvals = {"": approval}
+                try:
+                    # **每条定义都要建。** 只建顶层那条的话，走自己审批定义的单子
+                    # （服务访问）会被拿老定义去核对 → `_checked` 判「实例不属于
+                    # 配置的审批定义」→ 每分钟一条假报错，单子还会被推成 FAILED。
+                    # 面板那条路是传了的，所以这个故障只在无人值守那条路上出现。
+                    #
+                    # **这个 try 要单独包，而且必须在 approvals 已含空名之后。**
+                    # 让它落进外面那个 except 的话：`approval` 已经赋好值了（非 None）
+                    # → 下面 steps 里的 `resume_approved` 照样被排进去 → 它对每张
+                    # APPROVED 的单子走 `_verify_approval` → `_approval_for("")` 从空表
+                    # 取不到 → 抛 503 → 单子被推成 FAILED，note 写着「没有配置飞书审批」。
+                    # definitions 里少写一个 widgets，就能把已通过的单子打成开通失败。
+                    # `load_map` 比 `load` 多校验整块 definitions，抛错概率高得多
+                    approvals.update(
+                        {
+                            key: FeishuApproval(cfg, token_fn)
+                            for key, cfg in ApprovalConfig.load_map(args.approval).items()
+                            if key
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001 — 新定义配错不能连老那条一起废
+                    broken += 1
+                    print(f"审批 definitions 读不了，这一轮只同步默认那条：{_brief(exc)}")
     except Exception as exc:  # noqa: BLE001
         # 审批同步**整个跳过**了，不是某张单子的事：这一轮确实没干成活
         broken += 1
@@ -785,6 +812,7 @@ def _sweep(args) -> int:
         store=TicketStore(args.tickets),
         catalog=lambda: load_catalog(args.templates),
         approval=lambda: approval,
+        approvals=lambda name: approvals.get(str(name or "")),
         roster=lambda: people_mod.load(args.people, bindings_path=bindings),
         executor=executor_from_env,
         # 发放身份必须显式接上。不接的话 _sign_credential 会回落成开通身份 ——

@@ -66,6 +66,7 @@ from . import review as review_mod
 from . import revoke as revoke_mod
 from . import tickets as tickets_mod
 from .approval import ApprovalConfig, FeishuApproval
+from .catalog import KIND_SERVICE
 from .catalog import load as load_catalog
 from .errors import DeliveryError
 from .feishu import FeishuError, FeishuUser, exchange_code, fetch_user
@@ -221,6 +222,22 @@ _PICKUP_TRIES = 120
 _pickup_hits: dict = {}
 _pickup_tries: dict = {}
 _pickup_lock = threading.Lock()
+#: 授权查询接口的限流。**和取件用两张独立的表**：取件的配额是按「一个人反复打开
+#: 自己的链接」定的（120 次 / 5 分钟），而这条接口的调用方是一台网关、替全公司问 ——
+#: 共用一份配额的话，几十个活跃用户就能打满，而打满之后网关 fail-closed，
+#: 表现是「MLflow 突然谁都进不去，面板一切正常」。共表还有第二个后果：
+#: 取件被人暴力试一轮，顺带就把 MLflow 关掉了。
+#:
+#: 成功的查询也计数（否则量级失控时挡不住），但阈值按机器流量定：
+#: 稳态每个用户约 1 次/分钟，冷缓存时并发成簇打过来，留足余量。
+_SVC_WINDOW = 60.0
+_SVC_TRIES = 1200
+#: 令牌不对的严格配额：这条才是防猜令牌的那道门，按「人手动试」的量级定
+_SVC_BAD_WINDOW = 300.0
+_SVC_BAD_MAX = 20
+_svc_tries: dict = {}
+_svc_bad: dict = {}
+_service_token_cache: dict = {}
 #: 面板前面有几层代理会往 X-Forwarded-For 追加。线上是 nginx → oauth2-proxy → 面板
 ENV_PROXY_HOPS = "DELIVERY_PROXY_HOPS"
 _DEFAULT_HOPS = 2
@@ -265,6 +282,77 @@ def _forwarded_hops() -> int:
         return _DEFAULT_HOPS
 
 
+def _service_for_token(header: str) -> str:
+    """`Authorization: Bearer <令牌>` → 这个令牌能查哪个服务。认不出返回空串。
+
+    **令牌决定 service，不是请求体决定。** 否则 mlflow 那个网关的令牌泄漏出去，
+    拿着它就能查所有服务的授权情况。调用方送来的 `service` 只用来和这里的结果核对，
+    对不上直接拒。
+
+    令牌文件形如 `{"mlflow": {"tokens": ["新", "旧"]}}` —— **tokens 是数组**，
+    轮换期新旧并存，换完删掉旧的即可，不用重启面板（按 mtime 重读）。
+
+    没配文件 / 读不了 → 返回空串 → 调用方拿到 403。**不是放行** ——
+    这道门的全部意义就在于「配不对就进不来」。
+    """
+    token = ""
+    parts = str(header or "").split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        token = parts[1].strip()
+    # **非 ASCII 直接拒，别拿去比。** `compare_digest` 对含非 ASCII 的 str 抛
+    # TypeError，而 Authorization 头是按 latin-1 解码的 —— 随便一个中文字节就能
+    # 让这里抛出去；do_POST 没有兜底，漏出去就是断连 + 栈进日志，而不是干净的 403
+    if not token or not token.isascii():
+        return ""
+    for service, tokens in _service_tokens().items():
+        for known in tokens:
+            # 常量时间比对：长度和内容都不该从响应时间里漏出去
+            if secrets.compare_digest(known, token):
+                return service
+    return ""
+
+
+def _service_tokens() -> dict:
+    """令牌文件的内容，`{service: (令牌, …)}`。按 mtime 缓存。
+
+    **这条是每请求都走的热路径**（网关替全公司问），不该每次都读盘 + 解析 JSON。
+    非 ASCII 的令牌在这里就丢掉：留着的话每次比对都会抛 TypeError。
+    """
+    path = os.environ.get(ENV_SERVICE_TOKENS, "")
+    if not path:
+        return {}
+    try:
+        st = Path(path).stat()
+        stamp = (path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return {}
+    with _pickup_lock:
+        cached = _service_token_cache.get("v")
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out: dict = {}
+    if isinstance(data, dict):
+        for service, spec in data.items():
+            if not isinstance(spec, dict):
+                continue
+            raw = spec.get("tokens")
+            # **必须是数组。** 写成 `"tokens": "abc123"`（少一对方括号）时，
+            # 下面那句会逐**字符**迭代它 —— 于是 `Bearer a` 就能过门，
+            # 一把 32 位的密钥退化成 1 位，而配置看起来完全正常
+            if not isinstance(raw, (list, tuple)):
+                continue
+            good = tuple(k for k in raw if isinstance(k, str) and k and k.isascii())
+            if good:
+                out[str(service)] = good
+    with _pickup_lock:
+        _service_token_cache["v"] = (stamp, out)
+    return out
+
+
 def _pickup_too_many_tries(peer: str) -> bool:
     """整体上限：这个来源五分钟里打了多少次取件接口（成功也算）。**在读请求体之前判**。"""
     now = time.time()
@@ -274,6 +362,28 @@ def _pickup_too_many_tries(peer: str) -> bool:
         _pickup_tries[peer] = tries
         _prune(_pickup_tries, now)
         return len(tries) > _PICKUP_TRIES
+
+
+def _service_too_many(peer: str) -> bool:
+    """授权查询的整体上限。**在读请求体之前判。**"""
+    now = time.time()
+    with _pickup_lock:
+        tries = [x for x in _svc_tries.get(peer, ()) if now - x < _SVC_WINDOW]
+        tries.append(now)
+        _svc_tries[peer] = tries
+        _prune(_svc_tries, now)
+        return len(tries) > _SVC_TRIES
+
+
+def _service_bad_token(peer: str) -> bool:
+    """记一次令牌失败，并回答「是不是已经该拦了」。"""
+    now = time.time()
+    with _pickup_lock:
+        bad = [x for x in _svc_bad.get(peer, ()) if now - x < _SVC_BAD_WINDOW]
+        bad.append(now)
+        _svc_bad[peer] = bad
+        _prune(_svc_bad, now)
+        return len(bad) > _SVC_BAD_MAX
 
 
 def _pickup_over_limit(peer: str, ticket_id: str) -> bool:
@@ -421,6 +531,7 @@ def _todo_view(backend) -> dict:
                     # 云上那个子账号还在不在。已关单 / 已失败但它还在 = 一把还能用的
                     # 凭证没收掉，下面 collect_expiring 靠它把这类单子捞回来
                     "cred_user": bool(row.get("cred_user")),
+                    "kind": str(row.get("kind") or ""),
                 }
             )
         todo_mod.collect_tickets(report, rows)
@@ -434,8 +545,15 @@ def _todo_view(backend) -> dict:
             [
                 r
                 for r in rows
-                if r.get("state") == tickets_mod.DONE
-                or (r.get("state") in live and r.get("cred_user"))
+                # 服务访问不进这一栏：这一栏的文案是「凭证已经过期，还没收回 /
+                # 过期的凭证留在云上就是一把没人管的密钥」，而服务访问云上没有任何东西，
+                # 到期由 `flows.revoke_expired` 自动推成已收回。放进来只会得到一条
+                # 措辞不对、且十分钟后自己消失的待办 —— 那种条目会教会人忽略待办页
+                if r.get("kind") != KIND_SERVICE
+                and (
+                    r.get("state") == tickets_mod.DONE
+                    or (r.get("state") in live and r.get("cred_user"))
+                )
             ],
         )
 
@@ -839,6 +957,14 @@ _FEISHU_HOOK = "/feishu/approval"
 _ADMIN_NUDGE = "/api/admin/nudge"
 _ADMIN_IAM = "/api/admin/iam-attributes"
 _ADMIN_IAM_FILE = "/api/admin/iam-attributes/file"
+#: 自建服务的网关问「这个人能不能用」。**机器对机器，不是浏览器** ——
+#: 现有那两道门都不适用：`_require` 认的是登录会话，`_same_origin_json` 要同源 Origin，
+#: 另一台机器上的进程两样都给不出，硬凑等于把门变成摆设。单开一条只认专用令牌的路。
+_SERVICE_ACCESS = "/api/service-access"
+#: 令牌文件。`{"mlflow": {"tokens": ["新", "旧"]}}` —— tokens 是数组，轮换期新旧并存，
+#: 改文件不用重启。**令牌决定 service**：请求里的 service 和令牌对不上直接拒，
+#: 否则一个服务的令牌泄漏就能查所有服务
+ENV_SERVICE_TOKENS = "DELIVERY_SERVICE_TOKENS_FILE"
 
 
 _GZIP_MIN = 16 * 1024
@@ -945,12 +1071,16 @@ class Backend:
 
     @staticmethod
     def _stamp(*paths) -> tuple:
+        """这些文件的「版本」。**mtime 和大小一起看** —— 本机 mtime 的粒度实测是
+        1ms，同一毫秒内的两次写（「撤销」紧接着「网关来问」）光看 mtime 是一样的，
+        缓存不失效 → 读到撤销前的答案。"""
         out = []
         for path in paths:
             try:
-                out.append(Path(path).stat().st_mtime_ns if path else None)
+                st = Path(path).stat() if path else None
             except FileNotFoundError:
-                out.append(None)
+                st = None
+            out.append(None if st is None else (st.st_mtime_ns, st.st_size))
         return tuple(out)
 
     def _cached(self, name: str, stamp: tuple, build):
@@ -1008,6 +1138,75 @@ class Backend:
 
         # 绑定文件也进缓存键：管理员手工删掉一条错误绑定要立刻生效
         return self._cached("people", self._stamp(self.people_path, self.bindings_path), build)
+
+    def service_access(self, *, union_id: str, service: str):
+        """自建服务的网关问「这个人能不能用」。返回 `service_access.Decision`。
+
+        **判据是申请单本身**，不另存一份授权名单 —— 两处真相只会被修一边，而漏的那次
+        表现是「单子撤了、人还能进」，没有任何地方会报错（见 `service_access` 的说明）。
+
+        **离职在这里直接拒**，不依赖有人去把他的单子撤掉。
+
+        按文件 mtime 缓存：网关是**每个请求**都会问一次的，不能每次都重读一遍单子。
+        """
+        from . import service_access as sa
+
+        if not self.tickets_path:
+            raise DeliveryError("没有配置申请单存储，判不了")
+        ob_path = offboard_mod.path_beside(self.people_path) if self.people_path else None
+
+        def build():
+            rows = tickets_mod.TicketStore(self.tickets_path).all()
+            gone = set()
+            if ob_path:
+                # `load()` 回的**就是**记录字典本身，没有 `records` 外层 —— 写成
+                # `.get("records")` 会恒为空，表现是「离职的人照样放行」而不报错
+                for rec in (offboard_mod.load(ob_path) or {}).values():
+                    if not isinstance(rec, dict):
+                        continue
+                    # 停用和已删都算「不能再进」。suspect 不算 —— 那只是嫌疑，
+                    # 还没人确认过，拿它挡人会误伤在职的
+                    if rec.get("state") in (offboard_mod.DISABLED, offboard_mod.DELETED):
+                        # **记录缺 union_id 时不要拿 key 兜底**：key 是
+                        # `aliyun/123/foo` 这种串，永远匹配不到任何 union_id，
+                        # 放进去只是让这条记录看起来生效了，实际谁也挡不住
+                        uid = str(rec.get("union_id") or "")
+                        if uid:
+                            gone.add(uid)
+            return rows, gone
+
+        rows, gone = self._cached(
+            "service-access",
+            self._stamp(self.tickets_path, ob_path, self.people_path),
+            build,
+        )
+        # **名册这道门在这里是承重的，不是锦上添花。**
+        #
+        # 上面那份离职记录是**按云子账号**记的（`key_of(platform, account, user)`），
+        # 而写它的 `auto_disable` 只遍历这个人已确认的云账号 —— 一个**没有云子账号**
+        # 的人离职后，记录里一条都不会有，`gone` 永远挡不住他。而这个功能的立项理由
+        # 恰恰是「最需要自建服务的人没有云子账号」。
+        #
+        # 所以对这类人，唯一的离职信号是**他从名册里消失**（`delivery identity people`
+        # 重新生成时不再包含离职的人）。据此：
+        #   · 不在名册 → 拒（`NOT_IN_ROSTER`）
+        #   · 名册读不了 → **也拒**（让异常穿出去 → 500 → 网关 fail-closed）。
+        #     这里不能像别处那样「读不了就当在册」：那条兜底是为了别误伤正常人，
+        #     而在这条链上它的实际效果是「名册一坏，离职的人就全部放行」。
+        #     这条门的全部意义就是「算不出来就别放」。
+        #
+        # 代价写在明面上：名册的新鲜度决定这道门的时效性，它由定时任务刷新，
+        # 不是实时的。真正的修法是让离职记录按**人**记一条，不只按云账号 —— 那要改
+        # 离职引擎，不在这一批里（见 docs/collab/notes.md）。
+        known = self.people().resolve(union_id=union_id).person is not None
+        return sa.allowed(
+            union_id=union_id,
+            service=service,
+            tickets=rows,
+            now=time.time(),
+            in_roster=known,
+            offboarded=union_id in gone,
+        )
 
     def admins(self) -> Admins:
         return self._cached(
@@ -1105,6 +1304,26 @@ class Backend:
 
         return self._cached("approval", self._stamp(self.approval_path), build)
 
+    def approvals(self, name: str) -> Optional[FeishuApproval]:
+        """按定义名取审批对象。空名 = 老那条，行为与 `approval()` 逐字相同。
+
+        **名字不认识时返回 None，不回落到老那条。** 调用方据此拒绝发起/核对。
+        回落的表现是：模板写着走新定义、单子却发进了老定义的表单（类型单选里没有
+        这个选项 → 静默留空），而页面和日志里一切正常 —— 那正是这套多定义要消灭的场景。
+        """
+
+        def build():
+            if self._feishu_token is None:
+                return {}
+            kw = {"transport": self._approval_transport} if self._approval_transport else {}
+            return {
+                key: FeishuApproval(cfg, self._feishu_token, **kw)
+                for key, cfg in ApprovalConfig.load_map(self.approval_path).items()
+            }
+
+        table = self._cached("approvals", self._stamp(self.approval_path), build)
+        return (table or {}).get(str(name or ""))
+
     def flows(self) -> Optional[Flows]:
         if not self.tickets_path:
             return None
@@ -1119,6 +1338,7 @@ class Backend:
                 store=tickets_mod.TicketStore(self.tickets_path),
                 catalog=self.catalog,
                 approval=self.approval,
+                approvals=self.approvals,
                 roster=self.people,
                 executor=self._executor,
                 issuer=self._issuer,
@@ -1152,10 +1372,27 @@ class Backend:
     def approval_hook(self):
         """飞书审批回调的校验器。token 从环境变量读，**没配就一律拒绝**。"""
         if self._approval_hook is None:
+            # **老那条单独拿，不和 definitions 共一个 try。**
+            # `load_map` 比 `load` 多校验整块 definitions（重名、必须自带
+            # approval_code/widgets），抛错概率高得多 —— 而这两者曾经包在同一个
+            # suppress 里：definitions 写坏一个字，codes 就留在空列表，
+            # `Hook.mine()` 见到空列表**丢弃所有审批事件**（含老那条），
+            # 表现是飞书说已通过、面板说在等审批，两边各自看都正常
             codes = []
             with contextlib.suppress(Exception):
                 config = ApprovalConfig.load(self.approval_path)
                 codes = [config.approval_code] if config is not None else []
+            try:
+                # 每条定义的 code 都要认：新定义里的单子批完之后回调被拒的话，
+                # 面板永远不知道它批了
+                codes += [
+                    cfg.approval_code
+                    for key, cfg in ApprovalConfig.load_map(self.approval_path).items()
+                    if key and cfg.approval_code
+                ]
+            except Exception as exc:  # noqa: BLE001 — 配错不能连老那条一起废掉
+                print(f"[approval] definitions 读不了，只认默认那条：{exc}", file=sys.stderr)
+            codes = list(dict.fromkeys(c for c in codes if c))
             self._approval_hook = hook_mod.Hook(
                 verify_token=os.environ.get(hook_mod.ENV_VERIFY_TOKEN, ""),
                 codes=codes,
@@ -2145,6 +2382,63 @@ def make_handler(
                 },
             )
 
+        def _service_access(self):
+            """自建服务的网关问：这个人能不能用这个服务。
+
+            **调用方是另一台机器上的进程**（MLflow 前面那个网关），所以既没有登录会话、
+            也给不出同源 Origin —— 现有那两道门在这儿都是摆设。这里只认专用令牌。
+
+            回什么、不回什么
+            ────────────────
+            只回 `{allowed, reason, message}`（外加放行时的到期时间）。
+            **姓名、邮箱、部门、云账号、单号一律不回** —— 这个接口的调用方是另一台机器上
+            的进程，给多了就是白给。它要的只是「放不放行」和「不放行时给人看什么」。
+
+            面板挂了怎么办
+            ──────────────
+            这里挂了就是 5xx / 连不上，**网关那边必须当成「不放行」** —— 授权查不到就
+            放行的话，面板一挂这道门就等于不存在。这和网关里已有的「禁用名单查不到就
+            放行」方向相反，那个是对的（禁用名单查不到不该误伤正常人），两者别混。
+            """
+            raw, sent = self._raw_body(4 * 1024)
+            if raw is None:
+                return sent
+            peer = _client_ip(
+                self.client_address[0] if self.client_address else "",
+                self.headers.get("X-Forwarded-For", ""),
+            )
+            # 在解析请求体之前限速：令牌猜测和身份枚举都走这条路。
+            # **用自己那张表**，不和取件共用 —— 理由见 _SVC_TRIES
+            if _service_too_many(peer):
+                return self._json(429, {"error": "请求太频繁"})
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except (ValueError, UnicodeDecodeError):
+                return self._json(400, {"error": "请求体不是合法 JSON"})
+            if not isinstance(body, dict):
+                return self._json(400, {"error": "请求体必须是对象"})
+
+            service = _service_for_token(self.headers.get("Authorization") or "")
+            if not service or str(body.get("service") or "") != service:
+                # 令牌不对 / 没配令牌文件 / 拿 mlflow 的令牌查别的服务。
+                # **不说是哪一种** —— 对调用方没用，对猜令牌的人有用
+                if _service_bad_token(peer):
+                    return self._json(429, {"error": "请求太频繁"})
+                return self._json(403, {"error": "unauthorized"})
+
+            union_id = str(body.get("union_id") or "").strip()
+            if not union_id:
+                return self._json(400, {"error": "missing union_id"})
+            try:
+                got = backend.service_access(union_id=union_id, service=service)
+            except Exception as exc:  # noqa: BLE001 — 细节只进服务端日志，不回给调用方
+                print(f"[service-access] 判定失败：{exc!r}", file=sys.stderr)
+                return self._json(500, {"error": "判定失败"})
+            out = {"allowed": got.allowed, "reason": got.reason, "message": got.message}
+            if got.allowed and got.expires_at:
+                out["expires_at"] = got.expires_at
+            return self._json(200, out)
+
         def _feishu_card(self):
             """飞书卡片按钮回调：管理员在卡片上点「确认删除」「没离职」。
 
@@ -2792,6 +3086,8 @@ def make_handler(
                 return self._feishu_card()
             if path == "/api/pickup":
                 return self._pickup()
+            if path == _SERVICE_ACCESS:
+                return self._service_access()
             if path == _ADMIN_POLICY_RULES:
                 return self._policy_rules()
             if path == _ADMIN_ASSET_OWNER:

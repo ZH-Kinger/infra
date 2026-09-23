@@ -76,6 +76,11 @@ _EXEC_FIELDS = (
     "kind",
     "platform",
     "account",
+    # 服务访问模板开通的是哪个服务。不核对的话，审批期间把它从 mlflow 改成别的，
+    # 这张单照开 —— 审批人批的是 A、开出来的是 B。
+    # `Template.service` 有 dataclass 默认值 ""，所以 `_FIELD_DEFAULTS` 自动兜住旧快照，
+    # 不会出现「部署当天在途单子全报模板被改」
+    "service",
     "groups",
     "role_arn",
     "max_hours",
@@ -303,6 +308,30 @@ def _axis_value(texts: Mapping, labels: Mapping, axis_id: str) -> str:
     return str(texts.get(axis_id) or labels.get(axis_id) or "")
 
 
+def _definition_of(tpl: Mapping) -> str:
+    """这个模板走哪条审批定义。空串 = 老那条。
+
+    读的是模板快照里的 `approval` 字段；没有这个字段（今天所有模板都没有）就是空串。
+    """
+    return str(tpl.get("approval") or "")
+
+
+def _approval_field(ticket: Mapping, code: str, status: str) -> dict:
+    """回写审批状态时，把这张单原本记的 `definition` 带上。
+
+    **`TicketStore.update(fields=…)` 是浅覆盖，不是深合并** —— 直接写
+    `{"instance_code":…, "status":…}` 会把提交时记下的 definition 整个抹掉，
+    而核对（`_verify_approval`）正是在这之后才去读它：发起用 A、核对用 B，
+    在途的单子会全部拒掉。今天 definition 恒为空串所以看不出来，
+    多定义一接上就是部署当天全线报错。
+    """
+    return {
+        "instance_code": code,
+        "status": status,
+        "definition": (ticket.get("approval") or {}).get("definition") or "",
+    }
+
+
 def _approval_fields(tpl: Mapping, payload: Mapping) -> dict:
     """按申请类型，把 payload 拆成审批表单里的独立字段。
 
@@ -367,6 +396,16 @@ def _approval_fields(tpl: Mapping, payload: Mapping) -> dict:
             # 配成文本轴时只能取原文 —— 后者在审批单的单选控件上匹配不到选项，
             # 所以模板里这一轴应当配成选项轴，这里的回退只是不让它整个丢掉
             "env": str((payload.get("choices") or {}).get("env") or texts.get("env") or ""),
+        }
+    if kind == catalog_mod.KIND_SERVICE:
+        # **不送 account**：内部服务没有云账号，acct 会拼成 `internal/`，
+        # 而审批定义里的「云账号」是单选控件 —— 送一个不在选项里的值，
+        # 飞书拒的是整张表单（不是这一个字段），单子直接落「提交失败」。
+        # 送不出去比送空更糟，所以这一栏干脆不给
+        days = int(payload.get("days") or 0)
+        return {
+            "scope": str(tpl.get("service") or ""),
+            "valid": f"{days} 天" if days else "长期",
         }
     # 开账号 / 云账号权限：审批人关心「给谁、在哪个云账号」
     user = str(payload.get("username") or payload.get("cloud_user") or "")
@@ -455,6 +494,15 @@ class Flows:
         catalog: Callable[[], catalog_mod.Catalog],
         approval: Callable[[], Optional[FeishuApproval]],
         roster: Callable[[], object],
+        #: 按名字取审批定义（一条模板可以走自己那条飞书审批）。
+        #:
+        #: **必传，没有默认值。** 本来是可选的、不传就忽略名字退回 `approval` ——
+        #: 结果 `cli_requests` 那个 sweep 漏传了，服务访问的单子在无人值守那条路上
+        #: 被拿老定义去核对，`_checked` 判「实例不属于配置的审批定义」→ 每分钟一条
+        #: 假报错，单子还会被推成 FAILED。而面板那条路传了，所以页面上一切正常。
+        #: 这和下面 `write_iam` 那条注释记的是同一个坑的第二次 —— 新增可选依赖时
+        #: 「漏传会静默降级」本身就是缺陷，所以这次不给默认值，让漏传当场报错
+        approvals: Callable[[str], Optional[FeishuApproval]],
         executor: Callable[[str, str], object],
         #: 凭证发放身份。只有长期凭证的建号 / 清理走它，和开通身份是两把不同的 AK
         issuer: Optional[Callable[[str, str], object]] = None,
@@ -476,6 +524,7 @@ class Flows:
         self.store = store
         self._catalog = catalog
         self._approval = approval
+        self._approvals = approvals
         self._roster = roster
         self._executor = executor
         self._issuer = issuer
@@ -551,10 +600,16 @@ class Flows:
                 elif created is not None:
                     username = (created.get("payload") or {}).get("username", "")
                     state, note = "owned", f"子账号 {username} 已开通，名册刷新后显示"
-            elif tpl.kind in catalog_mod.AWAIT_FULFIL or tpl.kind == catalog_mod.KIND_DATATYPE:
+            elif tpl.kind in catalog_mod.AWAIT_FULFIL or tpl.kind in (
+                catalog_mod.KIND_DATATYPE,
+                catalog_mod.KIND_SERVICE,
+            ):
                 # 面板不创建资源 / 不建目录 / 不搬数据：既不需要开通身份，
                 # 也不要求申请人先有子账号。拿这个当门槛只会把提需求的人挡在外面。
-                # 「新增数据类型」同理：它只改一个词表文件，不碰云（审计 L-3）
+                # 「新增数据类型」同理：它只改一个词表文件，不碰云（审计 L-3）。
+                # 「服务访问」更是如此：自建服务没有云账号，**最需要它的人恰恰是
+                # 那些没有云子账号的人** —— 拿「先申请开账号」挡住他们，等于把这个
+                # 功能对目标用户关掉，而页面上给的理由还会把人引到一条完全无关的路上
                 pass
             elif self._executor_ready is not None and not self._executor_ready(
                 tpl.platform, tpl.account
@@ -762,7 +817,7 @@ class Flows:
         """申请单对应飞书审批实例的跳转链接；审批没配置或实例编号缺失时为空串。"""
         code = (ticket.get("approval") or {}).get("instance_code")
         try:
-            approval = self._approval()
+            approval = self._approval_of(ticket)
         except Exception:  # noqa: BLE001 — 链接只是便利，审批配置读不了也不能让详情页打不开
             approval = None
         return instance_links(approval.config if approval else None, code)
@@ -771,8 +826,7 @@ class Flows:
     def submit(
         self, *, applicant: Applicant, email: str, template_id: str, payload: dict, reason: str
     ) -> dict:
-        approval = self._approval()
-        if approval is None:
+        if self._approval() is None:
             raise FlowError("还没有配置飞书审批，暂时不能提交申请", 503)
         reason = str(reason or "").strip()
         if str(template_id or "") == POLICY_TEMPLATE:
@@ -785,6 +839,18 @@ class Flows:
             snapshot = _snapshot(tpl)
         if not _REASON_MIN <= len(reason) <= _REASON_MAX:
             raise FlowError(f"申请理由需要 {_REASON_MIN}–{_REASON_MAX} 个字")
+        # 按这条模板指向的审批定义发起。**认不出来的名字直接拒，不回落到老那条** ——
+        # 回落的话单子会发进老定义的表单，「申请类型」单选里没有这个选项就静默留空，
+        # 审批人看到一张类型不明的单子，而他正是那道门
+        definition = _definition_of(snapshot)
+        approval = self._approval_for(definition)
+        if approval is None:
+            raise FlowError(
+                f"这个申请模板指向的审批定义「{definition}」没有配置，请联系管理员"
+                if definition
+                else "还没有配置飞书审批，暂时不能提交申请",
+                503,
+            )
         if clean is None:
             clean, summary = self._validate(tpl, applicant, payload)
         for other in self.store.mine(applicant.union_id):
@@ -835,7 +901,16 @@ class Flows:
             to=t.PENDING,
             event="approval_created",
             note="已发起飞书审批",
-            fields={"approval": {"instance_code": code, "status": STATUS_PENDING}},
+            # **记下这张单是用哪条审批定义发起的。** 核对时按它走，不按当前配置走 ——
+            # 配置改了、模板改指到别的定义，已经发出去的单子照样核对得过。
+            # 空串 = 老那条，和今天所有单子一样
+            fields={
+                "approval": {
+                    "instance_code": code,
+                    "status": STATUS_PENDING,
+                    "definition": _definition_of(snapshot),
+                }
+            },
         )
 
     def _validate_policy(self, applicant: Applicant, payload: object) -> tuple:
@@ -959,6 +1034,16 @@ class Flows:
             return self._validate_transfer(tpl, payload, where)
         if tpl.kind == catalog_mod.KIND_DATATYPE:
             return self._validate_datatype(tpl, payload, where)
+        if tpl.kind == catalog_mod.KIND_SERVICE:
+            # 自建服务没有云账号、没有子账号、没有桶，表单上只有申请理由。
+            # **这个分支不能省** —— 没有它就掉进下面的「开账号」兜底，去校验一个
+            # 服务访问根本不存在的 `username`，提交必然报「用户名不符合规则」
+            until, days = self._until(tpl, payload)
+            return (
+                {"days": days} if days else {},
+                f"{where}：开通 {tpl.service} 的访问权限"
+                + (f"，用到 {until}" if until else "，长期"),
+            )
         username = str(payload.get("username") or "").strip()
         if not re.fullmatch(tpl.username_pattern, username) or not _SAFE_USERNAME.match(username):
             raise FlowError(
@@ -1060,7 +1145,7 @@ class Flows:
             )
         # 凭证只有审批评论这一条出口。通道没配就别让人提了等审批 —— 走到开通那步
         # 才失败，这轮审批白等，还留一张要人工处理的失败单
-        approval = self._approval()
+        approval = self._approval_for(tpl.approval)
         if approval is not None and not approval.config.comment_open_id:
             raise FlowError("还没配置凭证下发的评论身份，暂时不能申请访问凭证，请联系管理员", 503)
         # 同理：取件地址拼不出来、加密库不在，也都是「审批通过那一刻才炸」
@@ -1380,7 +1465,7 @@ class Flows:
         self._last_sync[ticket_id] = now
         if len(self._last_sync) > 2000:
             self._last_sync = {k: v for k, v in self._last_sync.items() if now - v < _SYNC_INTERVAL}
-        approval = self._approval()
+        approval = self._approval_of(ticket)
         if approval is None:
             return ticket
         code = ticket["approval"]["instance_code"]
@@ -1397,7 +1482,7 @@ class Flows:
                 expect=[t.PENDING],
                 to=to,
                 event="approval_" + status.lower(),
-                fields={"approval": {"instance_code": code, "status": status}},
+                fields={"approval": _approval_field(ticket, code, status)},
             )
             return self._emit("rejected" if to == t.REJECTED else "withdrawn", ticket)
         ticket = self.store.update(
@@ -1407,7 +1492,7 @@ class Flows:
             to=t.APPROVED,
             event="approval_approved",
             note="飞书审批已通过",
-            fields={"approval": {"instance_code": code, "status": status}},
+            fields={"approval": _approval_field(ticket, code, status)},
         )
         return self.execute(ticket_id, actor="system")
 
@@ -1417,7 +1502,11 @@ class Flows:
         kind = ticket.get("kind")
         if kind == catalog_mod.KIND_CREDENTIAL:
             return now + int(payload.get("hours") or 0) * 3600
-        if kind in (catalog_mod.KIND_PERMISSION, catalog_mod.KIND_RESOURCE):
+        if kind in (
+            catalog_mod.KIND_PERMISSION,
+            catalog_mod.KIND_RESOURCE,
+            catalog_mod.KIND_SERVICE,
+        ):
             return now + int(payload.get("days") or 0) * 86400 if payload.get("days") else 0.0
         return 0.0
 
@@ -1433,8 +1522,28 @@ class Flows:
         return self._emit("rejected", closed)
 
     # ── 开通 ──────────────────────────────────────────────────────────────
+    def _approval_for(self, name: str) -> Optional[FeishuApproval]:
+        """按定义名取审批对象。名字为空 = 老那条（今天所有单子都是它）。
+
+        **名字来自申请单自己记的那条，不是当前配置。** 这是「不影响之前申请的归属」
+        的落点：单子发起时用的是哪条定义，是一条历史事实，不该随配置变化。
+        老单子没有这个字段 → 空名 → 老那条，行为逐字不变。
+
+        认不出来的名字返回 None，**不回落到老那条** —— 回落的表现是「以为分开了、
+        其实全挤在一条上」，而页面和日志里一切正常。
+        """
+        return self._approvals(str(name or ""))
+
+    def _approval_of(self, ticket: Mapping) -> Optional[FeishuApproval]:
+        """这张单该用哪个审批对象。**按单子自己记的那条，不按当前配置。**
+
+        单子发起时用的是哪条定义是一条历史事实：配置后来改了、模板改指到别的定义，
+        已经发出去的单子照样核对得过、撤回撤得掉、评论贴得对。
+        """
+        return self._approval_for((ticket.get("approval") or {}).get("definition") or "")
+
     def _verify_approval(self, ticket: dict) -> None:
-        approval = self._approval()
+        approval = self._approval_of(ticket)
         if approval is None:
             raise FlowError("没有配置飞书审批，不能开通", 503)
         approval.verify_approved(
@@ -1758,6 +1867,9 @@ class Flows:
                     catalog_mod.KIND_PERMISSION,
                     catalog_mod.KIND_CREDENTIAL,
                     catalog_mod.KIND_RESOURCE,
+                    # 服务访问也要提醒：到期那天人是「突然进不去」，没有任何前置信号，
+                    # 他只会以为服务挂了 —— 而这时权限已经收回，没人会去查申请单
+                    catalog_mod.KIND_SERVICE,
                 )
                 or ticket.get("status") != t.DONE
                 or not now + floor * 86400 < expires <= now + days * 86400
@@ -1858,14 +1970,23 @@ class Flows:
         out = []
         for ticket in tickets:
             kind = ticket.get("kind")
-            # 资源单刻意不在这里：ECS/RDS 到期只提醒，删机器这种事不能由定时任务替人决定
-            if kind not in (catalog_mod.KIND_PERMISSION, catalog_mod.KIND_CREDENTIAL):
+            # 资源单刻意不在这里：ECS/RDS 到期只提醒，删机器这种事不能由定时任务替人决定。
+            # 服务访问在这里：它「回收」只是把单子推到 REVOKED，网关下次来问就答不行，
+            # 不删任何东西、不调任何云 —— 没有「替人做了不可逆的事」这个顾虑
+            if kind not in (
+                catalog_mod.KIND_PERMISSION,
+                catalog_mod.KIND_CREDENTIAL,
+                catalog_mod.KIND_SERVICE,
+            ):
                 continue
             if not self._needs_reclaim(ticket, now):
                 continue
             try:
                 if kind == catalog_mod.KIND_CREDENTIAL:
                     out.append(self._revoke_credential(ticket))
+                elif kind == catalog_mod.KIND_SERVICE:
+                    self._revoke_service(ticket, why="到期自动收回")
+                    out.append(f"{ticket['id']}：服务访问已到期收回")
                 else:
                     out.append(self._revoke(ticket, now))
             except Exception as exc:  # noqa: BLE001 — 一张单子出错不能挡住其他单子回收
@@ -2046,6 +2167,8 @@ class Flows:
         按钮唯一的使用场景就是链接外泄，报一个没发生的成功是最坏的那种谎。
         """
         ticket = self.store.get(ticket_id)
+        if ticket.get("kind") == catalog_mod.KIND_SERVICE:
+            return self._revoke_service(ticket, why="管理员收回", actor=actor)
         if ticket.get("kind") != catalog_mod.KIND_CREDENTIAL:
             raise FlowError("这不是访问凭证申请", 409)
         if ticket.get("status") == t.REVOKED:
@@ -2079,6 +2202,30 @@ class Flows:
                 502,
             )
         return after
+
+    def _revoke_service(self, ticket: dict, *, why: str, actor: str = "system") -> dict:
+        """收回一项服务访问。**只推状态，不调任何云。**
+
+        授权这件事没有第二份真相：网关每次请求都来问一次，答案由这张单算出来
+        （见 `service_access`）。所以收回 = 把单子推到 REVOKED，最迟一个缓存周期
+        （网关侧 60 秒）就生效，不需要去哪里删一条名单 —— 也正因为如此，
+        这里**不能**只把单子关掉了事：`close` 进不了 DONE，而停在 DONE 的单子
+        对网关来说仍然是「有权限」。
+        """
+        ticket_id = ticket["id"]
+        status = ticket.get("status")
+        if status == t.REVOKED:
+            raise FlowError("这项服务访问已经收回了", 409)
+        if status != t.DONE:
+            raise FlowError("这张申请单还没开通，没有可收回的访问权限", 409)
+        return self.store.update(
+            ticket_id,
+            actor=actor,
+            expect=[t.DONE],
+            to=t.REVOKED,
+            event="service_revoked",
+            note=why,
+        )
 
     def _needs_reclaim(self, ticket: dict, now: float) -> bool:
         """这张单子云上还有东西要收吗。
@@ -2279,6 +2426,13 @@ class Flows:
             #     return f"已建好 {ex.make_dir(payload['bucket'], …, region)}"
             # 并把 KIND_STORAGE 从 catalog.AWAIT_FULFIL 里移走
             return f"审批通过：建 {payload['path']}，等人按规范创建后回来登记"
+        if tpl.kind == catalog_mod.KIND_SERVICE:
+            # **审批通过就生效，面板一行云都不调。** 授权就是这张单本身：服务前面那个
+            # 网关每次请求都来问一次「这个人能不能用」，答案由单子算出来（见 service_access）。
+            # 所以既不停在「待开通」（没有任何要人去点的动作，停在那儿是在台账里说假话），
+            # 也不往别处写一份名单 —— 两处真相只会被修一边，漏的那次表现是
+            # 「单子撤了人还能进」，而没有任何地方会报错
+            return f"已开通 {tpl.service} 的访问权限"
         if tpl.kind == catalog_mod.KIND_DATATYPE:
             # **审批通过就写进词表**，不停在「待开通」：这一步只是改一个文件，
             # 没有需要人去云上做的事。写之前 append 会整张表再校验一遍、同名不覆盖
@@ -2593,7 +2747,7 @@ class Flows:
         ticket = self._own(ticket_id, union_id)
         if ticket.get("status") != t.PENDING:
             raise FlowError("只有待审批的申请可以撤回", 409)
-        approval = self._approval()
+        approval = self._approval_of(ticket)
         if approval is not None:
             approval.cancel(ticket["approval"]["instance_code"], _applicant(ticket))
         return self.store.update(
@@ -2770,7 +2924,7 @@ class Flows:
         code = str((ticket.get("approval") or {}).get("instance_code") or "")
         if not code or ticket.get("login_commented"):
             return
-        approval = self._approval()
+        approval = self._approval_of(ticket)
         if approval is None:
             return
         spec = platforms_mod.get(tpl.platform)
@@ -2899,7 +3053,7 @@ class Flows:
 
         代价是链接丢了就真的取不回来（我们没有主密钥），只能重新申请。
         """
-        approval = self._approval()
+        approval = self._approval_of(ticket)
         if approval is None:
             raise FlowError("没有配置飞书审批，查看地址发不出去", 503)
         code = str((ticket.get("approval") or {}).get("instance_code") or "")

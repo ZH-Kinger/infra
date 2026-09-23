@@ -40,6 +40,11 @@ KIND_TRANSFER = "transfer"
 #: 往数据类型词表里加一个词（一级目录）。规范要求「新增数据类型要审批」——
 #: 审批通过后直接写进 identity/data-types.json，不停在「待开通」
 KIND_DATATYPE = "datatype"
+#: 自建服务的访问权（MLflow 这类）。**面板一行云都不调** —— 授权就是这张单本身：
+#: 服务前面那个网关每次请求都来问一次「这个人能不能用」，答案由单子算出来。
+#: 所以它**不进 `AWAIT_FULFIL`**：审批通过就生效，没有任何需要人去某个后台点的动作，
+#: 停在「待开通」等人反而是在台账里说假话（用户明确要求：不手工登记用户）。
+KIND_SERVICE = "service"
 KINDS = (
     KIND_ACCOUNT,
     KIND_PERMISSION,
@@ -48,6 +53,7 @@ KINDS = (
     KIND_TRANSFER,
     KIND_RESOURCE,
     KIND_DATATYPE,
+    KIND_SERVICE,
 )
 KIND_LABELS = {
     KIND_ACCOUNT: "开账号",
@@ -57,6 +63,7 @@ KIND_LABELS = {
     KIND_TRANSFER: "数据迁移",
     KIND_RESOURCE: "资源开通",
     KIND_DATATYPE: "数据类型",
+    KIND_SERVICE: "内部服务",
 }
 #: 停在「待开通」等人执行的那几类。
 #:
@@ -179,6 +186,15 @@ class Template:
     #: resource：清单里没有时允不允许自己填。新项目、临时立项常常还没进清单，
     #: 不给填的话人只会随便挑一个最像的 —— 那比让他写清楚更糟
     cost_center_other: bool = False
+    #: service：这条模板开通的是哪个服务（`mlflow` 这种键，不是显示名）。
+    #: **它决定网关那边问「这个人能不能用什么」时拿什么去比**，所以进 `_EXEC_FIELDS`：
+    #: 审批期间被人从 mlflow 改成别的，这张单照开 —— 审批人批的是 A、开出来的是 B
+    service: str = ""
+    #: 这条模板走哪条飞书审批定义（`approval.json` 的 `definitions` 里的键）。
+    #: 空 = 老那条。**故意不在这里校验它存不存在** —— catalog 不认识 approval.json，
+    #: 存在性由 `Flows._approval_for` 在用到时判，判不出来直接拒发，不静默回落到老那条
+    #: （静默回落的表现是「以为分开了、其实全挤在一条上」，而页面上一切正常）
+    approval: str = ""
     #: resource：资源类型与地域。只有带 options 的模板需要
     resource_type: str = ""
     region: str = ""
@@ -309,7 +325,10 @@ class Template:
             ),
             "allow_prefix": self.allow_prefix if self.kind == KIND_CREDENTIAL else False,
             "whole_bucket": self.whole_bucket if self.kind == KIND_CREDENTIAL else False,
-            "max_days": self.max_days if self.kind in (KIND_PERMISSION, KIND_RESOURCE) else 0,
+            "max_days": self.max_days
+            if self.kind in (KIND_PERMISSION, KIND_RESOURCE, KIND_SERVICE)
+            else 0,
+            "service": self.service,
             # 只给前端 id 和给人看的名字。**params 绝不外传**：里面是镜像、交换机、
             # 安全组 ID，属于内网拓扑，没必要让每个申请人都看到
             "options": [
@@ -362,12 +381,25 @@ def _int(spec: dict, key: str, where: str, default: int, lo: int, hi: int) -> in
 #: 每种模板认哪些字段。**按 kind 分开列**，不是合成一张大表：
 #: 把 max_days 写进凭证模板、把 max_hours 写进权限模板，都是「以为限制住了其实没有」，
 #: 静默忽略正是权限事故的常见开头，所以一律当成写错、拒绝加载。
-_COMMON = {"id", "kind", "platform", "account", "title", "description", "risk", "category"}
+_COMMON = {
+    "id",
+    "kind",
+    "platform",
+    "account",
+    "title",
+    "description",
+    "risk",
+    "category",
+    "approval",
+}
+#: 服务键的字符集。和用户名那套一样严 —— 它要在两个系统之间对字符串
+_SERVICE_KEY = re.compile(r"\A[a-z][a-z0-9-]{1,31}\Z")
 _BY_KIND = {
     KIND_ACCOUNT: {"groups", "username_pattern", "console_login", "workspaces"},
     KIND_STORAGE: {"buckets", "stages"},
     KIND_DATATYPE: {"buckets"},
     KIND_TRANSFER: {"buckets", "filesystems"},
+    KIND_SERVICE: {"service", "max_days"},
     KIND_PERMISSION: {"groups", "max_days", "workspaces"},
     KIND_CREDENTIAL: {"role_arn", "max_hours", "caps", "buckets", "allow_prefix", "whole_bucket"},
     KIND_RESOURCE: {
@@ -904,10 +936,18 @@ def parse_template(spec: object, index: int, registry=None, types=None) -> Templ
     platform = _str(spec, "platform", where)
     # 直接读 platforms.IDS，不在这里存一份快照：存了就是第二份真相，
     # 加新平台时只改 platforms.py 就不够了
-    if platform not in platforms_mod.IDS:
+    #
+    # 自建服务（KIND_SERVICE）是唯一的例外：它没有云账号、没有子账号、没有策略，
+    # 所以 platform 恒为 `internal`（只有显示名、不在 IDS 里），account **不必填**。
+    # 借一个真实云账号 ID 当占位会让台账和审批单显示「阿里云 · 某账号」，而这张单
+    # 和那个账号毫无关系
+    if kind == KIND_SERVICE:
+        if platform != platforms_mod.INTERNAL:
+            raise CatalogError(f"{where}：服务访问模板的 platform 只能是 {platforms_mod.INTERNAL}")
+    elif platform not in platforms_mod.IDS:
         raise CatalogError(f"{where}：platform 只能是 {' / '.join(platforms_mod.IDS)}")
-    account = _str(spec, "account", where)
-    if not _ACCOUNT.match(account):
+    account = _str(spec, "account", where, required=(kind != KIND_SERVICE))
+    if account and not _ACCOUNT.match(account):
         raise CatalogError(f"{where}：account 必须是云账号 ID（数字）")
     risk = _str(spec, "risk", where, required=False) or "low"
     if risk not in RISKS:
@@ -915,6 +955,9 @@ def parse_template(spec: object, index: int, registry=None, types=None) -> Templ
     category = _str(spec, "category", where, required=False)
     if len(category) > _CATEGORY_MAX:
         raise CatalogError(f"{where}：category 最长 {_CATEGORY_MAX} 个字")
+    approval = _str(spec, "approval", where, required=False)
+    if approval and not _SERVICE_KEY.match(approval):
+        raise CatalogError(f"{where}：approval 只能是小写字母开头的短键，比如 service")
     groups = spec.get("groups", [])
     if not isinstance(groups, list) or not all(
         isinstance(g, str) and _GROUP.match(g) for g in groups
@@ -991,6 +1034,17 @@ def parse_template(spec: object, index: int, registry=None, types=None) -> Templ
         if stray:
             raise CatalogError(f"{where}：桶 {stray[0]!r} 不在数据类型词表的 buckets 里")
         kw["types"] = dict(types.types)
+    elif kind == KIND_SERVICE:
+        # 服务键（`mlflow` 这种）。**它决定网关问「能不能用什么」时拿什么去比**，
+        # 所以必填、而且只收一种写法 —— 大小写或连字符写法不一致，判定就恒为「没授权」，
+        # 而那是静默的：申请批了、人还是进不去，两边都不报错
+        service = _str(spec, "service", where)
+        if not _SERVICE_KEY.match(service):
+            raise CatalogError(
+                f"{where}：service 只能是小写字母开头、由小写字母数字和横线组成（如 mlflow）"
+            )
+        kw["service"] = service
+        kw["max_days"] = _int(spec, "max_days", where, 0, 0, 3650)
     elif kind == KIND_RESOURCE:
         kw["max_days"] = _int(spec, "max_days", where, 0, 0, 3650)
         kw["options"] = _options(spec, where)
@@ -1075,6 +1129,7 @@ def parse_template(spec: object, index: int, registry=None, types=None) -> Templ
         description=_str(spec, "description", where, required=False),
         risk=risk,
         category=category,
+        approval=approval,
         groups=tuple(groups),
         **kw,
     )

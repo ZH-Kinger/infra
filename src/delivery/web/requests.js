@@ -10,7 +10,7 @@
 import { ago, api, ApiError, apiPost, copyButton, fill, fmtTime, h, mount, openDrawer, PLATFORM_NAME, platformTag, requestTitle, safeHttps } from "./core.js";
 import { datatypeFields, directoryFields, transferFields } from "./storage.js";
 
-const KIND_ORDER = ["permission", "credential", "storage", "transfer", "resource", "account", "datatype"];
+const KIND_ORDER = ["permission", "credential", "storage", "transfer", "resource", "account", "datatype", "service"];
 const KIND_INFO = {
   permission: { title: "云账号权限", desc: "给你已有的子账号加上某项权限，比如 OSS 只读，或者加入某个地域的 PAI 工作空间。" },
   credential: { title: "访问凭证", desc: "申请一份数据访问密钥。审批通过后直接发到审批评论里，到期自动失效。" },
@@ -19,8 +19,9 @@ const KIND_INFO = {
   resource: { title: "资源开通", desc: "ECS、RDS 这类要单独开的资源。审批通过后由管理员按流程创建。" },
   account: { title: "开账号", desc: "在还没有账号的云上开一个子账号。" },
   datatype: { title: "数据类型", desc: "给数据桶加一种新的一级目录。所有桶共用一张词表，新增要审批。" },
+  service: { title: "内部服务", desc: "公司自建的服务，比如实验看板。批准后用飞书账号直接登录，不需要云账号。" },
 };
-const KIND_KEY_LABEL = { permission: "权限包", policy: "权限策略", credential: "访问凭证", storage: "数据目录", transfer: "数据迁移", resource: "资源", account: "开账号", datatype: "数据类型" };
+const KIND_KEY_LABEL = { permission: "权限包", policy: "权限策略", credential: "访问凭证", storage: "数据目录", transfer: "数据迁移", resource: "资源", account: "开账号", datatype: "数据类型", service: "内部服务" };
 const CAP_LABEL = { list: "查看清单", download: "下载", write: "上传" };
 const RISK = { low: ["低风险", "good"], medium: ["中风险", "warn"], high: ["高风险", "crit"] };
 const STATUS_TONE = {
@@ -333,7 +334,35 @@ export function requestRoutes(ctx) {
     return `${hours} 小时`;
   }
 
+  /** 「用到哪天」这一格。资源和内部服务共用 —— 两边都是按天限的长期占用。
+   *
+   * 选日期不是填天数：「用到几月几号」才是人真正在想的事。
+   */
+  function untilField(o, { field, update, fields, read, checks }) {
+    const iso = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10);
+    const plus = (days) => { const d = new Date(); d.setDate(d.getDate() + days); return d; };
+    const until = h("input", { id: "f-until", class: "input", type: "date", min: iso(plus(1)), max: iso(plus(o.max_days)), value: iso(plus(Math.min(90, o.max_days))) });
+    const presets = h("div", { class: "presets" }, [[30, "1 个月"], [90, "3 个月"], [180, "半年"], [365, "1 年"]].filter(([d]) => d <= o.max_days).map(([d, label]) =>
+      h("button", { type: "button", class: "chip", onclick: () => { until.value = iso(plus(d)); update(); } }, label)));
+    const untilHint = h("span", {});
+    const days = () => Math.round((new Date(until.value + "T00:00:00") - new Date(iso(new Date()) + "T00:00:00")) / 864e5);
+    const showDays = () => {
+      const n = days();
+      untilHint.textContent = until.value && Number.isFinite(n)
+        ? `${n} 天（最长 ${o.max_days} 天）` : `最长 ${o.max_days} 天`;
+    };
+    until.addEventListener("input", () => { until.classList.remove("invalid"); showDays(); update(); });
+    showDays();
+    fields.push(field("f-until", "用到哪天", h("div", { class: "inline" }, until, presets), untilHint));
+    read.until = () => until.value;
+    checks.push(() => (until.value && until.value >= iso(plus(1)) && until.value <= iso(plus(o.max_days)) ? "" : [until, `到期日要在明天到 ${o.max_days} 天之内。`]));
+  }
+
   function optionMeta(o) {
+    // 内部服务没有云账号，accountName 会拼出「internal · 」这种半截东西
+    if (o.kind === "service") {
+      return ["飞书账号登录", o.max_days ? `最长 ${o.max_days} 天` : "长期有效", "离职自动失效"].join(" · ");
+    }
     const parts = [accountName(o)];
     if (o.kind === "permission") {
       parts.push(`用户组 ${o.groups.join("、")}`);
@@ -450,6 +479,10 @@ export function requestRoutes(ctx) {
       Object.assign(read, part.read);
       checks.push(...part.checks);
       describe = part.describe;
+    } else if (o.kind === "service") {
+      // 没有要填的东西 —— 申请理由是公共字段，在下面统一加。
+      // **这条空分支不能删**：删了就掉进最后那个「开账号」兜底，表单上会冒出一个用户名输入框
+      if (o.max_days) untilField(o, { field, update, fields, read, checks });
     } else if (o.kind === "resource") {
       // 能选的一律给下拉：自由填写的规格调不了云 API，审批人也判断不了批的是什么
       const picks = {};
@@ -536,26 +569,7 @@ export function requestRoutes(ctx) {
       fields.push(field("f-detail", "补充说明（可选）", detail, ""));
       read.detail = () => detail.value.trim();
 
-      if (o.max_days) {
-        // 选日期不是填天数：「用到几月几号」才是人真正在想的事
-        const iso = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10);
-        const plus = (days) => { const d = new Date(); d.setDate(d.getDate() + days); return d; };
-        const until = h("input", { id: "f-until", class: "input", type: "date", min: iso(plus(1)), max: iso(plus(o.max_days)), value: iso(plus(Math.min(90, o.max_days))) });
-        const presets = h("div", { class: "presets" }, [[30, "1 个月"], [90, "3 个月"], [180, "半年"], [365, "1 年"]].filter(([d]) => d <= o.max_days).map(([d, label]) =>
-          h("button", { type: "button", class: "chip", onclick: () => { until.value = iso(plus(d)); update(); } }, label)));
-        const untilHint = h("span", {});
-        const days = () => Math.round((new Date(until.value + "T00:00:00") - new Date(iso(new Date()) + "T00:00:00")) / 864e5);
-        const showDays = () => {
-          const n = days();
-          untilHint.textContent = until.value && Number.isFinite(n)
-            ? `${n} 天（最长 ${o.max_days} 天）` : `最长 ${o.max_days} 天`;
-        };
-        until.addEventListener("input", () => { until.classList.remove("invalid"); showDays(); update(); });
-        showDays();
-        fields.push(field("f-until", "用到哪天", h("div", { class: "inline" }, until, presets), untilHint));
-        read.until = () => until.value;
-        checks.push(() => (until.value && until.value >= iso(plus(1)) && until.value <= iso(plus(o.max_days)) ? "" : [until, `到期日要在明天到 ${o.max_days} 天之内。`]));
-      }
+      if (o.max_days) untilField(o, { field, update, fields, read, checks });
     } else {
       // 模板里的规则按 Python 语法写，浏览器不一定认得：认不得就只做基本检查，交给服务端把关
       let pattern = /^[a-z0-9][a-z0-9._-]{1,63}$/;
@@ -618,6 +632,10 @@ export function requestRoutes(ctx) {
           : p.spec || "（未填）";
         const cc = p.cost_center === "other" ? p.cost_center_name : (o.cost_centers.find((c) => c.id === p.cost_center) || {}).label;
         preview.textContent = `审批通过后在 ${accountName(o)} 开通 ${what}` + (cc ? `，成本归属 ${cc}` : "") + (p.until ? `，用到 ${p.until}` : "，长期") + "。";
+      } else if (o.kind === "service") {
+        preview.textContent = `审批通过后开通 ${o.title} 的访问权限`
+          + (p.until ? `，用到 ${p.until}` : "，长期有效，离职时自动失效")
+          + "。开通后用飞书账号登录，不需要云账号。";
       }
       else preview.textContent = `在 ${accountName(o)} 新建子账号 ${p.username || "（未填）"}${o.groups.length ? `，加入 ${o.groups.join("、")}` : ""}${o.console_login ? "；你可以领取一次性初始密码登录控制台" : ""}。`;
     }
@@ -879,7 +897,13 @@ export function requestRoutes(ctx) {
         : "这张迁移正在搬。关闭后面板不再跟进，但**云上的任务会照常跑完** —— 要真停下得去控制台手动停。确定关闭？";
     if (r.actions.close) actions.append(simpleAction("关闭申请", `/api/admin/requests/${encodeURIComponent(r.id)}/close`, closeTip, admin, true));
     if (r.actions.reopen) actions.append(simpleAction("重新打开", `/api/admin/requests/${encodeURIComponent(r.id)}/reopen`, "放回关闭前的状态接着处理。原来那张飞书审批继续有效，不用重新审批。确定重新打开？", admin));
-    if (r.actions.revoke) actions.append(simpleAction("作废凭证", `/api/${admin ? "admin/" : ""}requests/${encodeURIComponent(r.id)}/revoke`, "查看地址立刻失效，云上的子账号、密钥和策略一并删除。使用方要重新申请。确定作废？", admin, true));
+    // 两种单子的「作废」是两件事，文案不能共用：凭证那句逐字描述云上会被删掉什么，
+    // 对服务访问**每个字都是假的**（一行云都不调，只是把这张单推成已收回）
+    const revokeLabel = r.kind === "service" ? "收回访问权限" : "作废凭证";
+    const revokeTip = r.kind === "service"
+      ? "收回后他最迟一分钟内就进不去了。云上不会动任何东西，需要的话可以重新申请。确定收回？"
+      : "查看地址立刻失效，云上的子账号、密钥和策略一并删除。使用方要重新申请。确定作废？";
+    if (r.actions.revoke) actions.append(simpleAction(revokeLabel, `/api/${admin ? "admin/" : ""}requests/${encodeURIComponent(r.id)}/revoke`, revokeTip, admin, true));
     const hint = nextStep(r, admin);
     nodes.push(h("div", { class: "card status-card" }, steps(r), hint || actions.childElementCount ? h("div", { class: "status-foot" }, hint ? h("p", { class: "status-hint" }, hint) : null, actions.childElementCount ? actions : null) : null));
     nodes.push(secret);
