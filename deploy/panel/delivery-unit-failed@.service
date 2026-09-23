@@ -4,6 +4,16 @@
 # 进程拿不到报告，也就发不出告警 —— 一个每小时跑一次的任务可以连着挂好几天没人知道。
 #
 # 用法：在要兜底的单元 [Unit] 段加  OnFailure=delivery-unit-failed@%n.service
+#
+# **要验证告警通道，用 `systemctl start delivery-unit-failed@drill.service`，
+# 别拿真单元名演。** 演习那条是真发出去的、也真记冷却 —— 拿 delivery-sweep 演一次，
+# 接下来 6 小时它真挂了管理员收不到私聊，journal 里只有「仍在失败，第 N 次」。
+# 2026-09-23 踩过，清理办法：`sudo -u delivery` 改 /var/lib/delivery/alert-state.json
+# 把那个单元的记录删掉（**别用 root**，属主变了面板就读不了那个文件了）。
+# 手工跑的告警标题会是「告警演习」，收件人一眼分得出来。演习的冷却记在 `drill:` 开头的
+# 另一把键下，**不会污染真单元的冷却和连号**。
+# 6 小时内要演第二次就换个实例名（`@drill2.service`），否则第二条会被冷却挡掉，
+# 只在 journal 里留一行「仍在失败，第 2 次」，验证的人会以为通道坏了。
 # 发送走面板自己的飞书应用（refresh.env 里的 DELIVERY_FEISHU_APP_ID/SECRET），不依赖群机器人 webhook。
 [Unit]
 Description=Cloud panel: tell admins that %i failed
@@ -29,9 +39,12 @@ ProtectHome=true
 #  · **目录归 systemd 管了，文件没有。** 以 root 手跑一次 `delivery unit-failed`
 #    （不带 systemd 环境）会把 alert-state.json 重建成 root:root 0600，之后 delivery
 #    读不了也写不了 → 冷却永久失效（每次只在 journal 留一行）。要验就 `sudo -u delivery` 跑。
-#  · **EnvironmentFile 的取值覆盖 Environment=，与书写顺序无关。** 哪天 refresh.env 里
-#    出现同名 DELIVERY_ALERT_STATE，下面这行会静默失效。代码侧兜底是读 systemd 自己注入的
-#    $STATE_DIRECTORY（见 cli.UNIT_ALERT_STATE），所以这行漏了或被覆盖都还能落到同一个目录。
+#  · **EnvironmentFile 的取值覆盖 Environment=，与书写顺序无关**，而且它连 systemd
+#    自己注入的变量一起覆盖（systemd 把注入的变量放在最前，后者胜）。两件事受影响：
+#    ① 哪天 refresh.env 里出现同名 DELIVERY_ALERT_STATE，下面这行会静默失效 ——
+#       代码侧兜底是读 $STATE_DIRECTORY（见 cli.UNIT_ALERT_STATE），漏了也能落到同一个目录；
+#    ② refresh.env 里要是出现 MONITOR_UNIT / MONITOR_EXIT_STATUS，**每一条告警都会挂上
+#       那个固定的假死因**，或者演习标记永久失效。这两个名字别往 env 文件里写。
 StateDirectory=delivery
 Environment=DELIVERY_ALERT_STATE=/var/lib/delivery/alert-state.json
 TimeoutStartSec=2min

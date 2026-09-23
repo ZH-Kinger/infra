@@ -2056,6 +2056,86 @@ def _alert_sent(unit: str, path: str, now: float) -> None:
     _save_alert_state(file, state)
 
 
+#: 手工跑这条命令时正文里的标记。**人工触发和真故障长得一模一样**，
+#: 于是每次有人验证告警通道，收件人都要白紧张一次并去查一遍日志（2026-09-23 真发生过）。
+_DRILL = "（**这是手工触发的演习，不是真故障**）"
+
+
+#: 演习专用的实例名。`systemctl start delivery-unit-failed@drill.service`
+_DRILL_UNITS = frozenset({"drill", "drill.service"})
+
+
+def _is_drill(unit: str) -> bool:
+    """这条是人手工跑出来的，不是 systemd 的 `OnFailure` 拉起来的。
+
+    **不能只靠「`$MONITOR_UNIT` 缺失」推断**，那个前提比想象中窄得多：
+
+      · `MONITOR_*` 是 systemd **v251** 才有的（本项目的开发机是 249 就已经不成立）；
+      · 真正的条件也不是「触发方 `Type=oneshot`」，而是「同一个 handler 实例只能有
+        一个触发方」—— 这正是 `OnFailure=…@%n.service` 那个 `%n` 在保证的事。
+
+    前提一破，**每一条真告警的标题都会变成「告警演习」**，而且一声不吭。那是最坏的
+    失效方向：收件人看一眼标题就划过去，而兜底告警唯一要拦的就是那一刻。
+
+    所以判据改成**演习自报家门**，三层依次问：
+      1. `MONITOR_UNIT` 在 → 确定是 systemd 拉起来的，真故障；
+      2. 实例名就是演习专用的那个 → 演习；
+      3. 连 `INVOCATION_ID` 都没有 → 根本不是 systemd 起的，人手跑的。
+         （`INVOCATION_ID` 对**任何** systemd 起的单元都注入，v232 起，老得足够安全，
+         而且和 `MONITOR_*` 的注入条件相互独立。）
+    老 systemd 或 host 侧配置漂移时，落到「真故障」这一侧 —— 安全的那一侧。
+    """
+    if os.environ.get("MONITOR_UNIT") is not None:
+        return False
+    if str(unit or "").strip() in _DRILL_UNITS:
+        return True
+    if os.environ.get("INVOCATION_ID"):
+        # systemd 起的、却没给 MONITOR_* —— 老版本或者 OnFailure 写法被改过。
+        # 按真故障处理，但留一行痕：不然这种「标题一直不对」没人查得出来
+        print(
+            "[unit-failed] systemd 没注入 MONITOR_*（v251 以下，或同一 handler 有多个触发方），"
+            "本条按真故障处理",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def _how_it_died(unit: str) -> str:
+    """systemd 亲口说的退出情况。是演习就直接说是演习（判据见 `_is_drill`）。
+
+    `OnFailure=` 拉起的单元里 systemd 会注入 `$MONITOR_*`（**v251 起**，且要求
+    「同一个 handler 实例只有一个触发方」—— `@%n` 保证的就是这个）。拿得到的话
+    **比「让人自己去日志里分辨」强得多**：退出码是 1 还是被信号杀掉，这里一句话说清，
+    而那正是收到告警的人第一个要问的问题。
+
+    拿不到也不影响判定是不是演习 —— 那件事已经由 `_is_drill` 用别的依据回答了，
+    这里只是少说一句「怎么死的」。
+    """
+    if _is_drill(unit):
+        return _DRILL
+
+    # 值来自环境变量，终究是外部输入：带换行的话会把卡片上「去哪看日志」那几行挤掉
+    # （alert_card 只留前 24 行）。压成单行，同 notify._clip 的做法
+    def _flat(name: str) -> str:
+        return " ".join(str(os.environ.get(name, "")).split())
+
+    result = _flat("MONITOR_EXIT_CODE")  # exited / killed / dumped…
+    status = _flat("MONITOR_EXIT_STATUS")
+    if result == "exited" and status:
+        return f"（退出码 {status}）"
+    if result and status:
+        # 被信号杀掉的进程没有退出码，这里**不能**写「退出码」—— 那是假话
+        return f"（{result}：{status}）"
+    # `MONITOR_EXIT_CODE/STATUS` 还额外要求主进程真的跑起来并退出过，而
+    # `MONITOR_SERVICE_RESULT` 是无条件给的。**主进程压根没起来**的那些真故障
+    # （start-limit-hit「start request repeated too quickly」、ExecStartPre 失败、
+    # exec 之前就超时）只有它说得出话 —— 对一分钟一轮的 sweep，start-limit-hit
+    # 是相当现实的一种，没有兜底的话正文一个字都不说
+    verdict = _flat("MONITOR_SERVICE_RESULT")
+    return f"（systemd 判定：{verdict}）" if verdict else ""
+
+
 def _cmd_unit_failed(args) -> int:
     """systemd 的 OnFailure 兜底：定时任务**自己没来得及发告警**就结束了。
 
@@ -2069,10 +2149,19 @@ def _cmd_unit_failed(args) -> int:
     unit = str(args.unit or "").strip() or "（未知单元）"
     now = time.time()
     state_path = getattr(args, "state", "") or UNIT_ALERT_STATE
-    send, streak = _alert_cooldown(unit, state_path, now)
+    drill = _is_drill(unit)
+    how = _how_it_died(unit)
+    # **演习记在另一把键下。** 拿真单元名演一次（2026-09-23 就这么干过），
+    # 那条演习是真发出去的、也真记冷却 —— 接下来 6 小时这个单元真挂了管理员收不到，
+    # journal 里只有「仍在失败，第 N 次」。记在 `drill:` 下之后，真单元的冷却和连号
+    # 都不受污染，靠代码关掉这件事，不靠人记住文档
+    key = f"drill:{unit}" if drill else unit
+    send, streak = _alert_cooldown(key, state_path, now)
     hours = UNIT_ALERT_COOLDOWN // 3600
     if not send:
-        print(f"（{unit} 仍在失败，第 {streak} 次；{hours} 小时内不重复私聊）")
+        # 打 `key` 不打 `unit`：演习被挡住时打真单元名的话，journal 里看起来像那个
+        # 真单元在挂 —— 而它可能好好的，正在挂的只是有人连演了两次
+        print(f"（{key} 仍在失败，第 {streak} 次；{hours} 小时内不重复私聊）")
         return 0
     again = f"这是连续第 {streak} 次（{hours} 小时内只私聊一次）。\n" if streak > 1 else ""
     # **别在这里教人加 SuccessExitStatus。** 原先那句是这么写的，而这批改完之后
@@ -2080,7 +2169,7 @@ def _cmd_unit_failed(args) -> int:
     # 完全符合那句话的判据。照做就是 SuccessExitStatus=1，而 1 同时是「整步崩了」
     # 「存储读不了」的退出码 → 兜底告警从此永久失效。告警不该给出会关掉自己的建议。
     text = (
-        f"{unit} 这一轮没跑成。\n"
+        f"{unit} 这一轮没跑成。{how}\n"
         f"{again}"
         f"看日志：journalctl -u {unit} -n 80 --no-pager\n"
         "最后几行有 Python 报错 = 真崩了（或者被超时杀掉、依赖导入失败）。\n"
@@ -2089,12 +2178,15 @@ def _cmd_unit_failed(args) -> int:
         "  · 审批同步整步跳过（飞书不可用）—— 日志里有「飞书审批不可用」\n"
         "  · 申请单存储读不了 —— 日志里有「读不了申请单存储」"
     )
-    why = _admin_alert(f"定时任务没跑成：{unit}", text, args.admins)
+    # **标题问 `_is_drill()`，不要拿正文串去比。** 耦合在一个字符串上的话，将来
+    # `_how_it_died` 只要给演习串加点修饰，标题就会静默退回「定时任务没跑成」
+    title = "告警演习" if drill else "定时任务没跑成"
+    why = _admin_alert(f"{title}：{unit}", text, args.admins)
     if why:
         # 没送到就**不开始计冷却**：下一轮还要再试，否则一次飞书抖动换来六小时静默
         print(f"兜底告警没发出去：{why}", file=sys.stderr)
         return 1
-    _alert_sent(unit, state_path, now)
+    _alert_sent(key, state_path, now)
     print(f"已私聊管理员：{unit} 没跑成")
     return 0
 

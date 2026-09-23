@@ -130,3 +130,46 @@ tester 报了 1 个阻塞 bug + 3 个缺口 + 2 个 nit，全部已修：
   Med-4「管理员点了作废、云那边没删成」（DONE + cred_user + sealed 已清）这第三种残留仍不上页；
   Low-1 provision.remove_from_group 不吞 EntityNotExist.Group → 组被删后永久「回收失败」且无人能关掉；
   Low-2 AST 扫描跳过 _mark_revoked/_revoke_failed 的透传 note（已漏一条未签字）。
+
+- [2026-09-23] [TESTER] 演习标记 / `_how_it_died` 的测试补齐：新增 `tests/unit/test_delivery_alert_drill.py`
+  （17 用例 + 26 subtest）——演习标记在标题和正文两处、真故障绝不写成演习、退出码/信号透传、
+  `MONITOR_*` 畸形值（空串/非数字/带换行/五万字符）不许把告警通道带塌、演习照常记账。
+  另加单元文件那半边：所有挂 `OnFailure=delivery-unit-failed@%n.service` 的单元必须 `Type=oneshot`
+  且用 `@%n` 模板（破了 → systemd 不注入 `MONITOR_*` → **真故障的标题变成「告警演习」**）。
+  全量 `pytest -q tests/unit` 3105 passed / 567 subtests（基线 3088/541），node 83 pass，ruff 干净。
+  顺手收掉两条测试卫生：`UnitFailedTests.setUp` 的 mkdtemp 没回收；cooldown 里两处「状态文件落在
+  identity/ 下」的过时 docstring。两个既有文件的 setUp 另加了 `MONITOR_*` 环境隔离（否则跑测试的
+  shell 里有这几个变量就会换一条分支测）。**未真机验证**：面板机上还没跑过一次真演习/真失败。
+- [2026-09-23] [TESTER] dev 修了两条现状固定条，测试已翻面并复核通过：`MONITOR_UNIT=""` 现在算真故障
+  （`_is_drill()` 判 `is None`，方向对 —— 真故障被写成演习比反过来危险）；带换行的值被 `_flat()` 压平，
+  「去哪看日志」+ 三条来源不再被挤出卡片（承重墙仍在：五万字符 → 卡片 849 字节 / 7 元素 / 最长 234）。
+  新增 `IsDrillJudgementTests`（判据与正文解耦）+ `FallbackCoverageTests`（每个 timer 的 service 必须挂
+  `OnFailure`，防新增定时任务静默无兜底；7 个 timer 全合规）。演习 how-to（用 `drill.service`、别拿真单元名演）
+  写进了 drill 测试的 module docstring。全量 3109 passed / 585 subtests，node 83 pass，ruff 干净。
+- [2026-09-23] [TESTER] 判据第二次重写（审计推翻 v250/oneshot 两个假设）后用例已跟到新语义：
+  新增 `OldSystemdTests`（**Med-1 核心**：只有 `INVOCATION_ID` → 标题仍是「定时任务没跑成」+ stderr 留痕
+  + 冷却记在真单元键下）、`_is_drill` 四层真值表 + `drill` 名精确匹配（`drill2` 不算）、
+  `MONITOR_SERVICE_RESULT` 兜底（start-limit-hit 等四种 + 三者齐全时退出码优先）；
+  `DrillAccountingTests` 整组翻成「演习记在 `drill:<unit>`、真单元的冷却和连号一点不动」（9/23 事故回归锁）。
+  **发现并修掉一个环境依赖**：本机 shell 有 `INVOCATION_ID`（实测），cooldown/fallback 两个文件正是靠它
+  才走到真故障分支——CI 上没有的话键会变成 `drill:...`、满屏 KeyError。两个 setUp 已显式钉成真故障环境。
+  三个告警文件 69 passed / 82 subtests（drill 一个文件 29/63）；全量 3180 passed / 1 xfailed / 615 subtests（xfail 属
+  `test_delivery_regrant.py`，不是本条），node 83 pass，ruff 干净。
+
+[2026-09-23] [AUDITOR] 演习标记复审：0 高 1 中 5 低，无阻塞。
+  Med-1 推翻了两个写进注释的「依据」（审计查了 systemd v255 源码）：① MONITOR_* 是 **v251** 起
+  不是 250 —— 本项目开发机就是 249，前提在爆炸半径内已有一台机器不成立；② 真正条件不是
+  「触发方 Type=oneshot」而是「同一 handler 实例只能有一个触发方」（service.c:1574），即 @%n 保证的事。
+  前提一破 = 所有真告警标题变「告警演习」，是最坏的失效方向。已改成「演习自报家门」三层判据：
+  MONITOR_UNIT 在→真故障；实例名是 drill/drill.service→演习；有 INVOCATION_ID（v232 起，
+  对任何 systemd 单元都注入、与 MONITOR_* 条件独立）→真故障并留一行 stderr；都没有→演习。
+  另采纳审计给的第三条路：**演习记在 `drill:<unit>` 另一把键下** —— 9/23 我拿真单元名演了两次、
+  把 delivery-sweep 静音到 22:55，现在这件事是代码关掉的，不靠人记文档。
+  补 MONITOR_SERVICE_RESULT 兜底（start-limit-hit 这类「主进程压根没起来」的真故障，
+  EXIT_CODE/STATUS 都拿不到，以前正文一个字不说）。
+  EnvironmentFile 会覆盖 systemd 注入的 MONITOR_*（exec-invoke.c:4505 merge 后者胜），
+  已并进单元文件里那段覆盖警告。
+  测试侧抓到一个环境依赖的假绿：**本机 shell 自带 INVOCATION_ID**，两个兄弟文件今天绿是靠它
+  把自己送进真故障分支，干净 CI 容器里会满屏 KeyError —— 已在 setUp 里把环境钉死。
+  未做：真机端到端（面板机上跑一次 @drill.service 看标题、让 sweep 真退一次非零看退出码），
+  以及面板机 systemd 版本是否 ≥251（<251 走的是「标题对、正文缺怎么死的、stderr 有留痕」那条路）。

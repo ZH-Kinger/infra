@@ -56,6 +56,22 @@ class CooldownBase(unittest.TestCase):
         self.work = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.work, ignore_errors=True)
         self.state = self.work / "alert-state.json"
+        # **把环境钉成「systemd 因 OnFailure 拉起来的真故障」。** 这个文件测的是冷却，
+        # 不是演习判据，但两者并非无关：`cli._is_drill()` 为真时冷却记在 `drill:<unit>`
+        # 键下（见 `test_delivery_alert_drill.py::DrillAccountingTests`）。不钉的话——
+        #  · 跑测试的 shell 里有 `INVOCATION_ID`（桌面终端 / CI runner 常有，本机实测就有）
+        #    → 走真故障分支 → 下面 `self.units()[UNIT]` 取得到；
+        #  · 换个没有的环境 → 走演习分支 → 键变成 `drill:delivery-sweep.service` → 满屏
+        #    KeyError，而且是「本机绿、CI 红」那种最难查的。
+        # 给 `MONITOR_UNIT` 就够（判的是变量在不在，值是谁无所谓）：既不走演习，
+        # 也不触发「老 systemd」那行 stderr 留痕，正文和标题都停在本文件原本要测的那一支。
+        patched = mock.patch.dict(os.environ, {}, clear=False)
+        patched.start()
+        self.addCleanup(patched.stop)
+        for key in ("MONITOR_EXIT_CODE", "MONITOR_EXIT_STATUS", "MONITOR_SERVICE_RESULT"):
+            os.environ.pop(key, None)
+        os.environ["MONITOR_UNIT"] = UNIT
+        os.environ["INVOCATION_ID"] = "cooldown-tests"
 
     def fail_once(self, *, unit=UNIT, now=NOW, state=None):
         """报一次单元失败，返回 `(退出码, stdout, stderr)`。"""
@@ -309,8 +325,12 @@ class StateWriteTests(CooldownBase):
         self.assertEqual(set(self.units()), {UNIT, "delivery-refresh.service"})
 
     def test_the_state_file_holds_nothing_but_unit_names_and_timestamps(self):
-        """这个文件落在 identity/ 下，而 identity/ 是给员工数据准备的目录。
-        冷却记录**不许**往里掺人名、union_id、错误正文 —— 多存一样就多一份泄漏面。"""
+        """冷却记录**不许**掺人名、union_id、错误正文 —— 多存一样就多一份泄漏面。
+
+        它现在落在 `/var/lib/delivery/`（从前在 identity/ 下，那时这条更硬）。
+        搬了家不等于可以随便存：这个文件的全部用途就是「少刷几条消息」，
+        而告警正文里恰恰有申请人姓名、邮箱这类东西，顺手写进来没人会发现。
+        """
         self.fail_once()
         units = self.units()
         self.assertEqual(set(units), {UNIT})
@@ -385,7 +405,9 @@ class CooldownFailOpenTests(CooldownBase):
         self.assertIn("仍在失败", out)
 
     def test_a_missing_directory_is_created_instead_of_losing_the_alert(self):
-        """第一次部署时 identity/ 可能还不在。建出来，别把告警赔进去。"""
+        """落点的上级目录可能还不在（`StateDirectory=` 平时会把 `/var/lib/delivery`
+        建好，但手跑、或者 `DELIVERY_ALERT_STATE` 指到别处时就不一定了）。
+        建出来，别把告警赔进去。"""
         state = self.work / "还没建过" / "alert-state.json"
         code, _, err = self.fail_once(state=state)
         self.assertEqual(code, 0)

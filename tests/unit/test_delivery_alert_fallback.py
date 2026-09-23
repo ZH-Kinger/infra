@@ -16,9 +16,11 @@
 import argparse
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from delivery import cli, notify
 
@@ -72,7 +74,22 @@ class UnitFailedTests(unittest.TestCase):
         # 两个都不是被测代码的错，是测试没给它一个临时的家。
         # （默认值从前是仓库相对路径 `identity/alert-state.json`，2026-09-23 改掉，
         #   理由和配对关系见 `test_delivery_alert_cooldown.py::UnitFileTests`。）
-        self.state = str(Path(tempfile.mkdtemp()) / "alert-state.json")
+        work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)  # 不收的话每个用例漏一个目录
+        self.state = str(work / "alert-state.json")
+        # **把环境钉成「systemd 因 OnFailure 拉起来的真故障」**，理由同
+        # `test_delivery_alert_cooldown.py::CooldownBase`：`cli._is_drill()` 为真时，
+        # 冷却记在 `drill:<unit>` 键下、标题也变成「告警演习」。这个文件测的是告警通道
+        # 本身，不该跟着跑测试的 shell 里有没有 `INVOCATION_ID` 换分支（本机实测就有，
+        # CI 上多半没有 —— 正是「本机绿、CI 红」的配方）。
+        # 演习/真故障两支本身在 `test_delivery_alert_drill.py` 里单独锁。
+        patched = mock.patch.dict(os.environ, {}, clear=False)
+        patched.start()
+        self.addCleanup(patched.stop)
+        for key in ("MONITOR_EXIT_CODE", "MONITOR_EXIT_STATUS", "MONITOR_SERVICE_RESULT"):
+            os.environ.pop(key, None)
+        os.environ["MONITOR_UNIT"] = "delivery-sweep.service"  # 只看在不在，值是谁无所谓
+        os.environ["INVOCATION_ID"] = "fallback-tests"
 
     def unit_failed(self, unit):
         return cli.main(["unit-failed", "--unit", unit, "--state", self.state])
