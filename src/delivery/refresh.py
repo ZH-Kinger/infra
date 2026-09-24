@@ -59,19 +59,30 @@ class RefreshReport:
         return not self.problems
 
     @property
+    def title(self) -> str:
+        """通知的标题。**和正文首行同一个来源** —— 两边各写一份的下场是标题写死
+        「异常」、正文算出「完成」，人收到一条自相矛盾的消息（线上出现过：面板自己
+        开了个号，标题说异常、正文说完成）。那种消息会训练人忽略这条告警。"""
+        return "云权限面板数据刷新" + ("完成" if self.ok else "异常")
+
+    @property
     def needs_attention(self) -> bool:
         return bool(
             self.problems
             or self.new_high_risk
-            or self.added_users
+            # **这里是 added_unregistered，不是 added_users。** 面板自己开的号
+            # 是几分钟前管理员刚批的，再私聊他一条「新增子账号」纯属噪音；
+            # 要人去看的是**控制台里手工开的**那些（来路不明、事后查不清）。
+            # 台账读不到时 added_unregistered == added_users（见
+            # `cli._panel_issued_users`），也就是照常全量告警，不会因此漏掉
+            or self.added_unregistered
             or self.removed_users
             or self.new_unlinked
             or self.lost_union_ids
         )
 
     def render(self) -> str:
-        head = "云权限面板数据刷新" + ("完成" if self.ok else "异常")
-        lines = [head]
+        lines = [self.title]
 
         def section(title: str, items: list) -> None:
             if not items:

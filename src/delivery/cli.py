@@ -2478,7 +2478,7 @@ def _cmd_refresh(args) -> int:
     if not sent:
         # **没配群机器人 webhook 时私聊管理员。** 原先这里只打一行「没设置 webhook」就退出 ——
         # 线上一直没配，所以刷新出的每一个问题都只进了日志，从来没有人被通知过
-        why = _admin_alert("云权限面板数据刷新异常", text, getattr(args, "admins", ""))
+        why = _admin_alert(report.title, text, getattr(args, "admins", ""))
         if why:
             print(f"  ⚠ 告警没发出去：{why}")
             return 1
@@ -2630,9 +2630,17 @@ def _panel_issued_users(args, problems: list) -> set:
         if not isinstance(ticket, dict):
             continue
         tpl = ticket.get("template") or {}
-        # 被拒 / 撤回 / 提交失败的单子不算「面板开过」—— 那些号根本没建出来，
-        # 事后有人手工用同名建了号，反而该被提示补登记
-        if ticket.get("status") in ("rejected", "withdrawn", "submit_failed"):
+        # **白名单：只认"面板确实把号建出来了"的单子。**
+        #
+        # 原先是黑名单（排掉 rejected/withdrawn/submit_failed，其余都算面板开的），
+        # 而用户名来自申请人**提交时**自己填的 `payload["username"]` —— 于是一张
+        # 还在等审批、甚至永远不会被批的单子，就能让同名的号被当成"面板开的"。
+        # 谁想绕过"控制台手工建号会被点名"这条探测，只要先提一张同名的单放着不管。
+        # 执行失败、号根本没建出来的老单子同样会一直挡着。
+        #
+        # `user_created` 在 `create_user` 成功之后才写，`cred_user` 是撤销凭证时的
+        # 归属判据、不可能提前写 —— 两个都是"建成了"的事实，不是"打算建"。
+        if not (ticket.get("user_created") or ticket.get("cred_user")):
             continue
         name = ticket.get("cred_user") or (ticket.get("payload") or {}).get("username") or ""
         if name and tpl.get("platform") and tpl.get("account"):
