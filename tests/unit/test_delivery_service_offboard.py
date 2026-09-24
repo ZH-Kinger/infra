@@ -871,7 +871,9 @@ class ServiceTargetsTests(unittest.TestCase):
     def test_platform_constants(self):
         """`internal` 进了 `ALL_PLATFORMS`，且**不是** MANUAL —— 它能自动处理。"""
         self.assertEqual(offboard.SERVICE_PLATFORM, "internal")
-        self.assertEqual(offboard.ALL_PLATFORMS, ("aliyun", "volcano", "jiuzhang", "internal"))
+        self.assertEqual(
+            offboard.ALL_PLATFORMS, ("aliyun", "volcano", "jiuzhang", "turboai", "internal")
+        )
         self.assertFalse(offboard.manual(offboard.SERVICE_PLATFORM))
         self.assertNotIn(offboard.SERVICE_PLATFORM, offboard.PLATFORMS)
         self.assertNotIn(offboard.SERVICE_PLATFORM, offboard.MANUAL_PLATFORMS)
@@ -1949,6 +1951,76 @@ class RemindEndToEndTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(offboard.load(self.path), {})
         self.assertEqual([t for t in cards if "王五" in t and "待确认" in t], [])
+
+
+class ManualPlatformSourceTests(unittest.TestCase):
+    """「没有接口、只能人工在它自己控制台处理」的平台，**全仓只有一张名单**。
+
+    加第二个（TurboAI）时发现九章在四处各写一份：`platforms.MANUAL`、
+    `offboard.MANUAL_PLATFORMS`、`todo.py` 的归类、`web/iam.js` 的 `BY_HAND`。
+    四处的漏法各不相同，最坏的是最后一处：界面会说「面板会自动停用」而实际停不了，
+    于是**没人去那个平台的控制台处理**，号就一直开着 —— 而页面看上去一切正常。
+
+    所以这里锁的不是「名单里有哪几个」，是「它们都派生自同一处」。
+    """
+
+    def test_offboard_does_not_keep_a_second_copy(self):
+        """`is` 不是吹毛求疵：`== ("jiuzhang", "turboai")` 那种写法在**今天**也成立，
+        而它恰恰是四处各写一份的样子。同一个对象才说明是派生的。"""
+        from delivery import platforms as platforms_mod
+
+        self.assertIs(offboard.MANUAL_PLATFORMS, platforms_mod.MANUAL_IDS)
+        self.assertEqual(set(platforms_mod.MANUAL_IDS), set(platforms_mod.MANUAL))
+        for pid in platforms_mod.MANUAL_IDS:
+            with self.subTest(platform=pid):
+                self.assertTrue(offboard.manual(pid))
+                self.assertIn(pid, platforms_mod.NAMES, "人工平台也要有显示名")
+                self.assertNotIn(pid, platforms_mod.IDS, "它没有接口，不该进真·云平台名单")
+
+    def test_the_todo_page_follows_the_same_list(self):
+        """`todo.py` 是**运行时**读那张名单的，所以这条能真的变异验证：
+        名单里多一个平台，待办页立刻把它归进「要人去控制台处理」那一栏。
+        归错的症状是它被算进「面板会自动停」，然后永远没人去处理。"""
+        from delivery import platforms as platforms_mod
+        from delivery import todo as todo_mod
+
+        def kinds(platform, names=None):
+            report = todo_mod.Report()
+            row = {"person": "李四", "platform": platform, "user": "lisi", "at": ""}
+            if names is None:
+                todo_mod.collect_offboard(report, [row])
+            else:
+                with mock.patch.object(platforms_mod, "MANUAL_IDS", names):
+                    todo_mod.collect_offboard(report, [row])
+            return [i.kind for i in report.items]
+
+        self.assertEqual(kinds("turboai"), ["offboard_manual"])
+        # 变异：临时给名单加一个平台，归类要跟着走（写死的话这里不会变）
+        self.assertEqual(
+            kinds("newcloud", ("jiuzhang", "turboai", "newcloud")), ["offboard_manual"]
+        )
+        # 没加进名单的平台归「面板能自动停」那一栏
+        self.assertEqual(kinds("newcloud"), ["offboard_pending"])
+
+    def test_the_web_page_knows_every_manual_platform(self):
+        """前端那两个常量是静态 JS，断不了行为就断字面量 —— 漏一个的代价见类注释。
+
+        （按钮文案那条在 `tests/web/iam-offboard.test.mjs` 里，跑 `make test-web`。）
+        """
+        from delivery import platforms as platforms_mod
+
+        web = Path(__file__).resolve().parents[2] / "src" / "delivery" / "web"
+        iam = web / "iam.js"
+        by_hand = iam.read_text(encoding="utf-8").split("const BY_HAND")[1].split("\n")[0]
+        names = (web / "core.js").read_text(encoding="utf-8")
+        for pid in platforms_mod.MANUAL_IDS:
+            with self.subTest(platform=pid):
+                self.assertIn(
+                    f'"{pid}"',
+                    by_hand,
+                    f"iam.js 的 BY_HAND 少了 {pid}：页面会说面板能自动停用它，而实际停不了",
+                )
+                self.assertIn(f"{pid}:", names, "core.js 的 PLATFORM_NAME 少了显示名")
 
 
 if __name__ == "__main__":

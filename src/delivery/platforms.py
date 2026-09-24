@@ -190,9 +190,22 @@ ALL = (ALIYUN, VOLCANO)
 BY_ID = {p.id: p for p in ALL}
 IDS = tuple(p.id for p in ALL)
 NAMES = {p.id: p.name for p in ALL}
-#: 没有采集接口、账号靠人工登记的平台（见 offline_accounts）。**只有显示名**：
-#: 它们不是可申请的平台，不进 ALL / IDS —— 放进去的话申请模板、凭证发放都会以为能用
-NAMES.update({"jiuzhang": "九章"})
+#: 没有采集接口、账号靠人工登记的平台（见 offline_accounts）。
+#:
+#: **只有显示名，不进 ALL / IDS** —— 放进去的话申请模板、凭证发放、体检都会以为
+#: 它能调接口。体检那条真炸过：九章的号进了快照，`cred_env_names("jiuzhang", …)`
+#: 抛 `PlatformError`，而那段不在保护里 → `/api/admin/health` 整页打不开。
+#:
+#: **这是这类平台的唯一真相源。** 加第二个（TurboAI）时发现九章在四处各写一份：
+#: 这里、`offboard.MANUAL_PLATFORMS`、`todo.py`、`web/iam.js` 的 BY_HAND ——
+#: 漏掉其中任何一处的症状都不一样，最坏的是 BY_HAND：界面会让人以为面板能停这个号，
+#: 而实际上停不了，人就不会去那个平台的控制台手工处理。
+MANUAL = {
+    "jiuzhang": "九章",
+    "turboai": "TurboAI（曦望）",
+}
+MANUAL_IDS = tuple(MANUAL)
+NAMES.update(MANUAL)
 #: 自建服务（MLflow 这类）。同样**只有显示名、不进 ALL / IDS** —— 它没有云账号、
 #: 没有子账号、没有策略，凡是按 IDS 遍历云的地方都不该看到它。
 #: 之所以给它一个 platform 而不是借一个真实云账号当占位：借了的话台账和审批单上会

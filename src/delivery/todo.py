@@ -26,6 +26,21 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from . import platforms as platforms_mod
+
+
+def _manual_names(rows) -> str:
+    """这批离职待办涉及哪几个人工平台，按显示名连起来（「九章」「九章和 TurboAI（曦望）」）。
+
+    认不出的平台名原样保留 —— 编一个好看的名字会让人去错地方找。
+    """
+    seen: list = []
+    for r in rows or ():
+        got = platforms_mod.NAMES.get(str((r or {}).get("platform") or ""), "")
+        if got and got not in seen:
+            seen.append(got)
+    return "和".join(seen) or "人工登记的平台"
+
 URGENT = "urgent"
 NORMAL = "normal"
 
@@ -203,7 +218,9 @@ def collect_offboard(report: Report, pending: list, now: Optional[float] = None)
     for r in pending or ():
         by_person.setdefault(r.get("person") or r.get("user") or "", []).append(r)
     for who, mine in by_person.items():
-        manual = [r for r in mine if r.get("platform") in ("jiuzhang",)]
+        # 平台名单派生自 platforms.MANUAL，不在这里另写一份 ——
+        # 漏一个平台的症状是它的离职待办被归进「面板会自动停」那一栏，没人去手工处理
+        manual = [r for r in mine if r.get("platform") in platforms_mod.MANUAL_IDS]
         auto = [r for r in mine if r not in manual]
         # 只拿认得出来的时间算。有一条脏时间戳就 `or 0 → or None` 的写法会把整条
         # 待办的年龄抹掉，而没有年龄的项排在最后 —— 挂了 30 天的离职会沉到最底
@@ -235,8 +252,12 @@ def collect_offboard(report: Report, pending: list, now: Optional[float] = None)
                 Item(
                     kind="offboard_manual",
                     group=NORMAL,
-                    title=f"{who}：九章账号要你去控制台停",
-                    what="九章没有接口，面板动不了它。停完回来点一下销账，它才会从待办里消失。",
+                    # **平台名要从记录里取，不能写死。** 人工平台现在有两个
+                    # （九章、TurboAI），写死的话曦望的待办会显示成「九章账号要你去
+                    # 控制台停」—— 把人支去错的控制台，他在那儿什么也找不到
+                    title=f"{who}：{_manual_names(manual)}账号要你去控制台停",
+                    what=f"{_manual_names(manual)}没有接口，面板动不了它。"
+                    "停完回来点一下销账，它才会从待办里消失。",
                     action="去销账",
                     href="#admin/iam",
                     source="离职记录",

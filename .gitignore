@@ -46,3 +46,10 @@ identity/*
 **/.manual-links.json.*.tmp
 **/review.log
 **/.refresh.lock
+
+# AI 助手/技能的工作产物。**不是这个仓库的一部分**：换台机器、换个工具就长得不一样，
+# 进了 git 只会让 diff 里混进和面板无关的东西
+.agents/
+.claude/
+skills/
+skills-lock.json

@@ -4,7 +4,7 @@
 
 export const PLATFORM_CLASS = { aliyun: "aliyun", volcano: "volcano" };
 //: 九章没有采集接口、账号是人工登记的（见 offline_accounts），不是可申请的平台，但名册和体检里会出现
-export const PLATFORM_NAME = { aliyun: "阿里云", volcano: "火山引擎", jiuzhang: "九章", internal: "自建服务" };
+export const PLATFORM_NAME = { aliyun: "阿里云", volcano: "火山引擎", jiuzhang: "九章", turboai: "TurboAI（曦望）", internal: "自建服务" };
 
 export function h(tag, props, ...children) {
   const el = document.createElement(tag);

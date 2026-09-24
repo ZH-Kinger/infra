@@ -162,3 +162,37 @@ test("没有 offboard_error 时没有这条警告", () => {
   const root = render([DISABLED]);
   assert.ok(!root.textContent.includes("离职记录读不了"));
 });
+
+// ── 没有接口的平台（九章 / TurboAI）：按钮文案必须不一样 ────────────────────
+//
+// **漏一个平台比多一个危险**：界面会说「确认删除」，让人以为面板能删掉那个号；
+// 点下去服务端也办不了，于是没人去那个平台自己的控制台处理，号就一直开着。
+// 名单的真相源在 `platforms.MANUAL`（Python 侧有一条用例盯着两边对齐）。
+const MANUAL = [
+  { ...DISABLED, platform: "jiuzhang", account: "wuji", user: "lisi-jz" },
+  { ...DISABLED, platform: "turboai", account: "wuji", user: "lisi-tb" },
+];
+
+test("没有接口的平台给的是「我已在控制台处理」", () => {
+  for (const row of MANUAL) {
+    const root = render([row]);
+    assert.equal(buttons(root, "我已在控制台处理").length, 1, row.platform);
+    assert.equal(buttons(root, "确认删除").length, 0, `${row.platform} 不该说面板能删`);
+  }
+});
+
+test("有接口的平台还是「确认删除」", () => {
+  const root = render([DISABLED]);
+  assert.equal(buttons(root, "确认删除").length, 1);
+  assert.equal(buttons(root, "我已在控制台处理").length, 0);
+});
+
+test("销账发的 key 带的是那个平台自己的标识", async () => {
+  const root = render([MANUAL[1]]);
+  const sent = captureFetch();
+  globalThis.window.confirm = () => true;
+  await buttons(root, "我已在控制台处理")[0].dispatch("click");
+  assert.deepEqual(sent.map((s) => s.body), [
+    { op: "offboard_delete", key: "turboai/wuji/lisi-tb" },
+  ]);
+});

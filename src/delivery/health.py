@@ -337,6 +337,18 @@ def collect(
     except Exception:  # noqa: BLE001 — 体检页任何一项都不能让整页挂掉
         needs_issuer = {}
     for platform, account in sorted(a for a in accounts if a[0] and a[1]):
+        # **人工登记的平台（九章）没有"执行身份"可言**：它的账号是管理员在自己的
+        # 控制台开的，面板一个接口都不调，也就没有凭证可查。
+        #
+        # 不跳过的话 `cred_env_names` 直接抛 `PlatformError`，**而这一段不在 `_safe`
+        # 里** —— 整个体检页 500，不是少一项。2026-09-24 实测复现：人工登记了 18 个
+        # 九章号之后，它们经 `_with_offline` 进快照、再经上面的 `snap.users` 进
+        # `accounts`，`/api/admin/health` 从此打不开。
+        #
+        # 判据用 `platforms.IDS`（真·云平台的注册表）而不是写死平台名：
+        # 以后再加一个人工登记的平台，这里不用跟着改
+        if platform not in platforms.IDS:
+            continue
         title = f"{platforms.name_of(platform)} {account}"
         prefix = exec_env_prefix(platform, account)
         if all(env.get(n) for n in platforms.cred_env_names(platform, prefix)):

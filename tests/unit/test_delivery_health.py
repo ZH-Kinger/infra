@@ -370,6 +370,35 @@ class HealthTests(unittest.TestCase):
         _, checks = run(FakeBackend(_catalog=ValueError("boom secret")), EXEC)
         self.assertNotIn("boom secret", checks[("申请内容", "申请模板")]["detail"])
 
+    def test_a_hand_registered_platform_does_not_take_the_whole_page_down(self):
+        """**人工登记的平台（九章）没有「执行身份」可言**：它的账号是管理员在自己的
+        控制台开的，面板一个接口都不调，也就没有凭证可查。
+
+        这一段不在 `_safe` 里 —— `cred_env_names` 一抛 `PlatformError`，
+        整个 `/api/admin/health` 就是 500，不是「少一项」。2026-09-24 实测：
+        人工登记了 18 个九章号之后，它们经快照进 `accounts`，体检页从此打不开。
+
+        判据要按 `platforms.IDS`（真·云平台的注册表），不是写死平台名 ——
+        以后再加一个人工登记的平台，这里不用跟着改。
+        """
+        from delivery import platforms as platforms_mod
+
+        self.assertNotIn("jiuzhang", platforms_mod.IDS, "九章不是可申请的云平台")
+        backend = FakeBackend(
+            _snapshot=SimpleNamespace(
+                captured_at=_iso(NOW - 3600),
+                users=(
+                    SimpleNamespace(platform="aliyun", account=ACC),
+                    SimpleNamespace(platform="jiuzhang", account="wuji"),
+                ),
+                incomplete=(),
+            )
+        )
+        data, checks = run(backend, with_base())
+        self.assertEqual(checks[("执行身份", f"阿里云 {ACC}")]["level"], health.OK)
+        self.assertNotIn(("执行身份", "九章 wuji"), checks, "没有执行身份的平台不该被查")
+        self.assertEqual(data["summary"]["crit"], 0, data)
+
 
 if __name__ == "__main__":
     unittest.main()

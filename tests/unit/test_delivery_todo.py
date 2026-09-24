@@ -351,6 +351,27 @@ class OffboardTests(unittest.TestCase):
         todo.collect_offboard(r, [self.rec(platform="jiuzhang")])
         self.assertEqual([i.kind for i in r.items], ["offboard_manual"])
 
+    def test_the_manual_chore_says_which_console_to_go_to(self):
+        """**名单收敛了，文案没有。** 人工平台现在有两个（九章、TurboAI），
+        而这条待办的标题和正文里写死着「九章」——
+
+        TurboAI 的号离职时，管理员看到的是「九章账号要你去控制台停」：
+        他去九章控制台，那个人多半根本没有九章的号，于是要么困惑、要么直接点
+        「去销账」把这条划掉 —— 而 TurboAI 上那个号（现网 5 个里 4 个是 Admin）
+        一直开着。这正是把名单收敛成一处要防的那件事，只是漏在了文案这一处。
+
+        期望：文案按记录里的平台取 `platforms.NAMES`，一个人同时有两个平台时
+        两个都说出来。
+        """
+        from delivery import platforms as platforms_mod
+
+        r = todo.Report()
+        todo.collect_offboard(r, [self.rec(platform="turboai", user="lisi-tb")])
+        manual = [i for i in r.items if i.kind == "offboard_manual"][0]
+        said = f"{manual.title}｜{manual.what}"
+        self.assertIn(platforms_mod.NAMES["turboai"], said, said)
+        self.assertNotIn("九章", said, "去错控制台 = 那个号没人停，而待办被划掉了")
+
     def test_empty_input_adds_nothing(self):
         for rows in ([], None):
             r = todo.Report()

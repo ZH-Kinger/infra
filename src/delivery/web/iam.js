@@ -465,9 +465,11 @@ function reconcileSection(ui, data) {
 // 离职的人的云账号：检测到离职已自动停用（关登录、禁 AK）的，和通讯录里找不到、
 // 等人判断的。「确认删除」删云上的号，**不删任何数据**；「恢复」把停用时关掉的开回去，
 // 之后不再自动停这个号。
-const CLOUD = { aliyun: "阿里", volcano: "火山", jiuzhang: "九章" };
+const CLOUD = { aliyun: "阿里", volcano: "火山", jiuzhang: "九章", turboai: "TurboAI" };
 // 九章没有接口：面板停不了也删不了，只能记下来提醒人去九章控制台处理，处理完点一下销账
-const BY_HAND = new Set(["jiuzhang"]);
+// **漏一个平台比多一个危险**：界面会说「面板会自动停用」，而实际停不了，
+// 于是没人去那个平台的控制台手工处理，号就一直开着。和 platforms.MANUAL 对齐
+const BY_HAND = new Set(["jiuzhang", "turboai"]);
 
 function offboardSection(items) {
   const rows = items.map((r) => {
