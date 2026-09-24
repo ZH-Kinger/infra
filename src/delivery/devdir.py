@@ -136,7 +136,7 @@ def targets_in(doc, username: str) -> list:
     """
     who = _require_segment(username, "登录名")
     out: list = []
-    for stmt in ((doc or {}).get("Statement") or ()):
+    for stmt in (doc or {}).get("Statement") or ():
         res = (stmt or {}).get("Resource")
         for arn in [res] if isinstance(res, str) else list(res or ()):
             hit = _OBJECT_ARN.match(str(arn))
@@ -262,7 +262,6 @@ def dev_dir(bucket: str, group: str, username: str) -> str:
     who = _require_segment(username, "登录名")
     grp = str(group or "").strip().strip("/")
     return f"{bucket}/{grp}/{who}/" if grp else f"{bucket}/{who}/"
-
 
 
 def _require_segment(value: object, what: str) -> str:

@@ -41,6 +41,7 @@ def _manual_names(rows) -> str:
             seen.append(got)
     return "和".join(seen) or "人工登记的平台"
 
+
 URGENT = "urgent"
 NORMAL = "normal"
 
@@ -311,7 +312,11 @@ def collect_tickets(report: Report, rows: list) -> None:
     stuck_states = ("failed", "submit_failed")
     failed = [t for t in rows or () if t.get("state") in stuck_states]
     if failed:
-        oldest = min((days_ago(t.get("created_at", "")) or 0) for t in failed) or None
+        # 只拿认得出来的时间算 —— `or 0 → or None` 的写法有一条脏时间戳就会把整条
+        # 待办的年龄抹掉，而没有年龄的项排在最后：挂了 30 天的单会沉到最底。
+        # 同文件 `collect_offboard` 早就避开了这个坑，这里一直是另一种写法
+        seen_failed = [x for x in (days_ago(t.get("created_at", "")) for t in failed) if x]
+        oldest = min(seen_failed) if seen_failed else None
         report.add(
             Item(
                 kind="request_failed",
@@ -319,11 +324,38 @@ def collect_tickets(report: Report, rows: list) -> None:
                 title=f"{len(failed)} 张单审批过了但开通失败",
                 what="申请人以为在走流程，其实卡住了。看一眼失败原因，能重试的重试。",
                 action="去处理",
-                href="#admin/requests?state=failed",
+                # `?state=…` 前端不认，落到「全部」等于没筛（和下面那条同一个坑）
+                href="#admin/requests?attention",
                 source="申请单",
                 source_at=str(failed[0].get("created_at") or ""),
                 since=oldest,
                 count=len(failed),
+            )
+        )
+    manual = [t for t in rows or () if t.get("manual_account")]
+    if manual:
+        # 复用同文件那个 `_manual_names` —— 它已经处理了去重和「跳过认不出的名字」。
+        # 自己再拼一遍的结果是：认不出的平台留下一个空段，而那个多余的分隔符在**中间**，
+        # `.strip("、")` 擦不掉 → 渲染成「九章、、TurboAI（曦望）」
+        names = _manual_names(manual)
+        seen_manual = [x for x in (days_ago(t.get("created_at", "")) for t in manual) if x]
+        oldest = min(seen_manual) if seen_manual else None
+        report.add(
+            Item(
+                kind="request_manual_account",
+                group=URGENT,
+                title=f"{len(manual)} 张{names}开号单等你去建号",
+                # **不写「通知发没发出去」**：发出去了也可能被漏看，而漏看之后
+                # 就再没有别的东西提醒了。这一条的意义就是「卡片之外的第二道」
+                what="面板开不了这些平台的号。去它的控制台建好，回来回填登录名，这张单才算完。",
+                action="去回填",
+                # `?state=…` 前端不认（只认 open/attention/closed/all），落到「全部」等于没筛。
+                # FULFILLING 在管理员的「需要处理」里
+                href="#admin/requests?attention",
+                source="申请单",
+                source_at=str(manual[0].get("created_at") or ""),
+                since=oldest,
+                count=len(manual),
             )
         )
     waiting = [t for t in rows or () if t.get("needs_iam")]

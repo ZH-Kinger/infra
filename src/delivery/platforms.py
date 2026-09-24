@@ -190,6 +190,8 @@ ALL = (ALIYUN, VOLCANO)
 BY_ID = {p.id: p for p in ALL}
 IDS = tuple(p.id for p in ALL)
 NAMES = {p.id: p.name for p in ALL}
+
+
 #: 没有采集接口、账号靠人工登记的平台（见 offline_accounts）。
 #:
 #: **只有显示名，不进 ALL / IDS** —— 放进去的话申请模板、凭证发放、体检都会以为
@@ -200,12 +202,39 @@ NAMES = {p.id: p.name for p in ALL}
 #: 这里、`offboard.MANUAL_PLATFORMS`、`todo.py`、`web/iam.js` 的 BY_HAND ——
 #: 漏掉其中任何一处的症状都不一样，最坏的是 BY_HAND：界面会让人以为面板能停这个号，
 #: 而实际上停不了，人就不会去那个平台的控制台手工处理。
+@dataclass(frozen=True)
+class ManualPlatform:
+    """一个没有接口的平台。`login_prefix` 空 = 登录名算不出来，只能管理员回填。"""
+
+    id: str
+    name: str
+    #: 登录名的前缀，配合「阿里云登录名去掉点号」拼出来。
+    #:
+    #: **只有规则确实一致时才填。** 九章 18 个号 18/18 是 `wuji-<阿里登录名去点>`，
+    #: 所以面板算得出、能直接告诉管理员要建哪个名字；TurboAI 的 5 个号是三种写法
+    #: （`yuan.zhen@`→`zhenyuan` 名姓倒置、`liang.jiaqi@`→`liangjiaqi` 姓名顺序、
+    #: `zhang.wentao@`→`zhangwt` 缩写），各自注册时随手起的 —— **算不出来**。
+    #: 这种情况留空，由管理员建完号之后回填实际名字。
+    #: 硬猜一个名字比留空危险：管理员会照着建，于是云上多一个没人用的号
+    login_prefix: str = ""
+
+
 MANUAL = {
-    "jiuzhang": "九章",
-    "turboai": "TurboAI（曦望）",
+    p.id: p
+    for p in (
+        ManualPlatform("jiuzhang", "九章", login_prefix="wuji-"),
+        ManualPlatform("turboai", "TurboAI（曦望）"),
+    )
 }
 MANUAL_IDS = tuple(MANUAL)
-NAMES.update(MANUAL)
+NAMES.update({k: v.name for k, v in MANUAL.items()})
+
+
+def manual(platform: str) -> Optional[ManualPlatform]:
+    """这个平台是不是人工平台；不是就返回 None。"""
+    return MANUAL.get(str(platform or ""))
+
+
 #: 自建服务（MLflow 这类）。同样**只有显示名、不进 ALL / IDS** —— 它没有云账号、
 #: 没有子账号、没有策略，凡是按 IDS 遍历云的地方都不该看到它。
 #: 之所以给它一个 platform 而不是借一个真实云账号当占位：借了的话台账和审批单上会

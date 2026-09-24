@@ -551,6 +551,16 @@ def _todo_view(backend) -> dict:
                     # 凭证没收掉，下面 collect_expiring 靠它把这类单子捞回来
                     "cred_user": bool(row.get("cred_user")),
                     "kind": str(row.get("kind") or ""),
+                    # 人工平台（九章 / 曦望）的开号单停在「待开通」= 有活儿等着人去
+                    # 那个平台的控制台建号。**通知成功也要列出来**：卡片会被漏看，
+                    # 而漏看之后再没有任何东西提醒，单子就一直躺着
+                    "manual_account": (
+                        row.get("kind") == "account"
+                        and row.get("status") == tickets_mod.FULFILLING
+                        and str((row.get("template") or {}).get("platform") or "")
+                        in platforms_mod.MANUAL_IDS
+                    ),
+                    "platform": str((row.get("template") or {}).get("platform") or ""),
                 }
             )
         todo_mod.collect_tickets(report, rows)
@@ -1418,6 +1428,8 @@ class Backend:
                 executor=self._executor,
                 issuer=self._issuer,
                 add_manual_link=link,
+                announce_manual=self._announce_manual,
+                register_manual=self._register_manual,
                 # 没配 token 时它内部 Config.from_env() 会抛错，
                 # 被 _write_iam_attr 接住记成「他登不进去」—— 不影响建号本身。
                 # **实现共用 iam_sync.writer**：原先这段闭包只写在这儿，
@@ -1433,6 +1445,40 @@ class Backend:
                 issuer_ready=provision_issuer_configured,
             )
         return self._flows
+
+    def _register_manual(
+        self, platform: str, account: str, user: dict, actor: str, ticket_id: str
+    ) -> None:
+        """回填时把管理员刚建好的号写进人工登记名单。写不进去就抛 —— 调用方据此
+        让单子留在「待开通」，而不是推成 DONE 之后名册里查无此号。"""
+        from . import offline_accounts as offline_mod
+
+        path = offline_mod.beside(self.inventory_path)
+        if not path:
+            raise DeliveryError("面板没配权限快照路径，找不到人工登记名单")
+        offline_mod.merge_one(
+            path,
+            platform=platform,
+            account=account,
+            user=user,
+            actor=actor,
+            ticket_id=ticket_id,
+        )
+
+    def _announce_manual(self, ticket: dict, login: str = "") -> list:
+        """人工平台（九章 / TurboAI）的开账号单批过之后，私聊管理员去建号。
+
+        面板这条路和 sweep 那条路都要接（审批回调可能落在任一边）。**漏接不会静默** ——
+        `flows._tell_admin_to_open` 会在单子上留一条命中 TROUBLE_WORDS 的事件。
+        """
+        notifier = self.user_notifier()
+        if notifier is None:
+            return ["面板没配飞书应用凭证或 BASE_URL"]
+        admins = self.admins().union_ids
+        if not admins:
+            return ["管理员名单里没有 union_id"]
+        card = notify_mod.manual_account_card(ticket, login, base_url=self.base_url)
+        return notify_mod.notify_admins(notifier, admins, card)
 
     def current_groups(self, platform: str, account: str, name: str) -> Optional[set]:
         """权限快照里这个子账号当前所在的用户组；快照没有或这个云账号没采全时返回 None（未知）。"""

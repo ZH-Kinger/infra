@@ -85,6 +85,9 @@ _EVENT_LABELS = {
     "cred_regrant_requested": "准备调整凭证权限",
     "cred_regrant_failed": "凭证权限调整失败",
     "cred_regrant_done": "凭证权限已调整",
+    # 人工平台（九章 / TurboAI）：审批通过后要私聊管理员去那边开号
+    "manual_notice_sent": "已通知管理员去开号",
+    "manual_notice_failed": "通知管理员没发出去",
 }
 #: 这些事件的 note 是云接口 / 飞书接口的原始错误，只给管理员看；员工看到的是下面的说明
 _ERROR_NOTES = {
@@ -98,6 +101,10 @@ _ERROR_NOTES = {
     # `CreatePolicyVersion` / `UpdatePolicy` 都可能服务端已生效而客户端超时断连，
     # 那时候收窄或延期其实已经落地了。对申请人说一句确定的假话，比说不确定更糟
     "cred_regrant_failed": "这次调整可能没有生效，管理员会核对后处理",
+    # 原文是 `notify.notify_admins` 拼的，含管理员 union_id 前 12 位和飞书/urllib
+    # 的英文异常 —— 申请人读它没有用，而且它只在真的发送失败时才显形（测试环境看不到）。
+    # 说「管理员会收到待办提醒」是实话：待办页那条按单子状态算，和通知成没成无关
+    "manual_notice_failed": "管理员会在待办里看到这张单",
 }
 
 
@@ -200,7 +207,11 @@ def ticket_view(ticket: dict, *, viewer: Caller, links: Optional[dict] = None) -
             and ticket.get("kind") == "account"
             and bool(ticket.get("user_created"))
             and not ticket.get("iam_written"),
-            "fulfil": viewer.admin and status == t.FULFILLING and ticket.get("kind") == "resource",
+            # 资源开通登记实例 ID；人工平台（九章 / TurboAI）的开账号单回填登录名 ——
+            # 两者都是「面板做不了、人做完回来登记」，走同一个动作
+            "fulfil": viewer.admin
+            and status == t.FULFILLING
+            and ticket.get("kind") in ("resource", "account"),
             "close": viewer.admin and status in (t.FAILED, t.FULFILLING),
             # 重开 = 回到关闭前的状态接着处理，**不重新走审批**（原审批实例每次开通都会重新核对）。
             # 凭证已经签出去的不给重开，那种要走「作废凭证」—— 判据和 flows.reopen 里的一致

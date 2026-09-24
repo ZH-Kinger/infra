@@ -128,6 +128,12 @@ def _account_how(tpl: Mapping) -> str:
     """
     from . import platforms as platforms_mod
 
+    spot = platforms_mod.manual(str(tpl.get("platform") or ""))
+    if spot is not None:
+        # **人工平台不能落到下面那句「只能用访问凭证」。** catalog 拒绝它们配
+        # `console_login`，于是快照里恒为假 —— 而九章和曦望根本不发访问凭证，
+        # 控制台就是唯一入口。照那句话做的人会去找一把不存在的钥匙
+        return f"号已经在{spot.name}的控制台建好了。登录方式和初始密码问管理员 —— 面板发不了它。"
     if not tpl.get("console_login"):
         return "子账号已建好。这个账号不开控制台登录，只能用访问凭证。"
     platform = str(tpl.get("platform") or "")
@@ -198,7 +204,7 @@ def message(event: str, ticket: Mapping, *, now: Optional[float] = None) -> tupl
         return (
             "blue",
             f"审批已通过：{title}",
-            ["审批通过了。这类资源由管理员按流程开通，开通后会再通知你。"],
+            [_fulfilling_how(ticket)],
         )
     if event == "failed":
         return (
@@ -1009,3 +1015,64 @@ def from_env(
     conf = alerts.from_env(env)
     admin = AdminAlert(conf[0], conf[1], base_url) if conf else None
     return combine(user, admin)
+
+
+def _fulfilling_how(ticket: Mapping) -> str:
+    """「审批通过、等开通」这一刻该对申请人说什么。
+
+    **人工平台要说清是哪个平台开不了。** 说「这类资源由管理员按流程开通」不算谎话，
+    但这条链上另外五个出口（台账、审批摘要、申请预览、横幅、下一步提示）都改口了，
+    唯独推送卡还用老词 —— 口径不一致的结果是人不知道该信哪一个。
+    """
+    spot = _manual_platform_of(ticket)
+    if spot is None:
+        return "审批通过了。这类资源由管理员按流程开通，开通后会再通知你。"
+    return f"审批通过了。面板开不了{spot.name}的号，要管理员去它的控制台手工建，建好会再通知你。"
+
+
+def _manual_platform_of(ticket: Mapping):
+    """这张单是不是人工平台的；不是就返回 None。"""
+    return platforms.manual(str((ticket.get("template") or {}).get("platform") or ""))
+
+
+def manual_account_card(ticket: Mapping, login: str = "", *, base_url: str = "") -> dict:
+    """人工平台（九章 / TurboAI）开账号单：私聊管理员派活。
+
+    **这张卡是那条链上唯一会主动找人的东西。** 阿里和火山的开账号单批了就是开好了，
+    九章和曦望批了之后什么都没发生 —— 没有这张卡，单子会静静躺在台账里，
+    申请人以为在走流程、管理员根本不知道有活儿。
+
+    内容按「照着就能干活」来排：谁要、开在哪、叫什么名字、干完去哪销账。
+    **登录名算不出来时就明说「按你们的习惯起」**，不编一个 —— 编的后果是
+    管理员照着建，云上多一个没人用的号。
+    """
+    tpl = ticket.get("template") or {}
+    who = ticket.get("applicant") or {}
+    platform = str(tpl.get("platform") or "")
+    name = platforms.name_of(platform)
+    rows = [
+        f"**申请人**：{who.get('name') or '（名字没记上）'}　{who.get('email') or ''}",
+        f"**平台**：{name}　租户 {tpl.get('account') or '（模板里没写）'}",
+        f"**登录名**：{login}" if login else "**登录名**：算不出来，按你们那边的习惯起一个",
+        f"**单号**：{ticket.get('id') or ''}",
+    ]
+    elements: list = [md("面板开不了这个平台的号，要你去它的控制台手工建。"), md("\n".join(rows))]
+    # reason 存在 ticket 顶层（`flows.submit` 写的），不在 payload 里 ——
+    # 而人工平台的 payload 按设计恒为 {}，取错字段的结果是管理员收到的卡上
+    # 永远没有「为什么要这个号」
+    reason = str(ticket.get("reason") or "").strip()
+    if reason:
+        elements.append(note(f"申请理由：{_clip(reason, _LINE_MAX)}"))
+    if base_url:
+        elements.append(
+            {
+                "tag": "action",
+                "actions": [
+                    link_button(
+                        "建好了，去回填", f"{base_url.rstrip('/')}/#admin/requests", "primary"
+                    )
+                ],
+            }
+        )
+    elements.append(note("回填登录名之后这张单才算完，在那之前它一直停在「待开通」。"))
+    return card2("action", f"{name}：有一张开号单等你", elements)

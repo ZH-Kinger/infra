@@ -181,16 +181,12 @@ class PanelIssuedUsersTests(unittest.TestCase):
     def test_a_panel_issued_account_is_recognised(self):
         self.write(self.ticket())
         problems = []
-        self.assertEqual(
-            cli._panel_issued_users(self.args(), problems), {"aliyun/100/chi.xuemin"}
-        )
+        self.assertEqual(cli._panel_issued_users(self.args(), problems), {"aliyun/100/chi.xuemin"})
         self.assertEqual(problems, [])
 
     def test_a_credential_user_counts_too(self):
         self.write(self.ticket(payload={}, user_created=False, cred_user="staff-lisi-9a1b2c"))
-        self.assertEqual(
-            cli._panel_issued_users(self.args(), []), {"aliyun/100/staff-lisi-9a1b2c"}
-        )
+        self.assertEqual(cli._panel_issued_users(self.args(), []), {"aliyun/100/staff-lisi-9a1b2c"})
 
     def test_a_ticket_that_never_created_anything_does_not_count(self):
         """被拒 / 撤回 / 提交失败 / 开通失败的单子里那个号根本没建出来。

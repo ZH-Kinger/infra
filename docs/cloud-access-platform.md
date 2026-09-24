@@ -6,6 +6,9 @@
 
 代码在 `src/delivery/`，部署见 [deploy/panel/README.md](../deploy/panel/README.md)。
 
+本文记的是**设计取舍和不变量**，给改这套代码的人看。要用面板的人看
+[云权限面板](panel.md) —— 功能、员工和管理员怎么用、建号的数据初始化、权限控制，一篇写完。
+
 **登录方式的现状**：线上跑的是**飞书登录**（`delivery serve --auth feishu`，也是默认值）。
 公司 IAM 登录（oauth2-proxy + OIDC，含 `delivery login --iam` 的设备码）代码已经写好、
 配置模板在 `deploy/panel/`，但**还没有启用**，需要 IT 先建好 OIDC 应用。下文凡是提到

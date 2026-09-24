@@ -333,7 +333,12 @@ def _approval_field(ticket: Mapping, code: str, status: str) -> dict:
     }
 
 
-def _approval_fields(tpl: Mapping, payload: Mapping) -> dict:
+def _account_options(approval) -> Mapping:
+    """这条审批定义的「云账号」选项对照表。拿不到就返回空表（照旧送 `平台/账号`）。"""
+    return getattr(getattr(approval, "config", None), "account_options", {}) or {}
+
+
+def _approval_fields(tpl: Mapping, payload: Mapping, options: Optional[Mapping] = None) -> dict:
     """按申请类型，把 payload 拆成审批表单里的独立字段。
 
     为什么不只给一段摘要：审批人要快速看清「谁、什么权限、多久」，一段话得逐字读。
@@ -347,6 +352,10 @@ def _approval_fields(tpl: Mapping, payload: Mapping) -> dict:
     # 只送 `aliyun` 的话，两个账号的申请在审批单上长得一模一样，
     # 而审批人正是按这一栏分流和担责的。审批定义里的选项 key 要和这个串对齐
     acct = f"{tpl.get('platform') or ''}/{tpl.get('account') or ''}"
+    # 后台手工加的选项只能拿到飞书自动生成的 ID，和 `平台/账号` 对不上，
+    # 送过去会被拒掉**整张表单**（单子落「提交失败」，报错和云账号毫无关系）。
+    # 表里没有的照旧送 `平台/账号` —— 阿里和火山的行为逐字不变
+    acct = str((options or {}).get(acct) or acct)
     if kind == catalog_mod.KIND_CREDENTIAL:
         scheme = platforms_mod.get(str(tpl.get("platform") or "")).storage_scheme
         bucket, prefix = str(payload.get("bucket") or ""), str(payload.get("prefix") or "")
@@ -504,7 +513,23 @@ class Flows:
         #: 这和下面 `write_iam` 那条注释记的是同一个坑的第二次 —— 新增可选依赖时
         #: 「漏传会静默降级」本身就是缺陷，所以这次不给默认值，让漏传当场报错
         approvals: Callable[[str], Optional[FeishuApproval]],
-        executor: Callable[[str, str], object],
+        #: `(单子, 建议的登录名) -> [发不出去的原因, …]`。人工平台（九章、TurboAI）的
+        #: 开账号单批过之后，私聊管理员派活用它。
+        #:
+        #: **不传不会静默降级。** 用到时发现没接上，会在单子上写一条
+        #: `manual_notice_failed` 事件，文案命中 `TROUBLE_WORDS` —— 于是 sweep 退 3、
+        #: 待办页上也数得出来，不会出现「单子安静躺着、申请人以为在走流程、管理员
+        #: 根本不知道有活儿」那种失败。
+        #:
+        #: 之所以不像 `approvals` 那样设成必传：那会让每一处构造 Flows 的地方都得改
+        #: （实测 522 个用例），而这条依赖只在两个人工平台的开账号单上用得到。
+        #: 换来的条件就是上面那句「漏接必须响」—— `_tell_admin_to_open` 里那条分支不能省
+        announce_manual: Optional[Callable[[dict, str], list]] = None,
+        #: `(平台, 账号, 用户条目, 操作人, 单号) -> None`。回填时把管理员刚建好的号
+        #: 写进人工登记名单。**写不进去就不推 DONE** —— 名册、「我的账号」、离职检查
+        #: 全靠那份名单，只写进单子的话这个号在面板眼里不存在
+        register_manual: Optional[Callable[[str, str, dict, str, str], None]] = None,
+        executor: Optional[Callable[[str, str], object]] = None,
         #: 凭证发放身份。只有长期凭证的建号 / 清理走它，和开通身份是两把不同的 AK
         issuer: Optional[Callable[[str, str], object]] = None,
         add_manual_link: Optional[Callable[[str, str, str], None]] = None,
@@ -526,6 +551,8 @@ class Flows:
         self._catalog = catalog
         self._approval = approval
         self._approvals = approvals
+        self._announce_manual = announce_manual
+        self._register_manual = register_manual
         self._roster = roster
         self._executor = executor
         self._issuer = issuer
@@ -599,7 +626,11 @@ class Flows:
                 if name:
                     state, note = "owned", f"你已有子账号 {name}"
                 elif created is not None:
-                    username = (created.get("payload") or {}).get("username", "")
+                    # 人工平台的名字在 `manual_login` 里（payload 恒为空，见 `_validate`），
+                    # 不读它的话这句会渲染成「子账号  已开通」，中间是两个空格
+                    username = (created.get("payload") or {}).get("username", "") or str(
+                        created.get("manual_login") or ""
+                    )
                     state, note = "owned", f"子账号 {username} 已开通，名册刷新后显示"
             elif tpl.kind in catalog_mod.AWAIT_FULFIL or tpl.kind in (
                 catalog_mod.KIND_DATATYPE,
@@ -884,7 +915,7 @@ class Flows:
                 # 用它的话，配了选项轴的模板照样能另塞一个 spec 贴到审批单的「规格」上，
                 # 审批人看到「8 卡 A100 整机」，台账里却是选出来的小规格；主体名里的
                 # 换行也没被压平，能在审批单上伪造出一整行假的「AccessKey Secret：」
-                extra=_approval_fields(snapshot, clean),
+                extra=_approval_fields(snapshot, clean, _account_options(approval)),
             )
         except Exception as exc:  # noqa: BLE001 — 任何异常都要落到「提交失败」，不能卡在「提交中」
             return self.store.update(
@@ -1044,6 +1075,38 @@ class Flows:
                 {"days": days} if days else {},
                 f"{where}：开通 {tpl.service} 的访问权限"
                 + (f"，用到 {until}" if until else "，长期"),
+            )
+        spot = platforms_mod.manual(tpl.platform)
+        if spot is not None:
+            # **人工平台不收登录名。** 面板开不了这个平台的号，名字由管理员在它的
+            # 控制台建的时候定（九章有惯例、曦望没有），回填时才写进台账。
+            #
+            # 收了就会说一个**不会存在的名字**：审批人读到的「申请内容」会写
+            # 「新建子账号 lisi」，而真实登录名是 `wuji-lisi`。申请人拿 lisi 登不进去，
+            # 管理员照着审批单还可能真去建一个 lisi。这一轮把台账、结果文案、卡片、
+            # 横幅、下一步提示五处都改口了，唯独这一段是审批人真正读的那段。
+            #
+            # 「默认用户组」也不提 —— catalog 已经禁了人工平台配 groups，
+            # 写「默认用户组 无」是纯噪音。
+            if mine:
+                raise FlowError(f"你在{spot.name}上已经有账号了")
+            for other in self.store.all():
+                if other.get("kind") != catalog_mod.KIND_ACCOUNT:
+                    continue
+                o_tpl = other.get("template") or {}
+                if (o_tpl.get("platform"), o_tpl.get("account")) != (tpl.platform, tpl.account):
+                    continue
+                # **重复申请只按「谁 + 哪个平台」判，不按用户名。** 面板根本不知道
+                # 那个平台上已经有哪些名字，拿用户名去判会凭空误拦
+                if other["applicant"].get("union_id") == applicant.union_id and (
+                    other.get("status") in t.OPEN or other.get("status") == t.DONE
+                ):
+                    raise FlowError(f"你已经有一张{spot.name}的开账号申请 {other['id']}", 409)
+            return (
+                {},
+                f"{where}：为申请人在{spot.name}（{tpl.account}）开一个账号。"
+                "**面板开不了这个平台的号** —— 批准后由管理员去它的控制台建，"
+                "建完回面板回填登录名",
             )
         username = str(payload.get("username") or "").strip()
         if not re.fullmatch(tpl.username_pattern, username) or not _SAFE_USERNAME.match(username):
@@ -1677,7 +1740,93 @@ class Flows:
             note=result,
             fields=fields,
         )
+        if resource and tpl.platform in platforms_mod.MANUAL_IDS:
+            # **排在状态真的落成「待开通」之后。** 放在 `_run` 里发的话，万一这次
+            # store.update 失败，管理员已经收到一张「去开号」的卡，而台账上那张单
+            # 还停在开通中 —— 他开完了回来找不到可回填的单子
+            self._tell_admin_to_open(tpl, done)
         return self._emit("fulfilling" if resource else "done", done)
+
+    # ── 人工平台（九章 / TurboAI）：面板不开号，只负责把活派出去 ──────────
+
+    def _await_manual_account(self, tpl: catalog_mod.Template, ticket: dict) -> str:
+        """落台账的那句话。**不许出现「已新建」「已开通」** —— 号这时候还不存在。
+
+        这个项目最忌讳的失败是「报成功但其实没做」。开账号单在阿里/火山上批了就是
+        开好了，人已经习惯了这件事；九章和曦望批了之后**什么都没发生**，必须在
+        每一个出口上说清楚，否则申请人会等一个永远不会来的账号。
+        """
+        spot = platforms_mod.manual(tpl.platform)
+        name = spot.name if spot else tpl.platform
+        login = self._manual_login(tpl, ticket)
+        want = f"，登录名 {login}" if login else ""
+        return (
+            f"审批通过。**面板没有建号** —— {name}没有接口，"
+            f"要管理员去它的控制台手工开{want}，开完回面板回填登录名，这张单才算完"
+        )
+
+    def _manual_login(self, tpl: catalog_mod.Template, ticket: dict) -> str:
+        """这个人在人工平台上的登录名该叫什么。算不出来就返回空串。
+
+        **算不出来就别猜。** 九章 18 个号 18/18 是 `wuji-<阿里云登录名去掉点号>`，
+        算得出来，写进通知里管理员照着建就行；TurboAI 那 5 个号是三种写法，
+        没有规则 —— 硬猜一个比留空危险：管理员会照着建，于是云上多一个没人用的号。
+        """
+        spot = platforms_mod.manual(tpl.platform)
+        if spot is None or not spot.login_prefix:
+            return ""
+        uid = str((ticket.get("applicant") or {}).get("union_id") or "")
+        if not uid:
+            return ""
+        try:
+            person = self._roster().resolve(union_id=uid).person
+        except Exception:  # noqa: BLE001 — 名册读不了不该让这张单失败，少一句提示而已
+            return ""
+        if person is None:
+            return ""
+        base = next(
+            (str(a.name or "") for a in getattr(person, "accounts", ()) if a.platform == "aliyun"),
+            "",
+        )
+        base = base.replace(".", "").replace("-", "").strip().lower()
+        return f"{spot.login_prefix}{base}" if base else ""
+
+    def _tell_admin_to_open(self, tpl: catalog_mod.Template, ticket: dict) -> None:
+        """审批通过那一刻私聊管理员派活。**发不出去要留痕，不能只打一行 stderr。**
+
+        不通知的话这张单会静静躺在台账里：申请人以为在走流程，管理员根本不知道
+        有活儿 —— 这正是这个项目最忌讳的那种失败。所以发不出去时写一条事件，
+        由 sweep 下一轮继续推（状态不变，不因为"没通知到"就把单子判失败）。
+        """
+        if self._announce_manual is None:
+            # **不能静默跳过。** 这条依赖没接上时，这张单会停在「待开通」而没有任何人
+            # 被通知到 —— 和通知发失败是同一个后果，所以走同一条留痕路径
+            why = "面板没接上通知能力"
+        else:
+            why = ""
+            try:
+                problems = self._announce_manual(ticket, self._manual_login(tpl, ticket))
+                why = "；".join(problems)
+            except Exception as exc:  # noqa: BLE001 — 通知炸了不该回滚一张已经批过的单
+                why = describe_error(exc) or type(exc).__name__
+        with contextlib.suppress(Exception):
+            self.store.update(
+                ticket["id"],
+                actor="system",
+                expect=[t.FULFILLING],
+                event="manual_notice_failed" if why else "manual_notice_sent",
+                # 「发不出去」是 TROUBLE_WORDS 里的词 —— 少了它，sweep 会把这一轮
+                # 当成干净的一轮退 0，而管理员既没收到通知、也没收到告警
+                # **不写「下一轮再试」。** 这个方法只在 `execute()` 里跑一次，
+                # 单子一进「待开通」就不会再被 `resume_approved` 捞起来 —— 那句话
+                # 是空头支票。真正的第二道是待办页上那条（`todo.request_manual_account`），
+                # 它按单子状态算，和通知成没成无关
+                note=(
+                    f"派活通知发不出去（{why}），这张单在待办页上等着"
+                    if why
+                    else "已私聊管理员去控制台开号"
+                ),
+            )
 
     def fulfil(
         self, ticket_id: str, *, actor: str, note: str, resource_ids: Sequence[str] = ()
@@ -1690,6 +1839,9 @@ class Flows:
         记下来之后，调用方（server）会拿它去写归属表。
         """
         ticket = self.store.get(ticket_id)
+        if ticket.get("kind") == catalog_mod.KIND_ACCOUNT:
+            # 人工平台（九章 / TurboAI）的开账号单：管理员在那边建完号，回来填登录名
+            return self._fulfil_manual(ticket, actor=actor, login=note)
         if ticket.get("kind") != catalog_mod.KIND_RESOURCE:
             raise FlowError("只有资源开通申请需要登记开通结果", 409)
         note = str(note or "").strip()
@@ -1710,6 +1862,79 @@ class Flows:
             event="fulfilled",
             note=note[:500],
             fields=fields,
+        )
+        return self._emit("done", done)
+
+    def _fulfil_manual(self, ticket: dict, *, actor: str, login: str) -> dict:
+        """人工平台开账号单的回填：把管理员建好的登录名记下来，并进人工登记名单。
+
+        **写进登记名单才算完。** 名册、「我的账号」、离职检查全靠那份名单 ——
+        只把登录名写进单子的话，这个号在面板眼里不存在，人离职时没有任何提示。
+        所以顺序是「先写名单，写成了才推 DONE」，写不进去就让单子停在「待开通」。
+
+        **不写 `user_created`。** 那个字段是「面板自己建的号」的标记，定时任务
+        `retry_iam_writes` 会拿它去给账号补写公司 IAM 属性，而 `iam_sync` 明确跳过
+        不在 `platforms.IDS` 里的平台 —— 于是每天一条永远修不好的假故障。
+        这里用独立的 `manual_created`。
+        """
+        # **平台和账号取单子快照，不取当前模板。** 那对值是一条历史事实：模板后来
+        # 被删了、租户标识改了，都不该挡住「管理员已经在那边把号建好了」被记下来。
+        # 取当前模板的话，模板一删就永久回填不了（只能关单），而管理员收到的报错是
+        # 「只有资源开通申请需要登记开通结果」—— 和事实毫无关系
+        snap = ticket.get("template") or {}
+        platform, account = str(snap.get("platform") or ""), str(snap.get("account") or "")
+        spot = platforms_mod.manual(platform)
+        if spot is None:
+            raise FlowError("只有资源开通申请需要登记开通结果", 409)
+        # **先确认这张单还在待开通，再动名册。** 顺序反了的话：管理员填错名字重填一次，
+        # 第二个名字已经写进名册、状态更新才报「这张单已完成」—— 他看到报错会以为什么
+        # 都没写，而名册里多了一个云上不存在的号，带着申请人邮箱进快照、进名册，
+        # 离职检查会派人去停一个不存在的号
+        if ticket.get("status") != t.FULFILLING:
+            raise FlowError("这张申请单不在「待开通」，不能回填", 409)
+        who = str(login or "").strip()
+        if not _SAFE_USERNAME.match(who):
+            raise FlowError(f"登录名不合规矩（小写字母开头，只用小写字母数字点和横线）：{who}")
+        if spot.login_prefix and not who.startswith(spot.login_prefix):
+            # 前缀是那个平台上的命名约定。对不上多半是填错了人或者填成了邮箱 ——
+            # 而填错的后果是名册里多一个对不上任何人的号，且没有任何地方会报
+            raise FlowError(f"{spot.name}的登录名要以 {spot.login_prefix} 开头，收到 {who}")
+        if self._register_manual is None:
+            raise FlowError(
+                "面板没接上人工登记名单，回填不了 —— 请管理员在「人工登记」里手工加", 503
+            )
+        applicant = ticket.get("applicant") or {}
+        # **邮箱要取名册里那份企业邮箱**（和 `_link_account` 同一个来源）。
+        # 用申请人自报的那个的话，对不上或为空时，这个号在名册里匹配不到任何人 ——
+        # 于是它**永远不进离职检查**，而这正是这个功能要堵的洞
+        mail = self._applicant_email(ticket) or str(applicant.get("email") or "")
+        if not mail:
+            raise FlowError("这张单上没有申请人邮箱，回填了也对不上人 —— 先在名册里补上", 409)
+        self._register_manual(
+            platform,
+            account,
+            {
+                "name": who,
+                "display_name": str(applicant.get("name") or ""),
+                "email": mail,
+                "status": "正常",
+            },
+            actor,
+            str(ticket.get("id") or ""),
+        )
+        done = self.store.update(
+            ticket["id"],
+            actor=actor,
+            expect=[t.FULFILLING],
+            to=t.DONE,
+            event="fulfilled",
+            note=f"已在{spot.name}控制台建号 {who}，并记进人工登记名单",
+            fields={
+                "manual_created": True,
+                "manual_login": who,
+                "result": f"{spot.name}账号 {who} 已开通",
+                "done_at_ts": self._clock(),
+            },
         )
         return self._emit("done", done)
 
@@ -2584,6 +2809,14 @@ class Flows:
         if tpl.kind == catalog_mod.KIND_CREDENTIAL:
             # 只发取件地址，不碰云 —— 所以这里刻意不构造执行器
             return self._offer_credential(tpl, ticket)
+        if tpl.platform in platforms_mod.MANUAL_IDS:
+            # 人工平台（九章、TurboAI）：面板**没有任何接口**，一个云调用都不发。
+            #
+            # **这一段必须排在 `self._executor(...)` 之前。** 排在后面的话，构造执行器
+            # 那一步就会去找这个平台的凭证 —— 而它根本没有凭证，于是整张单在
+            # 「审批已通过」之后炸成 FAILED，申请人看到的是一次失败，而实际上
+            # 这张单只是需要管理员去那边点几下
+            return self._await_manual_account(tpl, ticket)
         ex = self._executor(tpl.platform, tpl.account)
         if tpl.kind == catalog_mod.KIND_PERMISSION:
             user = payload["cloud_user"]

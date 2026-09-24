@@ -43,6 +43,11 @@ class Node {
     return this._text || this.children.map((c) => c.textContent).join("");
   }
   set textContent(v) { this._text = String(v); this.children = []; }
+  // **少了它，整排操作按钮在这一层根本不存在。** 申请详情页是靠
+  // `actions.childElementCount ? actions : null` 决定要不要挂那一行的；
+  // `undefined` 是假值，于是「重试开通」「回填登录名」这些按钮一个都渲染不出来，
+  // 而页面别的部分（横幅、提示、时间线）全都正常 —— 想测按钮的用例会以为是自己写错了
+  get childElementCount() { return this.children.length; }
   setAttribute(k, v) { this.attrs[k] = String(v); }
   getAttribute(k) { return this.attrs[k]; }
   removeAttribute(k) { delete this.attrs[k]; }

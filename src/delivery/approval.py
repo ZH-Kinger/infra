@@ -37,7 +37,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
@@ -204,6 +204,19 @@ class ApprovalConfig:
     #: open_id 按应用隔离，拿别的应用的 open_id 过来会回 `open_id cross app`。
     comment_open_id: str = ""
 
+    #: 「云账号」那个单选控件里，`平台/账号` → 飞书的选项值。
+    #:
+    #: **为什么需要这张表**：审批定义当初是用 API 建的，选项值能自己指定，所以
+    #: 阿里和火山那两项的值就是 `aliyun/1704065796538912` 这种。后来在飞书后台
+    #: 手工加的选项（九章、TurboAI）**只能拿到自动生成的 ID**（`muf5nlly-…`），
+    #: 后台也改不了它。面板送 `jiuzhang/wuji` 过去对不上任何选项，飞书会拒掉
+    #: **整张表单**，单子直接落「提交失败」—— 而报错和「云账号填错了」毫无关系。
+    #:
+    #: 表里没有的照旧送 `平台/账号`（阿里和火山的行为逐字不变）。
+    #:
+    #: **选项被删掉重加时飞书会换 ID**，那时这张表会失效，症状同样是「提交失败」。
+    account_options: Mapping = field(default_factory=dict)
+
     #: 这套配置的名字。`""` = 老配置（文件顶层那份），也就是今天所有申请走的那条。
     #: **它是记在申请单上的历史事实**，不是活值 —— 见 `load_map` 的说明
     name: str = ""
@@ -295,11 +308,20 @@ class ApprovalConfig:
         commenter = data.get("comment_open_id", "")
         if not isinstance(commenter, str) or (commenter and not commenter.startswith("ou_")):
             raise ApprovalError(f"{where}的 comment_open_id 必须是 ou_ 开头的 open_id")
+        options = data.get("account_options", {}) or {}
+        if not isinstance(options, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip()
+            for k, v in options.items()
+        ):
+            # 配错的后果是单子落「提交失败」，而报错和「云账号」毫无关系 ——
+            # 所以在加载期就拦住，不留到提交那一刻
+            raise ApprovalError(f'{where}的 account_options 必须是 {{"平台/账号": "选项值"}}')
         return cls(
             approval_code=code.strip(),
             widgets=dict(widgets),
             allow_self_approval=self_ok,
             comment_open_id=commenter.strip(),
+            account_options={k.strip(): v.strip() for k, v in options.items()},
             **urls,
         )
 

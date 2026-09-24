@@ -81,6 +81,12 @@ def awaits_human(tpl) -> bool:
     RDS 没配，面板建不了，只能停在「待开通」等人。
     一刀切成「资源全部人工」的话，ECS 那份配置就永远是死的。
     """
+    # 人工平台（九章、TurboAI）**一定是等人做的**：面板没有任何接口，号只能管理员
+    # 在那个平台自己的控制台开。判据放在这里而不是 `_run()` 里，是因为「批了之后会
+    # 发生什么」这件事有六个出口要用到它（台账状态、结果文案、申请人卡片、待办、
+    # 体检、通知）—— 各自判一次的话，迟早有一处说「已开通」
+    if str(getattr(tpl, "platform", "") or "") in platforms_mod.MANUAL_IDS:
+        return True
     kind = str(getattr(tpl, "kind", "") or "")
     if kind not in AWAIT_FULFIL:
         return False
@@ -93,6 +99,9 @@ RISKS = ("low", "medium", "high")
 
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 _ACCOUNT = re.compile(r"^[0-9]{6,20}$")
+#: 人工平台的租户标识长度上限。它不是数字云账号 ID —— 九章是 `wuji`，
+#: TurboAI 是 `Wuji-Algorithm@wuji.tech`（那个平台自己就这么标识租户）
+_MANUAL_ACCOUNT_MAX = 128
 _GROUP = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 #: 用户名规则的默认值：小写字母开头，只含小写字母数字点和横线
 DEFAULT_USERNAME = r"^[a-z][a-z0-9.-]{1,31}$"
@@ -944,10 +953,37 @@ def parse_template(spec: object, index: int, registry=None, types=None) -> Templ
     if kind == KIND_SERVICE:
         if platform != platforms_mod.INTERNAL:
             raise CatalogError(f"{where}：服务访问模板的 platform 只能是 {platforms_mod.INTERNAL}")
+    elif platform in platforms_mod.MANUAL_IDS:
+        # 人工平台（九章、TurboAI）：面板**没有任何接口**，号只能管理员在它自己的
+        # 控制台开。放行的只是「申请 → 审批 → 台账 → 通知管理员 → 回填」这一段，
+        # 开通那一段不存在，所以只允许开账号这一类
+        if kind != KIND_ACCOUNT:
+            raise CatalogError(
+                f"{where}：{platforms_mod.name_of(platform)} 没有接口，只能用来开账号"
+            )
+        # **这些字段对人工平台没有意义，配了要拒绝加载、不能静默忽略。**
+        # 静默忽略的表现是：有人照着阿里那条模板配了 `groups`，以为新号会自动进组，
+        # 而面板压根不会去调任何接口 —— 他要等到有人抱怨"权限没给"才会发现
+        useless = sorted(k for k in ("groups", "workspaces", "console_login") if k in spec)
+        if useless:
+            raise CatalogError(
+                f"{where}：{platforms_mod.name_of(platform)} 的号由管理员在它自己的控制台开，"
+                f"面板不调任何接口 —— {', '.join(useless)} 配了也不会生效，请删掉"
+            )
     elif platform not in platforms_mod.IDS:
-        raise CatalogError(f"{where}：platform 只能是 {' / '.join(platforms_mod.IDS)}")
+        allowed = " / ".join(platforms_mod.IDS + platforms_mod.MANUAL_IDS)
+        raise CatalogError(f"{where}：platform 只能是 {allowed}")
     account = _str(spec, "account", where, required=(kind != KIND_SERVICE))
-    if account and not _ACCOUNT.match(account):
+    if account and platform in platforms_mod.MANUAL_IDS:
+        # 人工平台的 account 是那个平台自己的租户标识，不是数字云账号 ID
+        # （九章 `wuji`、TurboAI `Wuji-Algorithm@wuji.tech`）。
+        #
+        # **这个值必须和人工登记表里的逐字相同**：名册的键是 `平台/账号/用户名`，
+        # 差一个字两边就对不上，而症状是「号开完了、面板里还显示可以申请」——
+        # 没有任何地方会报错
+        if "/" in account or len(account) > _MANUAL_ACCOUNT_MAX:
+            raise CatalogError(f"{where}：account 不能带 /，且不超过 {_MANUAL_ACCOUNT_MAX} 字符")
+    elif account and not _ACCOUNT.match(account):
         raise CatalogError(f"{where}：account 必须是云账号 ID（数字）")
     risk = _str(spec, "risk", where, required=False) or "low"
     if risk not in RISKS:

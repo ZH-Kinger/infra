@@ -804,9 +804,7 @@ class AliyunExecutor:
         if not have:
             # 空策略在我们这儿是不可能的（建的时候至少一个目录）。一条都认不出
             # 说明这篇不是我们写的、或者 ARN 格式变了 —— 覆盖它等于删掉不认识的东西
-            raise ProvisionError(
-                f"{name} 云上的策略正文里认不出任何 {username} 的目录，不敢覆盖它"
-            )
+            raise ProvisionError(f"{name} 云上的策略正文里认不出任何 {username} 的目录，不敢覆盖它")
         return have
 
     def revoke_long_term(self, user: str) -> list:

@@ -614,6 +614,12 @@ export function requestRoutes(ctx) {
       read.detail = () => detail.value.trim();
 
       if (o.max_days) untilField(o, { field, update, fields, read, checks });
+    } else if (MANUAL_PLATFORMS.has(o.platform)) {
+      // **人工平台不问登录名。** 面板开不了这个平台的号，名字由管理员在它的控制台
+      // 建的时候定，服务端这一侧也不再收（`flows._validate` 的 manual 分支）。
+      // 还留着这一栏的话，申请人会被逼着编一个名字、而它直接被丢掉 ——
+      // 他拿那个名字登不进去，还会以为是号没建好
+      void 0;
     } else {
       // 模板里的规则按 Python 语法写，浏览器不一定认得：认不得就只做基本检查，交给服务端把关
       let pattern = /^[a-z0-9][a-z0-9._-]{1,63}$/;
@@ -681,6 +687,10 @@ export function requestRoutes(ctx) {
           + (p.until ? `，用到 ${p.until}` : "，长期有效，离职时自动失效")
           + "。开通后用飞书账号登录，不需要云账号。";
       }
+      // 人工平台：**这行是申请人点提交前最后读到的一句**，读的人比审批摘要还多。
+      // 说「新建子账号 lisi」就是许了一个不会存在的名字（真实登录名是 wuji-lisi，
+      // 或者管理员随手起的）—— 和服务端摘要保持同一口径
+      else if (MANUAL_PLATFORMS.has(o.platform)) preview.textContent = `在 ${accountName(o)} 开一个账号。面板开不了这个平台的号，批准后由管理员去它的控制台建，建完回填登录名，你才会看到这个账号。`;
       else preview.textContent = `在 ${accountName(o)} 新建子账号 ${p.username || "（未填）"}${o.groups.length ? `，加入 ${o.groups.join("、")}` : ""}${o.console_login ? "；你可以领取一次性初始密码登录控制台" : ""}。`;
     }
     update();
@@ -912,7 +922,10 @@ export function requestRoutes(ctx) {
     if (r.status === "rejected") nodes.push(h("div", { class: "banner warn" }, "审批没有通过。可以在飞书里查看审批意见，调整后重新申请。"));
     if (admin && needsLink(r)) nodes.push(h("div", { class: "banner warn" }, h("b", {}, "新账号还没对应到申请人。"), " 请在「人员与名册」里把这个子账号确认给申请人，否则他之后申请权限时选不到这个账号。 ", h("a", { href: "#admin" }, "去人员与名册 →")));
     if (r.status === "done" && r.result) nodes.push(h("div", { class: "banner good" }, h("b", {}, r.kind === "credential" ? "凭证已发放。" : "已开通。"), " ", r.result));
-    if (r.status === "fulfilling") nodes.push(h("div", { class: "banner" }, h("b", {}, "审批已通过，等待开通。"), " 这类资源由管理员按 IaC 流程创建，面板不直接创建。开通后这里会更新。"));
+    if (r.status === "fulfilling") nodes.push(h("div", { class: "banner" }, h("b", {}, "审批已通过，等待开通。"),
+      isManualAccount(r)
+        ? ` 面板开不了${PLATFORM_NAME[(r.template || {}).platform || r.platform] || "这个平台"}的号，要管理员去它的控制台手工建。建好之后这里会更新。`
+        : " 这类资源由管理员按 IaC 流程创建，面板不直接创建。开通后这里会更新。"));
     if (r.kind === "credential" && ["done", "revoked"].includes(r.status)) nodes.push(h("div", { class: "banner" }, h("b", {}, "查看凭证的地址在飞书审批的评论里。"), " 那个链接可以反复打开，每次打开都会记在下面的事件里。面板存的是密文，自己也解不开。"));
 
     const actions = h("div", { class: "actions" });
@@ -990,6 +1003,12 @@ export function requestRoutes(ctx) {
       case "executing":
         return r.kind === "credential" ? "审批已通过，正在发放凭证。" : "审批已通过，正在开通。";
       case "fulfilling":
+        if (isManualAccount(r)) {
+          const where = PLATFORM_NAME[(r.template || {}).platform || r.platform] || "那个平台";
+          return admin
+            ? `审批已通过。**面板开不了${where}的号** —— 去它的控制台建好，回来点「回填登录名」，这张单才算完。`
+            : `审批已通过。${where}的号要管理员手工开，开好之后这里会更新。`;
+        }
         return admin ? "审批已通过。按 IaC 流程创建好之后，点「登记开通结果」把实例信息填进台账。" : "审批已通过，等管理员开通。开通后这里会更新。";
       case "done":
         if (r.actions.push_iam) return `子账号已建好，但登录名没写进公司 IAM —— **${who}现在登不进去**。管理员点「补写登录名到公司 IAM」即可。`;
@@ -1043,7 +1062,47 @@ export function requestRoutes(ctx) {
     return btn;
   }
 
+  //: 人工平台（九章 / TurboAI）的开号单。面板开不了它们的号，回填的是**登录名**，
+  //: 不是实例 ID —— 两件事共用同一个 fulfil 动作，但界面必须分开说。
+  //: 不分开的话管理员照着「例：ECS 通用 2 核 8G」写一句话，会被登录名校验拒成 400，
+  //: 而这是整条链上**唯一一个人类动作**。
+  const MANUAL_PLATFORMS = new Set(["jiuzhang", "turboai"]);
+  function isManualAccount(r) {
+    return r.kind === "account" && MANUAL_PLATFORMS.has((r.template || {}).platform || r.platform);
+  }
+
+  function fulfilManualAction(r) {
+    const where = PLATFORM_NAME[(r.template || {}).platform || r.platform] || "那个平台";
+    const btn = h("button", { type: "button", class: "btn small" }, "回填登录名");
+    btn.addEventListener("click", () => {
+      openDrawer("fulfil-title", (close) => {
+        const login = h("input", { id: "f-login", class: "input", type: "text", placeholder: "wuji-zhangsan" });
+        const msg = h("p", { class: "muted" });
+        const save = h("button", { class: "btn", type: "button" }, "回填");
+        save.addEventListener("click", async () => {
+          if (!login.value.trim()) { msg.textContent = "填你在控制台建好的那个登录名。"; return; }
+          save.disabled = true;
+          msg.textContent = "回填中…";
+          try {
+            await apiPost(`/api/admin/requests/${encodeURIComponent(r.id)}/fulfil`, { note: login.value.trim() });
+            close();
+            ctx.route();
+          } catch (err) { msg.textContent = err.message; save.disabled = false; }
+        });
+        return h("div", { class: "drawer-card" },
+          h("h2", { id: "fulfil-title" }, `回填${where}登录名`),
+          h("div", { class: "drawer-body" },
+            h("p", { class: "muted" }, `面板开不了${where}的号。在它的控制台建好之后，把登录名填这里，这张单才算完。`),
+            field("f-login", "登录名", login, "就是你在控制台里建的那个名字，填错了名册会对不上人。")),
+          h("div", { class: "drawer-foot" }, h("div", { class: "actions" }, save,
+            h("button", { class: "btn ghost", type: "button", onclick: close }, "取消")), msg));
+      });
+    });
+    return btn;
+  }
+
   function fulfilAction(r) {
+    if (isManualAccount(r)) return fulfilManualAction(r);
     const btn = h("button", { type: "button", class: "btn small" }, "登记开通结果");
     btn.addEventListener("click", () => {
       openDrawer("fulfil-title", (close) => {

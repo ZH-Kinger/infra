@@ -502,10 +502,60 @@ class TicketTests(unittest.TestCase):
         for got in r.items:
             self.assertEqual(got.group, todo.URGENT, "两类都有人在等，都是要紧的")
 
-    def test_failed_row_points_at_the_filtered_list(self):
+    def test_failed_row_points_at_a_filter_the_page_actually_understands(self):
+        """**这条原先把 bug 锁住了**：它断的是 `?state=failed`，而申请页只认
+        `open|attention|closed|all`（`requests.js` 的 `tabs`）—— 认不出就落到 `tabs[3]`
+        「全部」。也就是说「N 张单开通失败 / 去处理」点进去是**不筛的全量列表**，
+        管理员得自己在几百张历史单里找哪几张是失败的。
+
+        `failed` 在管理员的「需要处理」判据里，所以正确的筛选是 `?attention`。
+        用例名也跟着改了：原来那个名字（「指向筛选后的列表」）和它断言的值是矛盾的。
+        """
         r = todo.Report()
         todo.collect_tickets(r, [{"state": "failed", "created_at": iso(time.time())}])
-        self.assertIn("state=failed", r.items[0].href)
+        self.assertIn("?attention", r.items[0].href)
+        self.assertNotIn("state=", r.items[0].href)
+
+    def test_one_unreadable_timestamp_does_not_wipe_out_the_age(self):
+        """`min((days_ago(x) or 0) for …) or None` 的写法：**一条认不出的时间戳
+        就把整条待办的年龄抹成 `None`**，而没有年龄的项排在组最底、`age_days` 渲染成 0。
+        挂了 30 天的单于是沉到最底下，看起来像刚出现的。
+
+        同文件的 `collect_offboard` 早就避开了这个坑并写了注释，
+        `collect_tickets` 这两条一直是另一种写法。
+        """
+        old_ts = time.time() - 30 * DAY
+        for key, rows in (
+            (
+                "request_failed",
+                [
+                    {"state": "failed", "created_at": iso(old_ts)},
+                    {"state": "failed", "created_at": ""},
+                    {"state": "failed", "created_at": "前天"},
+                ],
+            ),
+            (
+                "request_manual_account",
+                [
+                    {"manual_account": True, "platform": "jiuzhang", "created_at": iso(old_ts)},
+                    {"manual_account": True, "platform": "jiuzhang", "created_at": ""},
+                    {"manual_account": True, "platform": "turboai", "created_at": "前天"},
+                ],
+            ),
+        ):
+            with self.subTest(kind=key):
+                r = todo.Report()
+                todo.collect_tickets(r, rows)
+                item = next(i for i in r.items if i.kind == key)
+                self.assertIsNotNone(item.since, "一条脏时间戳把整条的年龄抹掉了")
+                self.assertAlmostEqual(item.since, old_ts, delta=2)
+
+    def test_all_timestamps_unreadable_means_unknown_age(self):
+        """全都认不出时是**真的不知道**，那就该是 `None` —— 编一个 0 会让它
+        显示成「今天刚出现」，比不显示更误导。"""
+        r = todo.Report()
+        todo.collect_tickets(r, [{"state": "failed", "created_at": "谁知道"}])
+        self.assertIsNone(next(i for i in r.items if i.kind == "request_failed").since)
 
     def test_needs_iam_is_batchable_only_when_there_are_several(self):
         r = todo.Report()

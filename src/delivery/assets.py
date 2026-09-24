@@ -39,6 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from . import platforms as platforms_mod
 from .clouds import aliyun, oss, volcano
 from .errors import DeliveryError
 
@@ -1018,8 +1019,23 @@ def holdings_view(tickets: Iterable[dict], *, labels: Callable[[str, str], str])
             subject = str(payload.get("subject") or "")
             item["detail"] = f"给 {subject}" if subject else "给你自己"
         elif kind == "account":
-            name = ticket.get("cred_user") or (ticket.get("payload") or {}).get("username") or ""
-            item["detail"] = f"子账号 {name}" if name else "子账号"
+            # `manual_login` 是人工平台回填时写的那个名字。不读它的话，九章/曦望的号
+            # 回填完之后这一行仍然是光秃秃的「子账号」，没有名字
+            name = (
+                ticket.get("cred_user")
+                or (ticket.get("payload") or {}).get("username")
+                or ticket.get("manual_login")
+                or ""
+            )
+            if status == "fulfilling":
+                # **号这时候还不存在。** 这一页的标题是「通过面板拿到的」，
+                # 而申请人不会去读时间线 —— 他看的就是这里有没有这一行。
+                # 在 `awaits_human` 对人工平台返 True 之前，开账号单根本到不了
+                # FULFILLING，所以这个分支是这一轮新长出来的
+                where = platforms_mod.NAMES.get(platform, "那个平台")
+                item["detail"] = f"待管理员在{where}控制台开号"
+            else:
+                item["detail"] = f"子账号 {name}" if name else "子账号"
         elif kind == "permission":
             item["detail"] = "、".join(tpl.get("groups") or []) or "权限"
         elif kind == "resource":

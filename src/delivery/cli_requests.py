@@ -876,6 +876,59 @@ def _moves(args) -> int:
     return 1 if problems else 0
 
 
+def _manual_register(args):
+    """回填时把号写进人工登记名单。找不到名单路径就返回 None —— 调用方会让单子
+    留在「待开通」并说清楚，而不是推成 DONE 之后名册里查无此号。"""
+    from . import offline_accounts as offline_mod
+
+    path = offline_mod.beside(getattr(args, "inventory", "") or "")
+    if not path:
+        return None
+
+    def register(platform: str, account: str, user: dict, actor: str, ticket_id: str) -> None:
+        offline_mod.merge_one(
+            path,
+            platform=platform,
+            account=account,
+            user=user,
+            actor=actor,
+            ticket_id=ticket_id,
+        )
+
+    return register
+
+
+def _manual_announce(args):
+    """人工平台（九章 / TurboAI）的开账号单批过之后，私聊管理员派活。
+
+    **配不齐就返回 None，并打一行说清楚。** 返回 None 不等于没事发生 ——
+    `flows._tell_admin_to_open` 会在单子上写一条「面板没接上通知能力」的事件，
+    而这类单子无论如何都会出现在待办页上（`todo.request_manual_account`）。
+    """
+    from . import notify as notify_mod
+    from . import roles as roles_mod
+
+    app_id = os.environ.get("DELIVERY_FEISHU_APP_ID", "")
+    secret = os.environ.get("DELIVERY_FEISHU_APP_SECRET", "")
+    base = os.environ.get("DELIVERY_BASE_URL", "")
+    if not (app_id and secret):
+        print("（没配飞书应用凭证，人工平台的开号单不会有人被通知）")
+        return None
+    admins = roles_mod.load_admins(getattr(args, "admins", None)).union_ids
+    if not admins:
+        print("（管理员名单里没有 union_id，人工平台的开号单不会有人被通知）")
+        return None
+    from .server import _tenant_token_cache
+
+    notifier = notify_mod.FeishuNotifier(_tenant_token_cache(app_id, secret), base)
+
+    def announce(ticket: dict, login: str = "") -> list:
+        card = notify_mod.manual_account_card(ticket, login, base_url=base)
+        return notify_mod.notify_admins(notifier, admins, card)
+
+    return announce
+
+
 def _move_announce(args):
     """搬运卡到人这一步时私聊管理员。配不齐就返回 None（一行日志说清楚，不静默）。
 
@@ -1002,6 +1055,10 @@ def _sweep(args) -> int:
         # sweep 是无人值守的那条路，这里回落没人会看见。
         issuer=lambda platform, account: executor_from_env(platform, account, issuer=True),
         add_manual_link=link,
+        announce_manual=_manual_announce(args),
+        # sweep 这条路目前不回填（回填只在面板上点），接上是为了两条路行为一致 ——
+        # 哪天加了「命令行回填」不会因为漏接而写不进名单
+        register_manual=_manual_register(args),
         # **必须传。** 不传的话建号后「把登录名写进公司 IAM」这一步会被静默跳过，
         # 而 SSO 正是靠那个属性把云账号和企业身份对上 —— 号建出来了，人登不进去，
         # 单子还是绿的。线上第一个账号就是这么出的事
@@ -2156,11 +2213,10 @@ def _backfill(args) -> int:
 
     # **和建号走同一个函数。** 各写一份的话，补齐建出来的数据集迟早和面板建的
     # 长成两种东西（名字、URI 形状），而那种差别要到有人挂载时才发现
-    from .flows import provision_workspace
-
     # **补齐不写申请单。** 那张单子早就结了，往一张 done 的单子上追加事件
     # 会让「这张单当时做了什么」变成假的 —— 补齐是管理员的动作，不是那张单的一部分
     from . import devdir as devdir_mod
+    from .flows import provision_workspace
     from .provision import describe_error
 
     ex = executor_from_env(tpl.platform, tpl.account)

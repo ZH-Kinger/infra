@@ -408,3 +408,83 @@ def save_account(
             Path(tmp).unlink(missing_ok=True)
             raise
     return change
+
+
+def merge_one(
+    path: str,
+    *,
+    platform: str,
+    account: str,
+    user: dict,
+    actor: str,
+    ticket_id: str = "",
+) -> dict:
+    """往这个账号的登记名单里**加一个人**，别的一个字不动。返回加进去的那条。
+
+    和 `save_account` 的区别，两条都重要：
+
+    · **不是整体替换。** 这里的来源是「管理员刚在那个平台的控制台建了一个号」，
+      不是「粘了一份完整名单」。用整体替换的话，回填一次就会把名单里其余人抹掉。
+    · **`as_of` 一个字不改。** 那个字段的意思是「这份名单截至哪天是完整的」——
+      加了一个人不代表其余人重新核对过。刷成今天就是在说谎，而体检页正是靠它
+      提醒「这份名单旧了」。
+
+    同名的人已经在名单里 → 不动、不报错（回填重试安全）。
+
+    锁、写前整表 parse、原子替换、history 都和 `save_account` 一样，
+    **不另起一套**：两条路写同一个文件，写法不一致的那天就是数据坏掉的那天。
+    """
+    import fcntl
+    import os
+    import tempfile
+    from datetime import datetime, timedelta, timezone
+
+    name = str((user or {}).get("name") or "").strip()
+    if not name:
+        raise OfflineError("回填要给登录名")
+    target = Path(path)
+    with Path(f"{target}.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = read_raw(path)
+        rows = data.setdefault("accounts", [])
+        cur = next(
+            (a for a in rows if a.get("platform") == platform and a.get("account") == account), None
+        )
+        if cur is None:
+            raise OfflineError(
+                f"人工登记表里还没有 {platform}/{account} 这个账号 —— "
+                "先在「人工登记」里把现有名单录一次，再回填新号"
+            )
+        users = list(cur.get("users") or [])
+        if any(str(u.get("name") or "") == name for u in users):
+            return dict(user)
+        users.append(dict(user))
+        cur["users"] = users
+        stamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+        history = list(cur.get("history") or [])
+        history.append(
+            {
+                "at": stamp,
+                "by": str(actor or "")[:60],
+                "total": len(users),
+                "added": 1,
+                "removed": 0,
+                "changed": 0,
+                "ticket": str(ticket_id or "")[:40],
+            }
+        )
+        cur["history"] = history[-HISTORY_KEEP:]
+        parse(data)
+        fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".offline-", suffix=".json")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=2)
+                fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            Path(tmp).chmod(0o600)
+            Path(tmp).replace(target)
+        except Exception:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+    return dict(user)

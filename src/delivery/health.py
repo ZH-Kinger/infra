@@ -180,6 +180,36 @@ def collect(
                 f"在 identity/approval.json 的 definitions 里补上 {'、'.join(missing)}"
                 "（每条都要自带 approval_code 和 widgets），或者把模板的 approval 字段去掉",
             )
+        # 人工平台（九章 / TurboAI）的「云账号」选项是在飞书后台手工加的，
+        # 值只能是飞书自动生成的 ID，和面板送的 `平台/账号` 对不上 ——
+        # 少一条对照，那个平台的**第一个申请人一提交就失败**，而报错和「云账号」
+        # 毫无关系，没人会想到去翻 approval.json。这条纯离线。
+        #
+        # **按模板指向的那条定义查，不查顶层那一份。** `flows._approval_fields` 用的是
+        # `_approval_for(模板的 approval 字段)`，而 `load_map` 的继承规则允许某条
+        # definition 自带一份 `account_options` —— 两者可以任意背离：配在 definition 里
+        # 会被顶层查成「缺」（误报），顶层有而 definition 覆盖成别的会被查成「有」（漏报）。
+        # 今天线上没有 definitions 块，但这个仓库自己铺了那条路
+        try:
+            want = sorted(
+                f"{tpl.platform}/{tpl.account}"
+                for tpl in backend.catalog().templates
+                if tpl.platform in platforms.MANUAL_IDS
+                and f"{tpl.platform}/{tpl.account}"
+                not in (getattr(table.get(tpl.approval or ""), "account_options", None) or {})
+            )
+        except Exception:  # noqa: BLE001 — 模板读不了，templates 那条会报
+            want = []
+        if want:
+            return Check(
+                "登录与审批",
+                "飞书审批",
+                CRIT,
+                f"人工平台模板没配审批选项对照：{'、'.join(want)}，这些申请一提交就被飞书拒",
+                "在 identity/approval.json 的 account_options 里补上这几项，值是飞书审批"
+                "「云账号」那个单选里对应选项的**选项值**（后台手工加的选项拿到的是"
+                "自动生成的 ID，不是 平台/账号）",
+            )
         if config.allow_self_approval:
             return Check(
                 "登录与审批",

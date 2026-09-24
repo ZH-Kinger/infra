@@ -178,7 +178,9 @@ class TargetsTests(unittest.TestCase):
 
     def test_a_cpfs_only_workspace_is_skipped_not_guessed(self):
         """没有桶就没有开发目录。瞎编一个桶名只会生成一条匹配不上任何东西的 ARN。"""
-        self.assertEqual(devdir.targets_of([CPFS_ONLY, HZ], "lisi"), [("wuji-algo-dev-hz", "general")])
+        self.assertEqual(
+            devdir.targets_of([CPFS_ONLY, HZ], "lisi"), [("wuji-algo-dev-hz", "general")]
+        )
         self.assertEqual(devdir.targets_of([CPFS_ONLY], "lisi"), [])
         self.assertEqual(devdir.targets_of([], "lisi"), [])
         self.assertEqual(devdir.targets_of(None, "lisi"), [])
@@ -186,7 +188,9 @@ class TargetsTests(unittest.TestCase):
     def test_the_same_bucket_twice_is_one_target(self):
         """两个地域填同一个桶是合法配置（登记表没禁）。同一个 ARN 写两遍不报错，
         但策略正文白白变长，离 6144 上限更近。"""
-        self.assertEqual(devdir.targets_of([HZ, dict(HZ, id="x")], "lisi"), [("wuji-algo-dev-hz", "general")])
+        self.assertEqual(
+            devdir.targets_of([HZ, dict(HZ, id="x")], "lisi"), [("wuji-algo-dev-hz", "general")]
+        )
 
     def test_a_bad_login_is_refused_here_too(self):
         """**不能静默跳过。** 跳过的话这个人一条策略都没有，而单子显示一切正常。"""
@@ -278,8 +282,12 @@ class PolicyDocumentTests(unittest.TestCase):
         """GetBucketLocation 少了的话，S3 兼容客户端（lakeFS / s3fs / rclone）建连时
         探地域探不到，报一个和权限八竿子打不着的错。"""
         got = actions_of(self.doc())
-        for act in ("oss:GetBucketInfo", "oss:GetBucketStat", "oss:GetBucketAcl",
-                    "oss:GetBucketLocation"):
+        for act in (
+            "oss:GetBucketInfo",
+            "oss:GetBucketStat",
+            "oss:GetBucketAcl",
+            "oss:GetBucketLocation",
+        ):
             with self.subTest(action=act):
                 self.assertIn(act, got)
 
@@ -328,8 +336,12 @@ class PolicyDocumentTests(unittest.TestCase):
         """`oss:PutObjectAcl` 能把对象改成公共读 —— 一条命令就能把内部数据挂到公网上，
         而开发目录用不到它。"""
         got = actions_of(self.doc())
-        for act in ("oss:PutObjectAcl", "oss:PutBucketAcl", "oss:DeleteBucket",
-                    "oss:PutBucketPolicy"):
+        for act in (
+            "oss:PutObjectAcl",
+            "oss:PutBucketAcl",
+            "oss:DeleteBucket",
+            "oss:PutBucketPolicy",
+        ):
             with self.subTest(action=act):
                 self.assertNotIn(act, got)
 
@@ -398,7 +410,9 @@ class PolicyDocumentTests(unittest.TestCase):
         """撞上 6144 时要的是合并语句，不是砍动作 —— 砍动作就是又一次
         「余湘港那样的缺失」，而且是静默的。"""
         one = devdir.document([("wuji-algo-dev-hz", "general")], "lisi")
-        self.assertEqual(json.loads(one), devdir.build_policy([("wuji-algo-dev-hz", "general")], "lisi"))
+        self.assertEqual(
+            json.loads(one), devdir.build_policy([("wuji-algo-dev-hz", "general")], "lisi")
+        )
         many = [(f"wuji-algo-dev-{i:02d}", "general") for i in range(40)]
         with self.assertRaises(ValueError) as ctx:
             devdir.document(many, "lisi")
@@ -448,8 +462,13 @@ class ReadBackTests(unittest.TestCase):
     def test_garbage_reads_back_as_nothing_instead_of_raising(self):
         """认不出要返回空、让**调用方**去 fail-closed —— 在这儿抛的话，
         「云上那篇不是我们写的」和「正则写错了」会长成同一个异常。"""
-        for junk in (None, {}, {"Statement": None}, {"Statement": [{"Resource": None}]},
-                     {"Statement": [{"Resource": "acs:ram::1:policy/x"}]}):
+        for junk in (
+            None,
+            {},
+            {"Statement": None},
+            {"Statement": [{"Resource": None}]},
+            {"Statement": [{"Resource": "acs:ram::1:policy/x"}]},
+        ):
             with self.subTest(doc=junk):
                 self.assertEqual(devdir.targets_in(junk, "lisi"), [])
 
@@ -620,9 +639,7 @@ class EnsurePolicyTests(unittest.TestCase):
     def test_any_other_cloud_error_surfaces(self):
         """全吞掉的话，一条没建出来的策略会被当成建好了 —— 然后挂载一个不存在的策略名，
         或者更糟：挂成功了（同名别人的），授出去的是别人的目录。"""
-        ex, calls = self.executor(
-            {"CreatePolicy": (403, {"Code": "NoPermission", "Message": "x"})}
-        )
+        ex, calls = self.executor({"CreatePolicy": (403, {"Code": "NoPermission", "Message": "x"})})
         with self.assertRaises(aliyun.AliyunError):
             ex.ensure_dev_policy("lisi", self.TARGETS)
         self.assertEqual(self.sent(calls, "CreatePolicyVersion"), [])
@@ -727,9 +744,7 @@ class FlowTests(DevDirHarness, unittest.TestCase):
         h = self.harness(HZ)
         done = self.account(h)
         self.assertEqual(h.issuer.built, [("xinren", [("wuji-algo-dev-hz", "general")])])
-        self.assertEqual(
-            h.executor.attached, [("xinren", "Custom", devdir.policy_name("xinren"))]
-        )
+        self.assertEqual(h.executor.attached, [("xinren", "Custom", devdir.policy_name("xinren"))])
         self.assertEqual(done.get("dev_policy_targets"), ["wuji-algo-dev-hz/general"])
         self.assertIn("wuji-algo-dev-hz/general/xinren/", done["result"])
 
@@ -1076,7 +1091,9 @@ class RetryTests(DevDirHarness, unittest.TestCase):
         self.assertIn("RAM 接口还是 500", lines[0])
 
 
-def _oss_page(prefixes, *, truncated=False, token="t2"):
+# `token` 是 OSS 列举的**翻页游标**（NextContinuationToken），不是密钥。
+# S107 只看参数名，所以在这儿关掉 —— 改名会让它和 OSS 的字段对不上
+def _oss_page(prefixes, *, truncated=False, token="t2"):  # noqa: S107
     body = "".join(f"<CommonPrefixes><Prefix>{p}</Prefix></CommonPrefixes>" for p in prefixes)
     more = f"<NextContinuationToken>{token}</NextContinuationToken>" if truncated else ""
     return (
@@ -1129,9 +1146,7 @@ class WhichGroupTests(unittest.TestCase):
             }
         )
         got = cli_requests._dev_dirs(ex, dict(HZ))
-        self.assertEqual(
-            got, {"lisi": "general", "wangwu": "cv", "zhaoliu": "cv", "xinren": "llm"}
-        )
+        self.assertEqual(got, {"lisi": "general", "wangwu": "cv", "zhaoliu": "cv", "xinren": "llm"})
 
     def test_an_empty_bucket_is_normal_and_maps_to_nothing(self):
         """新地域的桶里一个目录都没有，这不是故障 —— 这时候每个人按模板默认建就对了。"""
@@ -1169,9 +1184,7 @@ class WhichGroupTests(unittest.TestCase):
         （现网 51 个目录暂时没有重名，所以先记不改。）"""
         from delivery import cli_requests
 
-        ex, _ = self.executor(
-            {"": ["a/", "b/"], "a/": ["a/lisi/"], "b/": ["b/lisi/"]}
-        )
+        ex, _ = self.executor({"": ["a/", "b/"], "a/": ["a/lisi/"], "b/": ["b/lisi/"]})
         self.assertEqual(cli_requests._dev_dirs(ex, dict(HZ)), {"lisi": "b"})
 
 
@@ -1229,8 +1242,9 @@ class CloudPolicySnapshotTests(unittest.TestCase):
     def test_the_executor_can_attach_it_to_a_real_person(self):
         doc = self.load("executor")
         self.assertTrue(
-            self.covers(doc, effect="Allow", action="ram:AttachPolicyToUser",
-                        resource=f"policy/{self.NAME}")
+            self.covers(
+                doc, effect="Allow", action="ram:AttachPolicyToUser", resource=f"policy/{self.NAME}"
+            )
         )
         self.assertTrue(
             self.covers(doc, effect="Allow", action="ram:AttachPolicyToUser", resource="user/lisi")
@@ -1262,15 +1276,11 @@ class CloudPolicySnapshotTests(unittest.TestCase):
             if "ram:CreatePolicy" in (s.get("Action") or []) and s.get("Effect") == "Allow"
         ]
         self.assertEqual(len(stmt), 1)
-        self.assertEqual(
-            stmt[0]["Condition"], {"IpAddress": {"acs:SourceIp": ["120.79.167.166"]}}
-        )
+        self.assertEqual(stmt[0]["Condition"], {"IpAddress": {"acs:SourceIp": ["120.79.167.166"]}})
 
     def test_the_issuer_still_cannot_touch_a_real_person(self):
         """这条策略的加入不该顺手把发放身份的边界撑开。"""
         doc = self.load("issuer")
         for act in ("ram:DeleteUser", "ram:AttachPolicyToUser"):
             with self.subTest(action=act):
-                self.assertFalse(
-                    self.covers(doc, effect="Allow", action=act, resource="user/lisi")
-                )
+                self.assertFalse(self.covers(doc, effect="Allow", action=act, resource="user/lisi"))
