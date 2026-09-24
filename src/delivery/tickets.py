@@ -77,6 +77,24 @@ TRANSITIONS = {
     #: 云上恢复了），否则唯一的出路是让人重新申请、重新找人审批一遍
     CLOSED: {REVOKED, FAILED, FULFILLING},
 }
+#: 按申请类型**额外放开**的边（名字里的 EXTRA 就是这个意思）。
+#: **只加不减** —— 这张表不能用来收紧 `TRANSITIONS`，
+#: 否则「这张单能不能这么转」要同时看两张表，而漏看一张的后果是静默放行。
+#:
+#: `service` 的 `SUBMITTING → DONE` 是给「管理员纳管存量用户」
+#: （`Flows.grandfather_service`）：服务先有、门后建，已经在用的人不该为「继续用」
+#: 重走一遍审批。为什么要这条边、而不是让纳管单走一遍 PENDING→APPROVED：
+#: 那两个状态的意思是「在等审批」「审批通过了」，而纳管**根本没走过审批** ——
+#: 借它们的壳会让台账说假话，以后没人分得清哪些是批下来的、哪些是管理员加的，
+#: 而那正是审计这张台账的人唯一想知道的事。
+#:
+#: **按 kind 放开、而不是全局放开**：全局那条边等于让任何一类单子都能跳过开通前的
+#: 全部核对（`permission` 跳过云上授权、`credential` 跳过签发），而那些核对才是
+#: 这套流程的本体。
+EXTRA_TRANSITIONS_BY_KIND = {
+    "service": {SUBMITTING: {DONE}},
+}
+
 OPEN = (SUBMITTING, PENDING, APPROVED, EXECUTING, FAILED, FULFILLING)
 
 
@@ -168,13 +186,14 @@ class TicketStore:
             return []
         return [t for t in self.all() if t.get("applicant", {}).get("union_id") == union_id]
 
-    def create(self, ticket: dict, *, actor: str) -> dict:
+    def create(self, ticket: dict, *, actor: str, note: str = "提交申请") -> dict:
         ticket = dict(ticket)
         ticket.setdefault("id", new_id())
         ticket["status"] = SUBMITTING
         ticket["created_at"] = now_iso(self._clock)
         ticket["updated_at"] = ticket["created_at"]
-        ticket["events"] = [self._event(actor, "created", "提交申请")]
+        # `note` 默认「提交申请」——纳管那条路不是谁提交的，它传自己的说法
+        ticket["events"] = [self._event(actor, "created", note)]
         with self._locked():
             data = self._read()
             if any(t.get("id") == ticket["id"] for t in data["tickets"]):
@@ -206,12 +225,24 @@ class TicketStore:
                 raise TicketError(
                     f"申请单当前是「{LABELS.get(status, status)}」，不能执行这个操作", 409
                 )
-            if to is not None and to != status and to not in TRANSITIONS.get(status, set()):
+            allowed_to = TRANSITIONS.get(status, set()) | EXTRA_TRANSITIONS_BY_KIND.get(
+                str(ticket.get("kind") or ""), {}
+            ).get(status, set())
+            if to is not None and to != status and to not in allowed_to:
                 raise TicketError(f"不允许从 {status} 转到 {to}", 409)
             if to is not None:
                 ticket["status"] = to
             for key, value in (fields or {}).items():
-                if key in ("id", "status", "events", "applicant", "created_at"):
+                # `kind` 是**后加的，有具体原因**：它现在决定这张单能走哪些状态边
+                # （见 `EXTRA_TRANSITIONS_BY_KIND`）—— 能改 kind 就等于能给自己挑一条更宽的
+                # 状态机，那条「只对 service 放开 SUBMITTING→DONE」的边就形同虚设。
+                # 生产上没有任何调用方想改它，所以禁掉的代价是零。
+                #
+                # **`template` 没有禁，是有意的**：它同样该是只读的（提交那一刻冻下来的
+                # 快照，开通前的核对全靠它和活模板比对），但测试里有个 `set_field` 辅助
+                # 专门靠改它来造「老单子的旧快照」那种场景，而那些用例本身没错。
+                # 要禁它得先给那批用例换一种造夹具的办法（直接写文件），另开一批做。
+                if key in ("id", "status", "events", "applicant", "created_at", "kind"):
                     raise TicketError(f"不能修改字段 {key}", 500)
                 ticket[key] = value
             ticket["updated_at"] = now_iso(self._clock)

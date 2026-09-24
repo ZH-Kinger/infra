@@ -39,6 +39,9 @@ from .flows import FlowError, Flows, password_claims
 TICKET_ID = re.compile(r"\AREQ-\d{8}-[0-9A-F]{8}\Z")
 _ID = TICKET_ID
 _EVENT_LABELS = {
+    # 这条路径的全部卖点就是「审计的人一眼看出哪些没走审批」，
+    # 而面板是审计的人最先打开的地方 —— 不给标签就显示成原始事件名
+    "admin_granted": "管理员纳管（未经审批）",
     "created": "提交申请",
     "approval_created": "发起飞书审批",
     "submit_failed": "发起审批失败",

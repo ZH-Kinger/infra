@@ -1993,6 +1993,103 @@ class Flows:
                 out.append(f"{ticket['id']}：回收失败（{describe_error(exc)}），下次重试")
         return out
 
+    def grandfather_service(
+        self,
+        *,
+        template_id: str,
+        applicant: Applicant,
+        email: str = "",
+        actor: str,
+        reason: str,
+        offboarded: Callable[[str], bool],
+    ) -> Optional[dict]:
+        """把一个**已经在用**这个服务的人纳管进来：直接开通，不走审批。
+
+        用在存量上：服务先有、门后建。这批人早就在用了，让他们为"继续用"重新走一遍
+        审批是把流程当仪式 —— 而真正需要审批的是**新开**。
+
+        **台账上必须看得出它没走过审批。** 所以：
+          · 状态直接 SUBMITTING → DONE，不借 PENDING / APPROVED 的壳（那两个状态的
+            意思是「在等审批」「审批通过了」，都是假的）；
+          · 不写 `approval` 字段 —— 没有实例号可写，写个空壳更糟；
+          · 记一条 `granted` ：谁加的、什么理由、什么时候。
+
+        除此之外它和批下来的单**完全一样**：同一个模板快照、同一个判定
+        （`service_access`）、同一套离职回收、同样能撤销。这是有意的 ——
+        授权只有一份真相，纳管进来的不该是另一个物种。
+
+        已经有有效授权的人返回 None（幂等，重复跑不会堆单子）。
+
+        `offboarded(union_id)` **必传，没有默认值**：离职过的人不能这样加回来。
+        他当下确实进不去（判定侧那道离职门兜着），但台账会写着他有 —— 而只要那条
+        离职记录后来被改成 `restored`、或者当初就是误判，他**立刻进得去，中间零审批**。
+        不给默认值和 `approvals` 是同一个教训：可选依赖 + 忘传 = 静默失效。
+        """
+        tpl = self._catalog().get(str(template_id or ""))
+        if tpl is None:
+            raise FlowError("没有这个申请模板")
+        if tpl.kind != catalog_mod.KIND_SERVICE:
+            raise FlowError("只有「内部服务」类的模板能这样纳管")
+        # **限期模板不给纳管。** 纳管硬写 `payload={}`，而 `_expires_at` 对 service 读的是
+        # `payload["days"]` —— 于是纳管出来的单恒为「长期」，`revoke_expired` 永远扫不到它。
+        # 对长期模板这是对的（存量本来就是长期在用），对限期模板就是**静默把上限抹掉**，
+        # 而模板上那个上限是这类授权唯一的时间限制。限期授权本来就该走申请。
+        if tpl.max_days:
+            raise FlowError(
+                f"这条模板有 {tpl.max_days} 天的使用期限，纳管只支持长期模板；"
+                "要发限期授权请走正常申请"
+            )
+        reason = str(reason or "").strip()
+        if not _REASON_MIN <= len(reason) <= _REASON_MAX:
+            raise FlowError(f"纳管理由需要 {_REASON_MIN}–{_REASON_MAX} 个字 —— 半年后靠它说话")
+        # **union_id 原样用，带空白就拒。** `service_access.active_grants` 刻意把带首尾
+        # 空白的行当脏数据拒掉，所以这里放进去的话会造出「台账写着已开通、判定侧永远说
+        # 没有」的幽灵单，而且查重也永远不命中 —— 每跑一次多一张
+        uid = str(applicant.union_id or "")
+        if not uid or uid != uid.strip():
+            raise FlowError("union_id 不能为空、也不能带首尾空白")
+        if offboarded(uid):
+            raise FlowError("这个人在离职记录里，不能纳管。要恢复请先在面板上处理离职记录")
+
+        from . import service_access as sa
+
+        held = sa.holdings(self.store.all(), self._clock()).get(uid, ())
+        if any(svc == tpl.service for svc, _tid, _exp in held):
+            return None
+
+        snapshot = _snapshot(tpl)
+        ticket = self.store.create(
+            {
+                "kind": snapshot["kind"],
+                "template": snapshot,
+                "applicant": _applicant_dict(applicant, email),
+                "payload": {},
+                "reason": reason,
+                "summary": f"管理员纳管：{tpl.title}（存量用户，未走审批）",
+            },
+            actor=actor,
+            note="管理员纳管（不是本人提交的）",
+        )
+        done = self.store.update(
+            ticket["id"],
+            actor=actor,
+            expect=[t.SUBMITTING],
+            to=t.DONE,
+            event="admin_granted",
+            note=f"管理员纳管，未经审批：{reason}",
+            fields={
+                "granted": {"by": actor, "reason": reason, "at": t.now_iso(self._clock)},
+                "result": f"已开通 {tpl.service} 的访问权限（纳管）",
+                "expires_at_ts": self._expires_at(ticket, self._clock()),
+                # **`done_at_ts` 要写**，虽然今天纳管单恒不限期、用不上它：
+                # `_remind_tier` 的「开通时就只剩这么几天，不再重复提醒」判据是
+                # `expires_at - done_at`，缺了它这条判据对纳管单永远不成立 ——
+                # 以后给纳管加上期限时，「批下来的不提醒、纳管的提醒」就会分叉
+                "done_at_ts": self._clock(),
+            },
+        )
+        return self._emit("done", done)
+
     def revoke_mine(self, ticket_id: str, *, union_id: str) -> dict:
         """申请人作废**自己申请的**那份凭证。
 

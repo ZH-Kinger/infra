@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -227,6 +228,25 @@ def add_parsers(commands) -> None:
         default="identity/iam-attributes.json",
         help="建号后把登录名写进公司 IAM 的哪个应用。**不配的话人建出来登不进去**",
     )
+
+    gf = rsub.add_parser(
+        "grandfather",
+        help="把已经在用某个内部服务的人纳管进来：直接开通，不走审批（存量专用）",
+    )
+    gf.add_argument("--tickets", default="identity/tickets.json")
+    gf.add_argument("--templates", default="identity/request-templates.json")
+    gf.add_argument("--people", default="identity/people.json")
+    gf.add_argument("--template-id", required=True, help="哪个服务模板，比如 mlflow-access")
+    gf.add_argument(
+        "--union-id",
+        action="append",
+        default=[],
+        required=True,
+        help="纳管谁（可重复）。**必须逐个写出来** —— 不提供「把名册里所有人都加上」这种开关",
+    )
+    gf.add_argument("--reason", required=True, help="为什么纳管。会写进台账，半年后靠它说话")
+    gf.add_argument("--actor", default="admin", help="谁做的，记进台账")
+    gf.add_argument("--apply", action="store_true", help="真的开通。不给就是预演")
 
     # 搬运单独一条命令、单独一个定时器（5 分钟）。不并进 sweep 的理由：
     # sweep 一分钟一轮干的都是轻活，而一趟迁移动辄几小时 —— 一分钟查一次进度
@@ -448,6 +468,8 @@ def dispatch(args: argparse.Namespace):
             return _regions(args)
         if getattr(args, "requests_command", "") == "backfill":
             return _backfill(args)
+        if getattr(args, "requests_command", "") == "grandfather":
+            return _grandfather(args)
         return _sweep(args)
     if args.command == "approval":
         return _widgets(args)
@@ -619,6 +641,164 @@ def _move_retry(store, want: str) -> int:
     )
     print(f"已放回队列（第 {fields['move_attempt']} 次），下一轮定时任务会重新提交")
     return 0
+
+
+def _grandfather(args) -> int:
+    """纳管存量用户：直接开通，不走审批。**预演是默认**，`--apply` 才真写。
+
+    只按**显式给出的 union_id** 办事，不提供「把某个来源里的人全加上」这种开关 ——
+    那种开关一旦写错来源，就是一次性给一批人发权限，而且看起来一切正常。
+    """
+    import time
+
+    from . import catalog as catalog_mod
+    from . import offboard as offboard_mod
+    from . import people as people_mod
+    from . import review as review_mod
+    from . import service_access as sa
+    from . import tickets as tickets_mod
+    from .cli import _require_identity_dir
+    from .errors import DeliveryError
+    from .flows import Applicant, Flows
+
+    # 申请单和名册里有员工姓名/邮箱，写到 identity/ 外面就脱离了 gitignore 的保护。
+    # 更现实的是另一件事：路径写错或在别的工作目录下跑（默认值是相对路径），
+    # `TicketStore` 会**静默新建一个空台账** —— 查重查不到、单子写进一个没人读的文件，
+    # 而屏幕上是一排 ✓。这条路径没有审批回执来暴露这种错
+    for path in (args.tickets, args.people, args.templates):
+        _require_identity_dir(Path(path).resolve())
+
+    # **模板在循环外就解析好，预演也走同一条校验。** 放进循环里、`--apply` 才校验的话，
+    # 预演排练的就不是将要发生的那件事：template-id 打错、指到别的服务、
+    # 模板被人改过，预演统统打印「会纳管 …」一切正常。而这条路径没有审批人，
+    # 「管理员先看一眼预演」就是它唯一的人工闸门
+    try:
+        tpl = catalog_mod.load(args.templates).get(args.template_id)
+    except DeliveryError as exc:
+        print(f"✗ 模板目录读不了：{exc}", file=sys.stderr)
+        return 1
+    if tpl is None:
+        print(f"✗ 没有模板 {args.template_id}", file=sys.stderr)
+        return 1
+    if tpl.kind != catalog_mod.KIND_SERVICE:
+        print(
+            f"✗ {args.template_id} 是「{catalog_mod.KIND_LABELS.get(tpl.kind, tpl.kind)}」，"
+            "只有「内部服务」能纳管",
+            file=sys.stderr,
+        )
+        return 1
+    # **三道模板级的门都要在预演里生效**，不能只有两道：预演是这条路唯一的人工闸门，
+    # 漏一道就等于排练的不是将要发生的那件事
+    if tpl.max_days:
+        print(
+            f"✗ {args.template_id} 有 {tpl.max_days} 天的使用期限，纳管只支持长期模板；"
+            "要发限期授权请走正常申请",
+            file=sys.stderr,
+        )
+        return 1
+    # **把服务名和期限打到屏幕上**：这两样才是「这条命令到底要发什么」的答案，
+    # 而它们只存在于模板里 —— 不打出来的话，模板被改过在预演里看不出来
+    # **actor 也打出来**：它默认是 "admin"，而这条路径没有审批实例，
+    # `granted.by` 是半年后唯一能回答「谁干的」的字段 —— 忘了传要在这里看得见
+    print(
+        f"模板 {tpl.id}：{tpl.title}　service={tpl.service}　"
+        f"期限={'长期' if not tpl.max_days else str(tpl.max_days) + ' 天'}　"
+        f"actor={args.actor}"
+    )
+
+    roster = people_mod.load(args.people)
+    by_uid = {p.union_id: p for p in roster.people if getattr(p, "union_id", "")}
+    store = tickets_mod.TicketStore(args.tickets)
+    flows = Flows(
+        store=store,
+        catalog=lambda: catalog_mod.load(args.templates),
+        approval=lambda: None,
+        approvals=lambda _name: None,
+        roster=lambda: roster,
+        executor=lambda platform, account: None,
+    )
+
+    # 离职记录：和判定侧、离职回收用**同一份**数据，不另写判据
+    ob_path = offboard_mod.path_beside(args.people)
+    gone = {
+        str(rec.get("union_id") or "")
+        for rec in (offboard_mod.load(ob_path) or {}).values()
+        if isinstance(rec, dict)
+        and rec.get("union_id")  # 空 union_id 不进集合，和 server.service_access 那份一致
+        and rec.get("state") in (offboard_mod.DISABLED, offboard_mod.DELETED)
+    }
+    # 「嫌疑」不拦（判据必须和网关一致，弱信号误报常见），但**要说出来** ——
+    # 这条路径没有审批人，预演就是唯一的人工闸门，把真实信号摆在那儿
+    suspect = {
+        str(rec.get("union_id") or "")
+        for rec in (offboard_mod.load(ob_path) or {}).values()
+        if isinstance(rec, dict)
+        and rec.get("union_id")
+        and rec.get("state") == offboard_mod.SUSPECT
+    }
+    held = sa.holdings(store.all(), time.time())
+    rc = 0
+    for uid in args.union_id:
+        person = by_uid.get(uid)
+        if person is None:
+            # **名册里没有的人不纳管**：判定侧那道 `in_roster` 门会把他拒掉，
+            # 加了也进不去，只是台账上多一张永远不生效的单
+            # **所有 ✗ 都走 stderr**：一半走 stdout 一半走 stderr 的话，
+            # 管理员 `2>/dev/null` 或只看管道时会漏掉其中一类失败
+            print(f"✗ {uid}：名册里没有这个人，跳过", file=sys.stderr)
+            rc = 1
+            continue
+        who = f"{person.name}（{person.email or uid}）"
+        if uid in suspect:
+            print(f"⚠ {who}：离职记录里有一条「嫌疑」标记（不拦，确认一下）", file=sys.stderr)
+        if uid in gone:
+            print(f"✗ {who}：在离职记录里，不纳管", file=sys.stderr)
+            rc = 1
+            continue
+        if any(svc == tpl.service for svc, _t, _e in held.get(uid, ())):
+            print(f"· {who}：已经有有效授权，会跳过")
+            continue
+        if not args.apply:
+            print(f"（预演）会纳管 {who} → {tpl.service}")
+            continue
+        try:
+            got = flows.grandfather_service(
+                template_id=args.template_id,
+                applicant=Applicant(union_id=uid, name=person.name),
+                email=person.email,
+                actor=args.actor,
+                reason=args.reason,
+                offboarded=lambda u: u in gone,
+            )
+        except DeliveryError as exc:  # FlowError 是 TicketError 的子类，抓不到父类
+            print(f"✗ {who}：{exc}", file=sys.stderr)
+            rc = 1
+            continue
+        if got is None:
+            print(f"· {who}：已经有有效授权，跳过")
+        else:
+            print(f"✓ {who}：{got['id']}")
+            # **写进审计日志**，和权限变更、离职回收同一份 —— 出事时「这个人身上
+            # 发生过什么」不用跨文件拼。这条是全系统唯一绕过审批的写操作，
+            # 而台账本身是一个可以被手工编辑的 JSON；日志是 append-only 的那一份
+            with contextlib.suppress(Exception):  # noqa: BLE001 — 记不上不该让已发出的权限回滚
+                review_mod.log_event(
+                    review_mod.ReviewPaths(
+                        proposal="", manual="", people=args.people, bindings=None
+                    ),
+                    {
+                        "op": "grandfather",
+                        "actor": args.actor,
+                        "union_id": uid,
+                        "service": tpl.service,
+                        "template": tpl.id,
+                        "ticket": got["id"],
+                        "reason": args.reason,
+                    },
+                )
+    if not args.apply:
+        print("\n（预演，没有写盘。加 --apply 真开通）")
+    return rc
 
 
 def _moves(args) -> int:
