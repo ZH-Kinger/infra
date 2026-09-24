@@ -1,0 +1,14 @@
+[Unit]
+Description=Probe self-hosted service URLs from outside
+
+[Timer]
+# 每 5 分钟一次。配合 `--fails 3` = 连挂约 15 分钟才报警。
+#
+# 这个间隔是按「多久发现算及时」倒推的，不是按「探得越勤越好」：
+# 探活守的是整机失联那类故障，它不会自愈，早 5 分钟发现和早 1 分钟发现区别不大；
+# 而探得太勤只会让「抖一下」的概率上升，把这条告警训练成噪音。
+OnBootSec=3min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

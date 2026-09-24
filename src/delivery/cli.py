@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import json
 import os
@@ -461,6 +462,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--send-to",
         default="",
         help="真发一条测试消息到这个邮箱。唯一决定性的验证——探针只能靠错误码推断",
+    )
+
+    probe = commands.add_parser(
+        "probe", help="外部探活：这些地址还能打开吗。连续挂几次才报警，恢复了也说一声"
+    )
+    probe.add_argument(
+        "--url",
+        action="append",
+        default=[],
+        help="要探的地址（可重复）。留空则读 DELIVERY_PROBE_URLS（逗号或空白分隔）",
+    )
+    probe.add_argument(
+        "--fails",
+        type=int,
+        default=3,
+        help="连续失败几次才算真挂了。默认 3 —— 一次抖动就报警会把这条告警训练成噪音",
+    )
+    probe.add_argument("--timeout", type=float, default=10.0, help="每个地址的超时秒数")
+    probe.add_argument(
+        "--state",
+        default="",
+        help="连续失败次数记在哪。默认 probe-state.json（**不是**告警冷却那个文件）",
     )
 
     commands.add_parser("logout", help="清除本机会话")
@@ -995,6 +1018,167 @@ def _cmd_plan_show(registry: PlatformRegistry, args: argparse.Namespace) -> int:
         print(render_plan(plan))
     # 被阻断的计划用非零退出码，流水线据此拦住 apply。
     return 1 if plan.blocked else 0
+
+
+def _probe_count(value: object) -> int:
+    """状态文件里那个计数。**形状不对当 0**，不抛 ——
+    `main()` 只 catch DeliveryError，一个 `int("abc")` 会带着 traceback 退非零，
+    于是「状态文件坏了」变成了一条假告警，而那正是这条命令要避免的。
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return n if n >= 0 else 0
+
+
+def _probe_opener():
+    """探活专用的 urllib opener：**只会打开 http(s)、不跟随重定向、不走代理。**
+
+    默认的 opener 三条都不满足，而三条都咬人：
+
+      · **跟随重定向**：`HTTPRedirectHandler` 只拦 http/https/ftp 之外的协议，而
+        `FTPHandler` 默认装着 —— 被探的那台机（或能改它响应、劫持它 DNS 的人）
+        回一个 `302 Location: ftp://内网地址:端口/`，面板就真的去连了。审计实测
+        连上了本机的监听端口。顺带它还能操纵结论：重定向到必挂的地址 = 造假警，
+        重定向到活地址 = 掩盖自己已经不行了。
+        而对「这台机还在不在」这个判据，跟随**没有任何好处** —— 对方回了 302
+        本身就证明它活着。
+      · **`file:` / `ftp:` handler**：地址来自配置文件，装着它们就等于留了一条
+        「按外部输入读本地文件」的路。这里**结构上不装**，比在调用处判串更硬。
+      · **代理**：`urlopen` 会读 `http_proxy` 等环境变量，而这台机上所有定时任务
+        共用一份 `panel.env`。哪天为了别的目的加了代理，探活就变成「探代理还活着吗」
+        —— 目标机挂了也照样 200，**静默失效且方向是漏报**。
+
+    **不要用 `build_opener()`** —— 它会把 FTP/File/Data 那些 handler 一起装回来。
+    """
+    import urllib.request
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *_a, **_kw):
+            return None
+
+    opener = urllib.request.OpenerDirector()
+    for handler in (
+        # 注意：空 proxies 的 ProxyHandler 其实**不会**进 opener.handlers
+        # （`add_handler` 显式跳过没有 proxy_open 的）。不走代理靠的是
+        # **没装**那个会读 `http_proxy` 环境变量的 ProxyHandler —— 留这一行是为了
+        # 让意图显眼，别误以为「换回 build_opener() 也保留这行就还挡着代理」
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPHandler(),
+        urllib.request.HTTPSHandler(),
+        _NoRedirect(),
+        # **必须装 DefaultErrorHandler**：不装的话非 2xx 会让 `open()` 返回 None，
+        # 状态码丢了、日志里只剩「HTTP ?」—— 判据仍然对（都算活着），
+        # 但出事时你分不清对面回的是 403 还是 502
+        urllib.request.HTTPDefaultErrorHandler(),
+        urllib.request.HTTPErrorProcessor(),
+    ):
+        opener.add_handler(handler)
+    return opener
+
+
+def _cmd_probe(args) -> int:
+    """外部探活。**这条命令自己不发通知** —— 退非零，让 `OnFailure=` 那条管道去发，
+    和其它定时任务同一个出口（也就同一份 6 小时冷却，不会刷屏）。
+
+    为什么要「连续 N 次」：一次 curl 失败可能只是网络抖一下，而**报过一次假警的告警
+    就不再有人认真看了**。这条探活守的恰恰是「没人会主动发现」的那类故障
+    （公网 IP 掉了、机器被关），所以它必须保持可信。
+
+    恢复也要说一句：只报挂、不报好，人就不知道该不该继续处理。
+    """
+    import re
+    import urllib.error
+    import urllib.request
+
+    urls = [u for u in (args.url or []) if u] or [
+        u for u in re.split(r"[,\s]+", os.environ.get("DELIVERY_PROBE_URLS", "")) if u
+    ]
+    # 同一个地址写两遍会一轮加两次计数，「连挂 3 次」就变成「连挂 2 轮」。
+    # panel.env 是手写的，重复一行很正常
+    urls = list(dict.fromkeys(urls))
+    if not urls:
+        print("没有要探的地址（--url 或 DELIVERY_PROBE_URLS）", file=sys.stderr)
+        return 1
+
+    file = Path(args.state or PROBE_STATE)
+    state = _load_alert_state(file)
+    # 状态读不了：当成「没记过」继续探。**读**失败不报警是对的 ——
+    # 告警该由「地址真打不开」触发，不该由「状态文件坏了」触发。
+    # （**写**失败是另一回事，见下面那段：它关掉的不是一次告警，是整条。）
+    #
+    # 只留本轮要探的地址：地址从配置里删掉之后计数还留着的话，
+    # 过一个月加回来，第一次失败就会报警 —— 「连续 3 次」这个承诺静悄悄失效一次
+    old = state or {}
+    counts = {u: _probe_count(old.get(u)) for u in urls}
+
+    bad = []  # 连挂够次数、该报警的
+    down = []  # 本轮判挂的（不管连号）—— 计数写不下去时只能靠它
+    for url in urls:
+        try:
+            # **显式判一次协议，别只靠 opener 的结构。** opener 里没装对应 handler 时
+            # `open()` 返回的是 **None** 而不是抛错 —— 而 None 会被下面当成「打开成功」，
+            # 于是 `ftp://` / `file://` 反而被判成「活着」。两道一起留：
+            # 结构那道防的是"真去连了"，这道防的是"被判成活着"
+            if not str(url).lower().startswith(("http://", "https://")):
+                raise ValueError("只支持 http/https")
+            req = urllib.request.Request(  # noqa: S310 — opener 里只装了 http(s)
+                url, method="GET", headers={"User-Agent": "delivery-probe"}
+            )
+            got = _probe_opener().open(req, timeout=args.timeout)
+            if got is None:
+                # opener 里没有能处理它的 handler。**当成挂了**，不是活着
+                raise ValueError("这个地址 opener 处理不了")
+            # **不能用 `with`**：不跟随重定向时 `redirect_request` 返回 None，
+            # `open()` 回的可能不是 context manager（3xx 那条路），
+            # 拿 `with` 接会抛 AttributeError → 把「对方活着」误判成「挂了」
+            # `status` 在 3xx 那条路上可能是 None，`code` 也可能不在 —— 逐个兜
+            code = getattr(got, "status", None)
+            if not code:
+                code = getattr(got, "code", None)
+            if not code and hasattr(got, "getcode"):
+                with contextlib.suppress(Exception):
+                    code = got.getcode()
+            with contextlib.suppress(Exception):
+                got.close()
+            ok, why = True, f"HTTP {code or '?'}"
+        except urllib.error.HTTPError as exc:
+            # **4xx/5xx 也算活着**：探的是「这台机还在不在」，不是「这个接口对不对」。
+            # 把 403/401 当挂掉的话，任何一次门禁调整都会变成一条故障告警。
+            # 3xx 同理 —— 我们不跟随，收到就说明对面活着
+            ok, why = True, f"HTTP {exc.code}"
+        except Exception as exc:  # noqa: BLE001 — 连不上/超时/协议不对/DNS 全算挂
+            ok, why = False, f"{type(exc).__name__}: {str(exc)[:80]}"
+
+        was = counts.get(url, 0)
+        n = 0 if ok else was + 1
+        counts[url] = n
+        if ok:
+            # 恢复了也说一句：只报挂不报好，人不知道该不该继续处理
+            print(f"✓ {url} {why}" + (f"（之前连挂 {was} 次，已恢复）" if was else ""))
+        else:
+            print(f"✗ {url} {why}（连续第 {n} 次）", file=sys.stderr)
+            down.append(url)
+            if n >= max(1, args.fails):
+                bad.append(url)
+
+    # **写不下去要吵**。计数落不了盘 = 每轮都从 0 开始 = 永远到不了阈值 =
+    # 这条告警**永久静音**，而它守的恰恰是「没人会主动发现」的故障。
+    # 静默失效的探针比没有探针更糟：它让人以为有人在看着
+    # **这里要看 `down` 不是 `bad`**：计数写不下去时 `n` 每轮都是 1，
+    # 而 `bad` 要连挂够 `--fails`（线上是 3）才有东西 —— 拿 `bad` 判的话这个分支
+    # 永远进不去，「写失败要吵」对线上等于没做，静默照旧
+    if not _save_alert_state(file, counts) and down:
+        print(f"★ 探活计数写不进 {file}，连挂次数记不住 —— 本次不等连号直接报", file=sys.stderr)
+        print(f"★ {len(down)} 个地址打不开：{'、'.join(down)}", file=sys.stderr)
+        return 1
+    if bad:
+        # 退非零 → OnFailure 那条管道私聊管理员。**这条命令不自己发**，
+        # 否则同一件事会有两个出口、两份冷却
+        print(f"★ {len(bad)} 个地址连续打不开：{'、'.join(bad)}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _cmd_doctor(args) -> int:
@@ -2002,6 +2186,18 @@ UNIT_ALERT_COOLDOWN = 6 * 3600
 #: 刷屏原样回来，而线索只有 journal 里一行「告警冷却记不下来」。读 `$STATE_DIRECTORY` 的话，
 #: 单元里漏写 `Environment=` 那行也不会错（审计 Med-2）。
 _STATE_DIR = os.environ.get("STATE_DIRECTORY", "").split(":")[0]
+#: 探活的连续失败次数记在**自己的**文件里，不和告警冷却共用一个。
+#:
+#: 共用过一版，问题是**丢更新**：探活读了状态 → 花十几秒挨个发 HTTP → 再写回去，
+#: 而这中间 `delivery-unit-failed` 很可能刚写过冷却时间戳 —— 探活一写就把它顶回旧值，
+#: 冷却失去锚点、开始刷屏。共用没带来任何好处（探活不读冷却、告警不读计数），
+#: 却把两个节奏完全不同的写者绑在了一起。
+#: 用 `DELIVERY_PROBE_STATE` 可以覆盖；systemd 单元里没配，走 `$STATE_DIRECTORY`
+PROBE_STATE = os.environ.get("DELIVERY_PROBE_STATE") or (
+    f"{_STATE_DIR}/probe-state.json" if _STATE_DIR else "/var/lib/delivery/probe-state.json"
+)
+
+
 UNIT_ALERT_STATE = os.environ.get("DELIVERY_ALERT_STATE") or (
     f"{_STATE_DIR}/alert-state.json" if _STATE_DIR else "/var/lib/delivery/alert-state.json"
 )
@@ -2018,7 +2214,12 @@ def _load_alert_state(file: Path) -> Optional[dict]:
     return got if isinstance(got, dict) else {}
 
 
-def _save_alert_state(file: Path, state: dict) -> None:
+def _save_alert_state(file: Path, state: dict) -> bool:
+    """写状态文件。**返回成败** —— 调用方据此决定要不要把「记不住」当成一件事。
+
+    告警冷却那一路不看返回值（写不下去就重复发，刷屏好过静默，见下面）；
+    探活那一路**看**：它的计数写不下去等于阈值永远到不了、整条告警静音。
+    """
     try:
         # 走仓库现成的原子写：临时文件名随机（`mkstemp`），六个单元共用这个告警单元、
         # 两个同一秒挂掉时不会互相写坏对方的临时文件。写坏一次的代价是永久的 ——
@@ -2026,7 +2227,11 @@ def _save_alert_state(file: Path, state: dict) -> None:
         _atomic_private_write(file, json.dumps(state, ensure_ascii=False, indent=2).encode())
     except OSError as exc:
         # 写不下去（目录只读、盘满）：下一次还是会发。刷屏好过静默
-        print(f"（告警冷却记不下来：{type(exc).__name__} {exc}）", file=sys.stderr)
+        # 文案要中性：探活也走这条路，写的是它自己的 probe-state.json ——
+        # 说「告警冷却」会让排查的人第一反应去看错文件
+        print(f"（状态写不下来 {file.name}：{type(exc).__name__} {exc}）", file=sys.stderr)
+        return False
+    return True
 
 
 def _alert_cooldown(unit: str, path: str, now: float) -> tuple:
@@ -2203,15 +2408,30 @@ def _cmd_unit_failed(args) -> int:
     # sweep 最常见的失败恰恰是「到期回收没收干净」—— 日志里没 traceback、报告也出全了，
     # 完全符合那句话的判据。照做就是 SuccessExitStatus=1，而 1 同时是「整步崩了」
     # 「存储读不了」的退出码 → 兜底告警从此永久失效。告警不该给出会关掉自己的建议。
+    # **猜测按单元分**。那三条是 sweep 专用的：探活失败时照样贴上去的话，
+    # 收到的人会去翻「到期回收」「审批同步」，而真相是某台机打不开了 ——
+    # 而那正是探活存在的全部理由。这条告警自己就是因为「文案替 systemd 猜原因」
+    # 吃过亏的（见上面那段注释），别在新单元上重犯
+    if unit.startswith("delivery-probe"):
+        guesses = (
+            "没有报错 = 有地址连续打不开（不是这个定时任务坏了）。\n"
+            "journal 最后几行那个 ★ 列了是哪个地址 —— 先去那台机看，别在面板上找。\n"
+            "也可能是没配地址（DELIVERY_PROBE_URLS），日志第一行会说。\n"
+            "**退出码 2 = 命令本身没跑起来**（参数/环境问题），和那些地址无关。"
+        )
+    else:
+        guesses = (
+            "没有报错、报告也出全了 = 任务跑完了，但这一轮有活没干成，三种：\n"
+            "  · 到期回收没收干净 —— 管理后台待办页\n"
+            "  · 审批同步整步跳过（飞书不可用）—— 日志里有「飞书审批不可用」\n"
+            "  · 申请单存储读不了 —— 日志里有「读不了申请单存储」"
+        )
     text = (
         f"{unit} 这一轮没跑成。{how}\n"
         f"{again}"
         f"看日志：journalctl -u {unit} -n 80 --no-pager\n"
         "最后几行有 Python 报错 = 真崩了（或者被超时杀掉、依赖导入失败）。\n"
-        "没有报错、报告也出全了 = 任务跑完了，但这一轮有活没干成，三种：\n"
-        "  · 到期回收没收干净 —— 管理后台待办页\n"
-        "  · 审批同步整步跳过（飞书不可用）—— 日志里有「飞书审批不可用」\n"
-        "  · 申请单存储读不了 —— 日志里有「读不了申请单存储」"
+        f"{guesses}"
     )
     # **标题问 `_is_drill()`，不要拿正文串去比。** 耦合在一个字符串上的话，将来
     # `_how_it_died` 只要给演习串加点修饰，标题就会静默退回「定时任务没跑成」
@@ -2423,6 +2643,12 @@ def _panel_issued_users(args, problems: list) -> set:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        # **探活排在平台描述符加载之前**：它一个平台都不用，却会被那一步的失败带走。
+        # 推坏一次部署 → `平台描述符目录不存在` → 退 2 → 而那个退出码现在会被渲染成
+        # 探活专属文案「有地址连续打不开」—— 把人支去查一台好好的机器。
+        # **监控工具不该和被监控系统共享失败模式。**
+        if args.command == "probe":
+            return _cmd_probe(args)
         registry = PlatformRegistry.load(args.platforms_dir)
         if args.command == "platforms":
             return _cmd_platforms(registry, args.json)
@@ -2489,6 +2715,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cli_requests.dispatch(args)
         if args.command == "login":
             return _cmd_login(args)
+        if args.command == "probe":
+            return _cmd_probe(args)
         if args.command == "doctor":
             return _cmd_doctor(args)
         if args.command == "logout":

@@ -109,6 +109,83 @@ location / {
 
 这个值同时用于两件事：取件接口的限流分桶，和申请单里 `credential_viewed` 记的「谁看的」。
 
+## 外部探活（`DELIVERY_PROBE_URLS`）
+
+自建服务（MLflow 这类）跑在别的机器上，而**那类故障自己发不出告警** ——
+2026-09-24 那台机的公网 IP 掉了，整机从外面失联（ping/22/80/443 全不通），
+服务本身一直好好跑着，所以没有任何监控会响；是用户来问「怎么打不开」才发现的。
+
+配要探的地址，逗号或空白分隔：
+
+```
+DELIVERY_PROBE_URLS=https://tensorboard.wuji-tech.com/
+```
+
+`delivery-probe.timer` 每 5 分钟探一次，**连续 3 次失败才报**（约 15 分钟）。
+不是一次就报：这条告警守的恰恰是「没人会主动发现」的故障，**它必须保持可信** ——
+报过一次假警之后就不再有人认真看了。恢复时也会打一行「之前连挂 N 次，已恢复」。
+
+**阈值 × 间隔 = 发现时延**：`--fails 3` × 5 分钟 ≈ 15 分钟。调大阈值看起来只是
+「更保守」，实际是把发现时延一起拉长了 —— `--fails 100` 配 5 分钟 = 连挂 8 小时才报，
+而那看起来完全像是配置正常。
+
+**地址数 × `--timeout` 要明显小于 `TimeoutStartSec`**（现在是 5min / 10s = 30 个的余量）。
+超了 systemd 会杀掉进程，而计数是最后一行才落盘的 —— 连号永远攒不够、告警永远不响。
+
+**4xx/5xx 算活着**：探的是「这台机还在不在」，不是「这个接口对不对」。
+把 403 当挂掉的话，任何一次门禁调整都会变成一条故障告警。
+
+探失败**不自己发通知**，退非零交给 `OnFailure=delivery-unit-failed@%n.service` ——
+和其它定时任务同一个出口、同一份 6 小时冷却。
+
+### 装完要演一次，而且演完要清
+
+**不验证等于装了个不知道灵不灵的探针** —— 而它守的恰恰是「没人会主动发现」的故障。
+
+```bash
+# 1) 临时加一条必然拒连的本地地址（不走 DNS、不出机器、秒级失败）
+#    DELIVERY_PROBE_URLS=https://tensorboard.wuji-tech.com/ http://127.0.0.1:1/
+# 2) 连点三次，第三次该退 1
+for i in 1 2 3; do systemctl start delivery-probe.service; done
+# 3) 看飞书私聊。**正文该说「有地址连续打不开」**，不该说「到期回收/审批同步」——
+#    那是 sweep 的文案，这是它在生产上唯一一次能被验证的机会
+```
+
+顺手各看十秒（都是只有这一次机会看到的）：
+
+```bash
+cat /var/lib/delivery/probe-state.json    # 删掉假地址再跑一轮后，里面只该剩真地址
+ls -l /var/lib/delivery/                  # 两个文件属主都该是 delivery
+```
+
+**演完必须清掉那条冷却**：
+
+```bash
+sudo -u delivery python3 - <<'EOF'
+import json, pathlib
+p = pathlib.Path("/var/lib/delivery/alert-state.json")
+d = json.loads(p.read_text())
+d.get("units", {}).pop("delivery-probe.service", None)
+p.write_text(json.dumps(d, ensure_ascii=False, indent=2))
+EOF
+```
+
+**别用 root 跑这段** —— 属主一变面板就读不了那个文件，而且没有任何告警（踩过）。
+不清的话：`OnFailure=…@%n.service` 用的是**真单元名**，`_DRILL_UNITS` 只认
+`drill`/`drill.service`，所以这次演习记的是真冷却 —— 接下来 6 小时探活真报也收不到。
+
+### 三个已知盲区（写下来，免得以后有人以为覆盖到了）
+
+1. **谁看着看门狗**：探活跑在面板这台。**掉 EIP 的要是面板自己，探活跟着一起死，
+   和 2026-09-24 那次结局完全一样** —— 没有任何东西会响。要补得靠外部的
+   dead-man switch（探活成功时去 ping 一个第三方，超时未 ping 由它发邮件）。
+2. **EIP 被释放后可能分给别的租户**，而 DNS 还指着那个 IP → 对方随便回个 404
+   也算「活着」。当前判据（任何 HTTP 响应 = 活着）是有意选的（403 噪音更糟），
+   但它**不覆盖「域名指向了别人的机器」**。
+3. **`/var/lib/delivery` 不可写时会刷屏**：探活每有地址挂掉就退 1，而告警冷却
+   也写在同一个不可写目录 → 冷却 fail-open → 私聊变成 5 分钟一条。
+   这是这仓库选过的方向（刷屏好过静默），但收到几百条的人得知道去看磁盘和权限。
+
 ## 离职回收里豁免某个身份（`DELIVERY_PROTECTED_SERVICE_IDS`）
 
 自建服务（MLflow 这类）的访问权限也走离职回收：检测到离职 → 停用 → 待确认卡片 →

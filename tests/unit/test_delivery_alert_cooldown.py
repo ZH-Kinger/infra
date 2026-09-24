@@ -430,7 +430,12 @@ class CooldownFailOpenTests(CooldownBase):
         state = locked / "alert-state.json"
         code, _, err = self.fail_once(now=NOW, state=state)
         self.assertEqual(code, 0, "写不下冷却记录不是故障，告警本身送到了")
-        self.assertIn("告警冷却", err, "至少要在 journal 里留下「冷却没生效」的线索")
+        # 按「线索」断言，别锁措辞：`_save_alert_state` 现在由冷却和外部探活**共用**，
+        # 文案已从「告警冷却记不下来」改成带文件名的通用说法（审计 Low-B ——
+        # 旧文案会让排查探活的人去翻 alert-state.json，而它写的是 probe-state.json）。
+        # journal 里真正有用的是**哪个文件**、**为什么**，这两样措辞怎么改都得在。
+        self.assertIn(state.name, err, "没说是哪个文件写不下去，人会去翻错的那个")
+        self.assertIn("PermissionError", err, "没说为什么写不下去，线索等于没留")
         self.assertFalse(state.exists())
         self.fail_once(now=NOW + 60, state=state)  # 没记下来 → 还是第一次 → 还是发
         self.assertEqual(len(self.sent), 2)
