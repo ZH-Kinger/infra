@@ -348,3 +348,31 @@ tester 报了 1 个阻塞 bug + 3 个缺口 + 2 个 nit，全部已修：
   **教训（本轮第三次同型）**：断言锁整句措辞 = 改文案就假红；
   断言写成 `x or os.environ.get(...)` = 设了变量就恒真、真红也看不见。
   前者用「线索锚点」，后者用 `skipIf`——跳过是看得见的，恒真不是。
+
+- [2026-09-24] [TESTER] 开发目录 OSS 读写（`devdir`）+ 刷新告警分级 补测完成：
+  新增 `tests/unit/test_delivery_devdir.py`（61 例）、`tests/unit/test_delivery_refresh_alerts.py`（20 例）、
+  `test_delivery_health.py` 补 1 例（九章进快照 → `/api/admin/health` 500 的回归）。
+  全量 3749 passed / 2 skipped / 3 xfailed / 6314 subtests，0 既存失败（基线 3664 也是全绿）。
+  **三条用例做过变异验证**（改源码确认会红，不是摆设）：
+  ① `_dev_spaces` 退回按单传 → 「第二张单静默抹掉第一张的杭州授权」当场红；
+  ② 摘掉 `health.py` 那个 `platforms.IDS` 守卫 → 体检页 500 当场红；
+  ③ 云上 issuer 放行 `wuji-dev-dir-*` 之前，快照守门用例挂 `expectedFailure`，
+  放行后 XPASS 报出来、当场摘掉标记转绿 —— 「云上变更没做完」这件事是测试报出来的。
+  **教训**：策略正文是**全量重写**的接口（`CreatePolicyVersion` 设默认），
+  给它传「这一张单的范围」等于删掉别的单给过的授权，而两边都不会报错。
+  这类接口的用例必须跨两张单跑，单张单的用例全绿也证明不了什么。
+
+- [2026-09-24] [TESTER] 第二轮（读回合并 + 重试循环 + TurboAI）补测完成。
+  全量 **3780 passed / 2 skipped / 3 xfailed / 6332 subtests**，`node --test tests/web/*.test.mjs` 107 全过。
+  新增覆盖：`targets_in`/`merge_targets` 读回合并（含「build 出来的正文必须能被自己读回来」
+  这条正则↔拼串的连接点）、`ensure_dev_policy` 的四条 fail-closed（认不出/不是 JSON/
+  没有默认版本/读回来本身 403 —— 一律不许退化成覆盖）、「没有新增就一个写请求都不发」、
+  `retry_dev_policies` 十条（尤其**不碰没有 `dev_policy_needed` 事件的历史老单**）、
+  `_dev_dirs` 按真实组扫（扫不动必须抛，不许退回 `general`）、人工平台名单「四处收敛成一处」。
+  **两条是这轮抓出来的真问题**：① 重试失败那行文案不含任何 `TROUBLE_WORDS`
+  → sweep 每轮退 0、告警永远不响（dev 已改成「开发目录授权失败」）；
+  ② `todo.py` 的人工待办**文案**还写死着「九章」，TurboAI 的号离职时会告诉管理员
+  去九章控制台 —— 名单收敛了、文案没收敛，红着等修。
+  **教训**：把一个写死的常量收敛成名单时，跟着它的**文案**是第四处，最容易漏，
+  而它的症状最像「没坏」——待办有、能点、点完还销账，只是指错了地方。
+- [2026-09-24] [AUDITOR] 云权限面板开发目录授权复审：无阻塞，3 中 10 低，详见会话

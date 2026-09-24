@@ -22,6 +22,7 @@ from typing import Callable, Mapping, Optional, Sequence
 
 from . import catalog as catalog_mod
 from . import datatypes as datatypes_mod
+from . import devdir as devdir_mod
 from . import grants as grants_mod
 from . import notify as notify_mod
 from . import platforms as platforms_mod
@@ -2702,8 +2703,13 @@ class Flows:
         是「他还进不去 DSW」，写进结果文案让人看见，重试这张单就能补。
         """
         spaces = getattr(tpl, "workspaces", None) or ()
-        if not spaces or ticket.get("workspace_done"):
+        if not spaces:
             return ""
+        if ticket.get("workspace_done"):
+            # 空间那几件事上一轮已经做完，但开发目录权限可能还没给 —— 它是后加的一步，
+            # 有自己的完成标记。不单独判的话，所有老单子重试时都会从这里直接返回，
+            # 于是这一步对存量的人永远不会补上
+            return self._provision_dev_policy(tpl, ticket, username)
         ex = self._executor(tpl.platform, tpl.account)
         done, problems = [], []
         for ws in spaces:
@@ -2719,9 +2725,88 @@ class Flows:
             note=note or "工作空间：没什么要做的",
             fields={"workspace_done": True} if not problems else None,
         )
+        # 目录建没建成都要给权限：策略框的是前缀，OSS 的目录是虚的 ——
+        # 占位对象没放上不影响他往那个前缀底下写
+        policy = self._provision_dev_policy(tpl, ticket, username)
         if problems:
-            return "；**他还进不去 DSW/DLC**：" + "；".join(problems)
-        return "；" + "；".join(done)
+            return "；**他还进不去 DSW/DLC**：" + "；".join(problems) + policy
+        return "；" + "；".join(done) + policy
+
+    def _provision_dev_policy(
+        self,
+        tpl: catalog_mod.Template,
+        ticket: dict,
+        username: str,
+        *,
+        expect=(t.EXECUTING,),
+    ) -> str:
+        """让他能用自己的 AK/SK 写进自己那个 OSS 开发目录。
+
+        **不是锦上添花。** 算法组那个用户组 OSS 侧只有 `AliyunOSSReadOnlyAccess`，
+        不给这条的话人整桶能读、一个字节写不进去；而在 PAI 里挂载着用又一切正常
+        （挂载走工作空间的角色），他会以为是 AK 坏了，换一把还是不行。见 `devdir.py`。
+
+        **建策略用发放身份、挂策略用开通身份。** 云上是这么切的：发放身份够不着真人的
+        子账号，开通身份造不了策略正文，单独哪个都发不出「内容任意 + 挂在真人身上」
+        的策略。图省事合成一个身份等于把这道闸拆了。
+
+        失败不把整张单判失败 —— 账号这时已经建好了。写进结果文案让人看见，重试能补。
+        """
+        if tpl.platform != "aliyun":
+            return ""
+        # **只给这张单批的地域。** 「第二张单会不会抹掉第一张授的」由
+        # `ensure_dev_policy` 读回云上正文合并来保证，不在这里用"把所有地域都授了"
+        # 去绕 —— 那等于发出这张单没批的范围，绕过「加入工作空间」那道审批门。
+        try:
+            targets = devdir_mod.targets_of(getattr(tpl, "workspaces", None) or (), username)
+        except ValueError as exc:
+            targets = []
+            bad = str(exc)
+        else:
+            bad = ""
+        if not targets and not bad:
+            return ""  # 这批空间一个桶都没有（纯 CPFS），本来就没有开发目录
+        # **完成标记记的是"覆盖了哪几个目录"，不是一个布尔。** 布尔的问题是
+        # 它表达不了"少覆盖了一个地域"——以后登记表里加一个地域，所有老单子
+        # 都会因为标记已置位而跳过，新地域永远补不上，且同样没人会发现
+        want = sorted(f"{b}/{g}" for b, g in targets)
+        had = ticket.get("dev_policy_targets")
+        if isinstance(had, list) and set(want) <= {str(x) for x in had}:
+            return ""
+        try:
+            if bad:
+                raise ProvisionError(bad)
+            name, covered = self._issuer_for(tpl.platform, tpl.account).ensure_dev_policy(
+                username, targets
+            )
+            self._executor(tpl.platform, tpl.account).attach_policy(
+                username, devdir_mod.POLICY_TYPE, name
+            )
+        except Exception as exc:  # noqa: BLE001 — 见 docstring
+            why = describe_error(exc) or type(exc).__name__
+            self.store.update(
+                ticket["id"],
+                actor="system",
+                expect=list(expect),
+                event="dev_policy_needed",
+                note=f"{username} 的开发目录读写权限没给成：{why}",
+            )
+            # **措辞里必须有 `TROUBLE_WORDS` 里的词**（这里是「失败」）。
+            # 写成「开发目录还是只读」那种纯描述的话，`is_trouble` 判不出问题，
+            # 定时任务会把这一轮当成干净的一轮退 0 —— 告警永远不响
+            return f"；**开发目录授权失败**（{why}），他用自己的 AK/SK 写不进去"
+        # 文案只说**这张单**给了什么；`covered` 是云上现在一共覆盖的范围
+        # （含之前几张单给的），写进台账当完成标记 —— 拿它判"要不要重跑"才准
+        dirs = "、".join(devdir_mod.dev_dir(b, g, username) for b, g in targets)
+        self.store.update(
+            ticket["id"],
+            actor="system",
+            expect=list(expect),
+            event="dev_policy_done",
+            note=f"已给 {username} 开发目录读写权限：{dirs}",
+            fields={"dev_policy_targets": sorted(f"{b}/{g}" for b, g in covered)},
+        )
+        return f"；已给开发目录读写权限（{dirs}）"
 
     def _write_iam_attr(
         self, tpl: catalog_mod.Template, ticket: dict, username: str, *, expect=(t.EXECUTING,)
@@ -3134,6 +3219,49 @@ class Flows:
                 out.append(f"{ticket['id']}：补写登录名出错（{describe_error(exc)}）")
                 continue
             out.append(f"{ticket['id']}：已补写登录名进公司 IAM")
+        return out
+
+    def retry_dev_policies(self) -> list:
+        """定时任务：把「号开好了、开发目录权限没给成」的单子自动补上。返回每张单一行。
+
+        为什么必须自动
+        ──────────────
+        这一步失败**不判整单失败**（账号已经建好了，判失败会把一张其实办成了的单子
+        推进 FAILED）。于是单子进 DONE —— 而 `execute()` 只认 APPROVED / FAILED，
+        **这张单再也重试不了**，`dev_policy_needed` 那条事件就只是一行文案，
+        没有任何东西会去做它。那个人只能等下次刚好走一张权限单，或者一直写不进
+        自己的目录，而他会以为是 AK 坏了。
+
+        失败的原因大多是临时的（RAM 接口抖、那一刻限流），值得一轮一轮自动重试。
+
+        **和开通时同一份实现**（`_provision_dev_policy`），不是第二条执行路径。
+        `ensure_dev_policy` 会读回云上正文再合并，所以重复跑不会覆盖已有的地域；
+        没有新增目录时它连写都不写，空跑不消耗策略版本（一条策略只有 5 个版本）。
+        """
+        out = []
+        for ticket in self.store.all():
+            if ticket.get("status") != t.DONE or ticket.get("dev_policy_targets"):
+                continue
+            # **只捞"试过且失败了"的。** 不看这个事件的话，每一轮都会去重跑所有
+            # 历史老单子 —— 那些单子根本没有这一步，等于给几百个人凭空发策略
+            if not any(
+                (e or {}).get("event") == "dev_policy_needed" for e in ticket.get("events") or ()
+            ):
+                continue
+            tpl = self._catalog().get(str((ticket.get("template") or {}).get("id") or ""))
+            if tpl is None or tpl.platform != "aliyun":
+                continue
+            payload = ticket.get("payload") or {}
+            who = str(payload.get("username") or payload.get("cloud_user") or "")
+            if not who:
+                continue
+            try:
+                note = self._provision_dev_policy(tpl, ticket, who, expect=(t.DONE,))
+            except Exception as exc:  # noqa: BLE001 — 一张单失败不挡其余
+                out.append(f"{ticket['id']}：补开发目录权限出错（{describe_error(exc)}）")
+                continue
+            if note:
+                out.append(f"{ticket['id']}：{note.lstrip('；')}")
         return out
 
     def _offer_credential(self, tpl: catalog_mod.Template, ticket: dict) -> str:

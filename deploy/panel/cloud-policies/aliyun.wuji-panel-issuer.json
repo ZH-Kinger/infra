@@ -51,7 +51,8 @@
       ],
       "Resource": [
         "acs:ram:*:1704065796538912:policy/temp-ak-auto-*",
-        "acs:ram:*:1704065796538912:policy/staff-oss-auto-*"
+        "acs:ram:*:1704065796538912:policy/staff-oss-auto-*",
+        "acs:ram:*:1704065796538912:policy/wuji-dev-dir-*"
       ],
       "Effect": "Allow",
       "Condition": {

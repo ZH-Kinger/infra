@@ -30,7 +30,7 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Callable, Mapping, Optional, Sequence
 
-from . import grants, platforms
+from . import devdir, grants, platforms
 from .clouds import aliyun, volcano
 from .errors import DeliveryError
 
@@ -225,6 +225,20 @@ class AliyunExecutor:
         key = prefix if prefix.endswith("/") else prefix + "/"
         oss.put_folder(bucket, key, region=region, creds=self._creds, transport=self._transport)
         return f"{bucket}/{key}"
+
+    def list_dirs(self, bucket: str, prefix: str, region: str) -> list:
+        """列出 `prefix` 下面的一级「目录」（公共前缀），返回不带尾斜杠的名字。
+
+        OSS 没有真目录，列的是公共前缀。用来回答「这个人的开发目录在哪个组下」——
+        那件事**没有任何地方登记过**：组的结构只存在于对象键里，是人写数据时长出来的
+        （2026-09-24 查实：51 个目录散在 10 个组下，只有 9 个在模板默认的 general）。
+        """
+        from .clouds import oss
+
+        got = oss.list_prefixes(
+            bucket, prefix, region=region, creds=self._creds, transport=self._transport
+        )
+        return [str(p).rstrip("/").rsplit("/", 1)[-1] for p in got]
 
     def add_to_group(self, user: str, group: str) -> None:
         self._check_account()
@@ -705,6 +719,95 @@ class AliyunExecutor:
                 "RotateStrategy": "DeleteOldestNonDefaultVersionWhenLimitExceeded",
             },
         )
+
+    # ── 开发目录策略：让人用自己的 AK/SK 写得进自己那个 OSS 目录 ──────────
+    #
+    # 建策略**只能用凭证发放身份（panel-issuer）**，挂策略**只能用开通身份
+    # （panel-executor）** —— 云上是这么切的，而且是有意的：
+    #   issuer  能造策略正文，但够不着真人的子账号（只能碰 tempak-*/staff-*）
+    #   executor 能挂到真人身上，但造不了策略正文
+    # 两个身份单独哪个都发不出一条「内容任意 + 挂在真人身上」的策略。
+    # **别为了少写几行把两件事并到一个身份上**，那等于把这道闸拆了。
+
+    def ensure_dev_policy(self, username: str, targets) -> tuple:
+        """建/更新这个人的开发目录策略，返回 `(策略名, 现在一共覆盖了哪些目录)`。
+        **要用 issuer 身份调。**
+
+        **收登录名和目录，不收策略名、也不收策略正文。** 同 `rewrite_policy` 的理由：
+        云上对 issuer 放行的建策略前缀不止一个，传错名字就能改掉机器人管着的外部凭证
+        策略，云不会拦。名字和正文都在这里现算，调用方没有传错的机会。
+
+        **已存在时先把云上那篇读回来合并，不是直接覆盖。** `CreatePolicyVersion` 是
+        整篇替换，而每张单只批了它自己那几个地域 —— 直接覆盖的话，第二张单（比如
+        「加入工作空间·新加坡」）会把第一张给的杭州写权限抹掉，云上不报错、卡片显示
+        成功、人从此写不进杭州，且补不回来。
+
+        为什么不改成"一次把所有地域都授了"：那等于发出这张单没批的范围，绕过
+        「加入工作空间」那道审批门。合并才能既不抹掉旧的、又不超发。
+
+        **读回来一条都认不出就拒绝覆盖**（fail-closed）：那说明云上那篇不是我们写的
+        或者格式变了，这时候覆盖它等于把不认识的东西删掉。
+        """
+        self._check_account()
+        name = devdir.policy_name(username)
+        want = [(str(b or ""), str(g or "").strip("/")) for b, g in (targets or ())]
+        try:
+            self._call(
+                aliyun.RAM,
+                "CreatePolicy",
+                {
+                    "PolicyName": name,
+                    "PolicyDocument": devdir.document(want, username),
+                    "Description": f"面板开发目录读写 {username}",
+                },
+            )
+            return name, want
+        except aliyun.AliyunError as exc:
+            if exc.code != "EntityAlreadyExists.Policy":
+                raise
+        have = self._read_dev_policy(name, username)
+        merged = devdir.merge_targets(have, want)
+        if merged == have:
+            # 没有新增的目录就不写。**不是为了省一次调用** —— 一条策略最多 5 个版本，
+            # 每次开通都盲写一版的话，几张单之后就开始轮换删旧版本，
+            # 而旧版本是改坏了唯一的退路
+            return name, merged
+        self._call(
+            aliyun.RAM,
+            "CreatePolicyVersion",
+            {
+                "PolicyName": name,
+                "PolicyDocument": devdir.document(merged, username),
+                "SetAsDefault": "true",
+                "RotateStrategy": "DeleteOldestNonDefaultVersionWhenLimitExceeded",
+            },
+        )
+        return name, merged
+
+    def _read_dev_policy(self, name: str, username: str) -> list:
+        """云上这条策略当前生效的版本覆盖了哪些目录。认不出就抛，绝不当成"空的"。"""
+        got = self._call(aliyun.RAM, "GetPolicy", {"PolicyName": name, "PolicyType": "Custom"})
+        version = str((got.get("Policy") or {}).get("DefaultVersion") or "")
+        if not version:
+            raise ProvisionError(f"GetPolicy 没告诉我们 {name} 的默认版本，不敢覆盖它")
+        body = self._call(
+            aliyun.RAM,
+            "GetPolicyVersion",
+            {"PolicyName": name, "PolicyType": "Custom", "VersionId": version},
+        )
+        raw = (body.get("PolicyVersion") or {}).get("PolicyDocument") or ""
+        try:
+            doc = json.loads(raw)
+        except ValueError:
+            raise ProvisionError(f"{name} 云上的策略正文不是 JSON，不敢覆盖它") from None
+        have = devdir.targets_in(doc, username)
+        if not have:
+            # 空策略在我们这儿是不可能的（建的时候至少一个目录）。一条都认不出
+            # 说明这篇不是我们写的、或者 ARN 格式变了 —— 覆盖它等于删掉不认识的东西
+            raise ProvisionError(
+                f"{name} 云上的策略正文里认不出任何 {username} 的目录，不敢覆盖它"
+            )
+        return have
 
     def revoke_long_term(self, user: str) -> list:
         """到期清理：删 AK → 摘策略 → 删策略 → 删用户。返回没删掉的东西（供告警）。

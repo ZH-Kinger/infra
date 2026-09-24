@@ -58,6 +58,7 @@ L_REVOKE_FAILED_WHY = "{}：回收失败（{}），下次重试"
 L_REVOKE_FAILED = "{}：回收失败，下次重试"
 L_IAM_NOT_WRITTEN = "{}：登录名还是没写进公司 IAM（{}）"
 L_IAM_ERROR = "{}：补写登录名出错（{}）"
+L_DEV_POLICY_ERROR = "{}：补开发目录权限出错（{}）"
 
 TROUBLE_LINES = {
     L_STUCK: "req-1：开通中断，已标为失败",
@@ -69,6 +70,17 @@ TROUBLE_LINES = {
     L_REVOKE_FAILED: "tak-1：回收失败，下次重试",
     L_IAM_NOT_WRITTEN: "req-1：登录名还是没写进公司 IAM（他现在登不进去：没接上公司 IAM 的写入）",
     L_IAM_ERROR: "req-1：补写登录名出错（IAM 接口 500）",
+    # `retry_dev_policies` 自己抛出来的那一行（单子级异常，比如台账并发改写）。
+    # 这一步补的是「他能不能往自己的开发目录写字节」，补不上时人只会以为 AK 坏了
+    L_DEV_POLICY_ERROR: "req-1：补开发目录权限出错（单子正被别人改）",
+}
+
+#: `retry_dev_policies` 的另一类产出：它把 `_provision_dev_policy` 的**收尾话**
+#: 原样往外抛（`{单号}：{note}`，落在 `NOTE_PASSTHROUGH` 那一格），所以算不算问题
+#: 取决于 note 本身的措辞 —— 和 `REVOKE_NOTES` 同一个套路，逐条在这里判。
+DEV_POLICY_NOTES = {
+    "req-1：已给开发目录读写权限（wuji-algo-dev-hz/general/lisi/）": False,
+    "req-1：**开发目录授权失败**（RAM 接口 500），他用自己的 AK/SK 写不进去": True,
 }
 
 #: 真实进度行。判成问题的代价：定时任务每跑顺一轮就退 3 ——
@@ -161,6 +173,24 @@ class RealLineTests(unittest.TestCase):
         for line in REVOKE_NOTES:
             with self.subTest(line):
                 self.assertFalse(flows.is_trouble(line), line)
+
+    def test_the_dev_policy_retry_notes_are_classified(self):
+        """`retry_dev_policies` 一分钟一轮，把 `_provision_dev_policy` 的收尾话
+        原样打出来。成功那句当然不是问题行；**失败那句必须是** ——
+
+        它是一个「一直办不成」的稳态：RAM 侧 403 / 前缀没放行 / 那个人的策略正文坏了，
+        每一轮都会重来一次，每一轮都打这一句。判不成问题行的话，这一步就退回到
+        「根本没有重试入口」那个状态：单子安静地卡着，退出码干干净净是 0，
+        而那个人写不进自己的开发目录、以为是 AK 坏了（正是这个功能要消灭的误判）。
+
+        原先那句写的是「**开发目录还是只读**（…）」——`TROUBLE_WORDS` 五个词一个都不沾，
+        `is_trouble` 判 False，于是这类持续失败每轮都退 0。2026-09-24 改成「授权失败」
+        （用现成的词，不去扩分类器）。**这句话的措辞和那张词表是一对**：
+        哪天有人把「失败」润色掉，这条会红。
+        """
+        for line, trouble in sorted(DEV_POLICY_NOTES.items()):
+            with self.subTest(line):
+                self.assertEqual(flows.is_trouble(line), trouble, line)
 
     def test_the_two_wordings_of_the_same_failure_are_both_caught(self):
         """同一件事的两种行文都要认出来。
@@ -342,6 +372,7 @@ class TableCoverageTests(unittest.TestCase):
         "resume_approved",
         "revoke_expired",
         "retry_iam_writes",
+        "retry_dev_policies",
         "remind_expiring",
     }
 

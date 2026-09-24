@@ -285,6 +285,7 @@ def add_parsers(commands) -> None:
     )
     bf.add_argument("--templates", default="identity/request-templates.json")
     bf.add_argument("--tickets", default="identity/tickets.json")
+    bf.add_argument("--people", default="identity/people.json")
     bf.add_argument("--region", required=True, metavar="KEY", help="地域登记表里的 key，例如 hz")
     bf.add_argument(
         "--who",
@@ -1044,6 +1045,10 @@ def _sweep(args) -> int:
         (flows.revoke_expired, True),
         # 号建好了、登录名没写进公司 IAM = 那个人登不进控制台。**自动补，别等人点按钮**
         (flows.retry_iam_writes, False),
+        # 号开好了、开发目录权限没给成 = 他用自己的 AK/SK 写不进自己的目录，
+        # 而单子是绿的 DONE、**再也重试不了**（execute 只认 APPROVED/FAILED）。
+        # 不自动补的话，`dev_policy_needed` 那条事件就只是一行没人做的文案
+        (flows.retry_dev_policies, False),
         (flows.remind_expiring, False),
     )
     for step, urgent in steps:
@@ -2155,13 +2160,59 @@ def _backfill(args) -> int:
 
     # **补齐不写申请单。** 那张单子早就结了，往一张 done 的单子上追加事件
     # 会让「这张单当时做了什么」变成假的 —— 补齐是管理员的动作，不是那张单的一部分
+    from . import devdir as devdir_mod
+    from .provision import describe_error
+
     ex = executor_from_env(tpl.platform, tpl.account)
+    # **建策略用发放身份、挂策略用开通身份**，和建号流程里同一个切分：
+    # 发放身份够不着真人子账号，开通身份造不了策略正文，单独哪个都发不出
+    # 「内容任意 + 挂在真人身上」的策略。这里图省事合成一个就等于把闸拆了
+    issuer = executor_from_env(tpl.platform, tpl.account, issuer=True)
+    here = _dev_dirs(ex, ws)
     bad = 0
     for name in names:
-        done, problems = provision_workspace(ex, ws, name)
+        # **按他真实的组，不是模板里那个默认值。** 模板默认是 `general`，而实测
+        # 51 个人只有 9 个在 general 下 —— 照默认来，另外 42 个人会被额外建一个
+        # 空的 `general/<登录名>/`，策略也指向那个没人用的路径：挂上了、还是写不进去
+        mine = dict(ws)
+        if name in here:
+            mine["bucket_prefix"] = here[name]
+        done, problems = provision_workspace(ex, mine, name)
         for line in done:
             print(f"  ✓ {name}：{line}")
         for line in problems:
             print(f"  ✗ {name}：{line}")
         bad |= 1 if problems else 0
+        # 开发目录的读写权限。**目录建了、权限没给 = 他还是写不进去**，
+        # 而那正是这批存量的人现在的处境（组里只有 AliyunOSSReadOnlyAccess）
+        try:
+            targets = devdir_mod.targets_of([mine], name)
+            if targets:
+                policy, _covered = issuer.ensure_dev_policy(name, targets)
+                ex.attach_policy(name, devdir_mod.POLICY_TYPE, policy)
+                where = "、".join(devdir_mod.dev_dir(b, g, name) for b, g in targets)
+                print(f"  ✓ {name}：已给开发目录读写权限（{where}）")
+        except Exception as exc:  # noqa: BLE001 — 一个人失败不挡其余
+            print(f"  ✗ {name}：开发目录权限没给成（{describe_error(exc) or type(exc).__name__}）")
+            bad |= 1
     return bad
+
+
+def _dev_dirs(ex, ws: dict) -> dict:
+    """扫桶得出「登录名 → 他的开发目录在哪个组下」。
+
+    **组的结构没有任何地方登记过** —— 只存在于 OSS 对象键里，是人写数据时长出来的。
+    所以只能现扫，不能读配置（配置里那个 `bucket_prefix` 是个单值默认，对多数人是错的）。
+
+    扫不动就抛：那时候退回默认值会给几十个人建错目录、发错策略，而症状是
+    「控制台里看着有权限、就是写不进去」—— 最难查的那种。桶里一个目录都没有是正常的
+    （新地域），返回空表即可。
+    """
+    bucket = str(ws.get("bucket") or "")
+    if not bucket:
+        return {}
+    out: dict = {}
+    for dept in ex.list_dirs(bucket, "", ws["bucket_region"]):
+        for who in ex.list_dirs(bucket, f"{dept}/", ws["bucket_region"]):
+            out[who] = dept
+    return out
