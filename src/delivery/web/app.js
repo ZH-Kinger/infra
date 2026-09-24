@@ -208,7 +208,7 @@ function route() {
         { class: "card empty" },
         h("h2", {}, "没有权限"),
         h("p", {}, "管理后台只对管理员开放。"),
-        h("a", { class: "btn small", href: "#me" }, "回到我的云账号"),
+        h("a", { class: "btn small", href: "#me" }, "回到我的账号"),
       ),
     );
   }
@@ -548,6 +548,75 @@ function revokeBox(acct) {
     out);
 }
 
+/** 到期那行。**`expires_at_ts` 没有上界** —— 后端只保证有限、正数、未过期，
+ * 一个 `1e15` 能过全部校验，而 `new Date(1e15*1000)` 超出 Date 的量程 →
+ * `.toISOString()` 抛 RangeError → 整页变「加载失败」。
+ */
+function expiryLine(ts) {
+  if (!ts) return "长期有效。离职时随账号一起收回，不会自己过期。";
+  const at = new Date(ts * 1000);
+  return Number.isFinite(at.getTime()) ? `用到 ${fmtTime(at.toISOString())}` : "到期时间异常，请联系管理员";
+}
+
+/** 自建服务的卡片。**形状和 `accountCard` 对齐**：同一个 `card acct` 外壳、
+ * 同一套 `acct-head` + `section`，所以它和云账号卡并排时看起来是同一类东西 ——
+ * 它们在流程上本来也是（同一套申请、同一套离职回收）。
+ *
+ * 内容不同是因为它真的没有那些东西：没有云账号、没有策略、没有组。
+ * 硬套那几个 section 只会渲染出一排「不在任何组」「直接授予 0」的空壳。
+ */
+function serviceCard(s, admin) {
+  const url = safeHttps(s.url);
+  const head = h(
+    "div",
+    { class: "acct-head" },
+    h(
+      "div",
+      { class: "acct-title" },
+      h("div", { class: "chips" }, h("span", { class: "pill" }, "自建服务")),
+      h("span", { class: "acct-name" }, SERVICE_NAMES[s.service] || s.service),
+      h("span", { class: "acct-sub" }, "用飞书账号登录，不需要云账号"),
+    ),
+    // **先消毒再判断**，不能拿原始值做守卫：`safeHttps` 对非 https 返回空串，
+    // 而空串照样会 setAttribute("href","") → 渲染出一个可点的按钮，点下去跳回当前页
+    // 且把 fragment 抹掉，人被弹回首页。`consoleLink` 那处就是这么写的
+    url ? h("a", { class: "linkbtn push", href: url, target: "_blank", rel: "noopener noreferrer" }, "进入 →") : null,
+  );
+  const sections = [
+    h(
+      "div",
+      { class: "section" },
+      h("div", { class: "section-label" }, "有效期"),
+      // `expires_at_ts` 是 **epoch 秒**，不能直接喂 fmtTime(iso)（`new Date(串)`）
+      // —— 数字会被当毫秒，2030 年的到期会渲染成 1970 年
+      h("p", { class: "muted" }, expiryLine(s.expires_at_ts)),
+    ),
+  ];
+  if (admin) {
+    // **这句话贴在每张服务卡上，不挂在分组顶部**：`.accounts` 是 auto-fill 网格，
+    // 服务卡完全可能落在某张云账号卡右边而不是「下面」，那句话就没了指代。
+    // 它是「页面上列着、而『确认离职』不碰它」这个陷阱在下一批修好之前唯一的防线
+    sections.push(
+      h(
+        "div",
+        { class: "section" },
+        h("p", { class: "muted" }, "「确认离职」不会自动收回这一项，要单独处理。"),
+      ),
+    );
+  }
+  if (s.ticket) {
+    sections.push(
+      h(
+        "div",
+        { class: "section" },
+        h("div", { class: "section-label" }, "来自哪张申请"),
+        h("a", { class: "linkbtn", href: `#request=${encodeURIComponent(s.ticket)}` }, `${s.ticket} →`),
+      ),
+    );
+  }
+  return h("article", { class: "card acct" }, head, ...sections);
+}
+
 function accountCard(acct, requests, admin) {
   const gone = acct.in_snapshot === false;
   const highRisk = acct.high_risk || [];
@@ -635,7 +704,7 @@ function personPage(detail, { admin }) {
   if (admin) {
     titleRow.append(h("a", { class: "btn ghost small", href: "#admin" }, "← 返回人员总览"));
   }
-  titleRow.append(h("h1", {}, admin ? person.name || "未命名" : "我的云账号"));
+  titleRow.append(h("h1", {}, admin ? person.name || "未命名" : "我的账号"));
   if (admin && detail.binding !== "union_id") {
     titleRow.append(h("span", { class: "pill warn" }, "未绑定 union_id"));
   }
@@ -656,40 +725,9 @@ function personPage(detail, { admin }) {
     nodes.push(h("div", { class: "banner good" }, "已按企业邮箱关联到你的账号并记录 union_id。之后登录只按 union_id 识别。"));
   }
 
-  // 自建服务：申请走同一套流程、离职走同一套回收，所以和云账号列在一起。
-  //
-  // **必须排在下面那两个「没有云账号就提前 return」之前。** 放在它们后面的话，
-  // 没有云账号的人这一块一个字都看不到 —— 而那批人正是自建服务的目标人群
-  //（这个功能的立项理由就是「最需要 MLflow 的人恰恰没有云子账号」）。
-  //
-  // 不塞进云账号那张卡片是因为那张卡的形状是「云账号 + 策略 + 资源」，
-  // 服务访问这三样都没有，硬塞会渲染出一排空壳
+  // 自建服务和云账号**列在同一组**：它们走同一套申请、同一套离职回收，
+  // 对着这一页做判断的人（尤其管理员点「确认离职」时）该一眼看全这个人手上有什么
   const services = detail.services || [];
-  if (services.length) {
-    nodes.push(
-      h(
-        "section",
-        { class: "group" },
-        h("div", { class: "group-head" }, h("div", { class: "group-label" }, "内部服务")),
-        // **把陷阱说破**：这一块是展示，而管理员那条「确认离职」只删云账号、不碰它。
-        // 页面上明明列着、动作却不管，比压根不显示更误导 —— 完整修法（reclaim 里
-        // 一并记一条待确认）在下一批，在那之前这句话是唯一的防线
-        admin ? h("p", { class: "muted" }, "「确认离职」不会自动收回这里的权限，要单独处理。") : null,
-        h("div", { class: "accounts" }, services.map((s) =>
-          h("div", { class: "card account-card" },
-            h("div", { class: "account-head" },
-              h("span", { class: "pill" }, "自建服务"),
-              h("b", {}, SERVICE_NAMES[s.service] || s.service),
-            ),
-            // `expires_at_ts` 是 **epoch 秒**，不能直接喂 fmtTime(iso)（`new Date(串)`）
-            // —— 数字会被当毫秒，2030 年的到期渲染成 1970 年
-            h("div", { class: "muted" },
-              s.expires_at_ts ? `用到 ${fmtTime(new Date(s.expires_at_ts * 1000).toISOString())}` : "长期有效，离职时收回"),
-            s.ticket ? h("a", { class: "linkbtn", href: `#request=${encodeURIComponent(s.ticket)}` }, "看这张申请 →") : null,
-          ))),
-      ),
-    );
-  }
 
   if (admin && detail.binding === "unbound") {
     // 管理员视角：未绑定只是状态，账号照常列出
@@ -716,7 +754,10 @@ function personPage(detail, { admin }) {
   }
 
   const pending = detail.pending || [];
-  if (!accounts.length && !pending.length) {
+  // **有自建服务就不能在这里整页返回**：那批人正是它的目标人群
+  //（立项理由就是「最需要 MLflow 的人恰恰没有云子账号」），
+  // 返回了他们这一页上一个字都看不到
+  if (!accounts.length && !pending.length && !services.length) {
     nodes.push(
       h(
         "div",
@@ -729,26 +770,49 @@ function personPage(detail, { admin }) {
     return nodes;
   }
 
-  nodes.push(
-    h(
-      "section",
-      { class: "stats" },
-      stat(summary.account_count, "云账号"),
-      stat(summary.platforms, "平台"),
-      stat(summary.policy_count, "权限条数"),
-      stat(summary.high_risk_count, "高危权限", summary.high_risk_count ? "crit" : ""),
-    ),
-  );
+  // 统计数的全是云那边的概念（账号数/平台/策略/高危）。一个云账号都没有的人
+  // 看到的是四个「—」，除了占地方什么都没说
+  if (accounts.length || pending.length) {
+    nodes.push(
+      h(
+        "section",
+        { class: "stats" },
+        stat(summary.account_count, "云账号"),
+        stat(summary.platforms, "平台"),
+        stat(summary.policy_count, "权限条数"),
+        stat(summary.high_risk_count, "高危权限", summary.high_risk_count ? "crit" : ""),
+      ),
+    );
+  }
 
   if (!admin && detail.requests) nodes.push(reminders(detail.requests));
 
-  if (accounts.length) {
+  // **云账号和自建服务同一组**：它们走同一套申请、同一套离职回收，
+  // 而对着这一页做判断的人（尤其管理员点「确认离职」）该一眼看全这个人手上有什么。
+  // 云账号排在前面：多数人名下以它们为主，而服务通常只有一两条
+  if (accounts.length || services.length) {
     nodes.push(
       h(
         "section",
         { class: "group" },
-        h("div", { class: "group-head" }, h("div", { class: "group-label" }, "云账号"), admin ? null : h("a", { class: "linkbtn push", href: "#permissions" }, "申请更多权限 →")),
-        h("div", { class: "accounts" }, accounts.map((a) => accountCard(a, admin ? null : detail.requests, admin))),
+        // **标题按视角分叉**：这一页管理员和本人共用，管理员看张三时 H1 是「张三」，
+        // 底下再标「我的账号」就是在说别人的号是自己的
+        h("div", { class: "group-head" }, h("div", { class: "group-label" }, admin ? "账号与服务" : "我的账号"), admin ? null : h("a", { class: "linkbtn push", href: "#permissions" }, "申请更多权限 →")),
+        // 只有自建服务、没有云账号的人：原先那张「先申请开一个子账号」的引导卡
+        // 现在不出现了（他不再走早返回），而他恰恰最需要那句引导
+        // **CTA 只给本人**：管理员看的是别人的页面，`#apply` 打开的是**他自己**的
+        // 申请表 —— 点下去会开出一张本人名下、谁也没想要的单。
+        // 上面那个早返回卡（`admin ? null : …申请开子账号`）本来就是这么防的，
+        // 搬过来的时候这个守卫掉了
+        !accounts.length && !pending.length
+          ? (admin
+              ? h("p", { class: "muted" }, "这个人还没有云账号。")
+              : h("p", { class: "muted" }, "还没有云账号。", h("a", { class: "linkbtn", href: "#apply" }, "申请开子账号 →")))
+          : null,
+        h("div", { class: "accounts" }, [
+          ...accounts.map((a) => accountCard(a, admin ? null : detail.requests, admin)),
+          ...services.map((x) => serviceCard(x, admin)),
+        ]),
       ),
     );
   }
