@@ -6,7 +6,7 @@
 # 启动：
 #   oauth2-proxy --alpha-config=oauth2-proxy.yaml \
 #     --cookie-secret-file=<32 字节随机串文件> \
-#     --cookie-secure=true --cookie-samesite=lax --cookie-expire=8h \
+#     --cookie-secure=true --cookie-httponly=true --cookie-samesite=lax --cookie-expire=8h \
 #     --reverse-proxy=true \
 #     --email-domain='*' --redirect-url=https://<面板域名>/oauth2/callback \
 #     --whitelist-domain=<IAM 域名> \
@@ -19,9 +19,12 @@
 #     --skip-auth-route='^/api/service-access$'
 # 环境变量：
 #   PANEL_PROXY_SECRET   和面板 DELIVERY_PROXY_SECRET 同一个值
+#   DELIVERY_PROXY_VERIFY_IDENTITY=1   面板会用 IAM userinfo 核对 access token
+#                                     的 feishu_union_id，防止代理误配固定身份
 #
 # 各参数为什么这样配：
 #   cookie-secure=true   只在 HTTPS 下发会话 cookie。本地 http 调试才改 false，线上不要改
+#   cookie-httponly=true 浏览器脚本不能读取登录 cookie，避免 XSS 直接拿到会话
 #   cookie-expire=8h     会话最长 8 小时。IAM 里停用某人后，他已有的会话最多再用 8 小时
 #   reverse-proxy=true   前面有 nginx / SLB 时才加，否则客户端能伪造 X-Forwarded-*
 #   email-domain='*'     emailClaim 指向 feishu_union_id，不是邮箱，所以不按域名过滤。

@@ -28,6 +28,10 @@ test("keeps write operations behind server-side workflow dispatch", async () => 
   ]);
 
   assert.match(route, /OPS_ADMIN_EMAILS/);
+  assert.match(route, /function isOperationsAdmin/);
+  assert.match(route, /需要登录管理站点/);
+  assert.match(route, /当前账号没有操作台权限/);
+  assert.match(route, /export async function GET\(\)[\s\S]*getChatGPTUser\(\)/);
   assert.match(route, /GITHUB_TOKEN/);
   assert.match(route, /dataset-release\.yml/);
   assert.match(route, /dataset-lifecycle\.yml/);

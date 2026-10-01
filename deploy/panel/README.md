@@ -83,9 +83,14 @@ PANEL_PROXY_SECRET="$(cat proxy_secret)" oauth2-proxy --alpha-config=oauth2-prox
 | `DELIVERY_AUTH` | `proxy`；不设或 `feishu` 为原来的飞书登录 |
 | `DELIVERY_PROXY_SECRET` / `_FILE` | 共享密钥，至少 32 个 ASCII 字符，二选一 |
 | `DELIVERY_IAM_USERINFO_URL` | 可选。名册里还没有某人 union_id 时，查 IAM 邮箱做首次关联 |
+| `DELIVERY_PROXY_VERIFY_IDENTITY` | 建议设为 `1`。用 IAM userinfo 核对 access token 的 `feishu_union_id` 与代理注入的身份头，代理误配固定身份时直接拒绝 |
 | `DELIVERY_IAM_EMAIL_DOMAINS` | 配了 userinfo 就必填，逗号分隔。只接受这些域名、且 `email_verified` 为 true 的邮箱 |
 | `DELIVERY_LOGOUT_URL` | 可选，默认 `/oauth2/sign_out`（只清代理会话，不退出 IAM） |
 | `DELIVERY_BASE_URL` | 面板对外地址，如 `https://<面板域名>`。三处都要它：写操作的 Origin 校验（nginx 改写了 `Host` 时不设就一律 403）、通知卡的跳转按钮、**访问凭证的查看地址**（拼不出来就一律不受理凭证申请）。定时任务的 EnvironmentFile 里也要写 |
+
+开启 `DELIVERY_PROXY_VERIFY_IDENTITY=1` 时必须同时配置 `DELIVERY_IAM_USERINFO_URL`，并让
+oauth2-proxy 继续注入 `X-Panel-Access-Token`。面板会短暂缓存 userinfo 的 union_id，
+不会把 access token 写入日志；缺 token、userinfo 不匹配或查询失败都按未登录处理。
 
 ## nginx 那一层
 

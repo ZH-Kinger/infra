@@ -2,12 +2,11 @@
 Description=Remind admins about unreclaimed cloud logins
 
 [Timer]
-# 每天上午一次。**频率靠 --every-hours 去重，不靠定时器压**：
-# 定时器跑得勤一点没关系（新离职的人当天就能被发现），
-# 同一批人 24 小时内只发一条 —— 天天重复的提醒等于没有提醒
-OnCalendar=*-*-* 10:00:00
-OnCalendar=*-*-* 16:00:00
-RandomizedDelaySec=10min
+# 每 10 分钟对账一次。**频率靠 --every-hours 去重，不靠通知压**：
+# 每轮都会实时读取 IAM 和飞书状态；同一批人 24 小时内只发一条，
+# 新离职的人最多约 10 分钟进入待办，避免每天两次才发现。
+OnBootSec=10min
+OnUnitActiveSec=10min
 Persistent=true
 
 [Install]

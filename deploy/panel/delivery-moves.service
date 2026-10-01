@@ -16,12 +16,15 @@ OnFailure=delivery-unit-failed@%n.service
 Type=oneshot
 User=delivery
 WorkingDirectory=/opt/infra
-# 两朵云的开通身份 + 迁移服务配置（DELIVERY_TRANSFER_OSS_ROLE 等）
+# 两朵云的开通身份 + 迁移服务配置（DELIVERY_TRANSFER_OSS_ROLE 等）。九章链路
+# 另外读取 JIUZHANG_*；私钥文件应由 delivery 用户持有且权限为 0600/0400。
 EnvironmentFile=/etc/delivery/panel.env
 # 迁移用的两家云 SDK 装在 /opt/infra/vendor —— 不进系统 Python（这台机 PEP668 受管），
 # 删掉那个目录就等于回滚，不影响面板其余部分
 Environment=PYTHONPATH=/opt/infra/src:/opt/infra/vendor
-ExecStart=/usr/bin/python3 -m delivery.cli requests moves --tickets identity/tickets.json
+# 定时器重入、人工补跑和上一轮超时不能同时扫台账；链路串行判断必须在同一
+# 个快照上完成。锁只保护编排进程，不是数据目录锁，任务本身仍由 move_stage 记录。
+ExecStart=/usr/bin/flock -n /opt/infra/identity/moves.lock /usr/bin/python3 -m delivery.cli requests moves --tickets identity/tickets.json
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

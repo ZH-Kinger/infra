@@ -2,7 +2,7 @@ import { desc } from "drizzle-orm";
 import { env } from "cloudflare:workers";
 import { ensureDb } from "../../../db";
 import { operations } from "../../../db/schema";
-import { getChatGPTUser } from "../../chatgpt-auth";
+import { getChatGPTUser, type ChatGPTUser } from "../../chatgpt-auth";
 
 type ActionKind = "adopt" | "release" | "runtime" | "lifecycle" | "audit";
 
@@ -24,6 +24,23 @@ type OperationRequest = {
 function runtimeEnv(name: string): string {
   const bindings = env as unknown as Record<string, unknown>;
   return typeof bindings[name] === "string" ? String(bindings[name]).trim() : "";
+}
+
+function operationsAdmins(): Set<string> {
+  return new Set(
+    runtimeEnv("OPS_ADMIN_EMAILS")
+      .split(",")
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+function isOperationsAdmin(user: ChatGPTUser | null): boolean {
+  return Boolean(user && operationsAdmins().has(user.email.trim().toLowerCase()));
+}
+
+function deny(status: 401 | 403, error: string): Response {
+  return Response.json({ error }, { status });
 }
 
 function safePart(value: unknown, field: string): string {
@@ -109,6 +126,9 @@ async function saveOperation(values: typeof operations.$inferInsert) {
 }
 
 export async function GET() {
+  const user = await getChatGPTUser();
+  if (!user) return deny(401, "需要登录管理站点");
+  if (!isOperationsAdmin(user)) return deny(403, "当前账号没有操作台权限");
   try {
     const db = await ensureDb();
     const rows = await db.select().from(operations).orderBy(desc(operations.createdAt)).limit(30);
@@ -120,27 +140,31 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const payload = (await request.json()) as OperationRequest;
-    const execute = Boolean(payload.execute);
     const user = await getChatGPTUser();
-    const actor = user?.email ?? "local-preview";
+    if (!user) return deny(401, "需要登录管理站点");
+    if (!isOperationsAdmin(user)) return deny(403, "当前账号没有操作台权限");
+    const origin = request.headers.get("Origin");
+    if (origin && origin !== new URL(request.url).origin) {
+      return deny(403, "请求来源不匹配");
+    }
+    if (request.headers.get("Content-Type")?.split(";", 1)[0].trim() !== "application/json") {
+      return Response.json({ error: "请求必须是 JSON" }, { status: 415 });
+    }
+    const payload = (await request.json()) as OperationRequest;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return Response.json({ error: "操作参数不合法" }, { status: 400 });
+    }
+    if (payload.execute !== undefined && typeof payload.execute !== "boolean") {
+      return Response.json({ error: "execute 必须是布尔值" }, { status: 400 });
+    }
+    const execute = payload.execute === true;
+    const actor = user.email;
     const operation = workflowFor(payload);
     const id = crypto.randomUUID();
     let status = "PLANNED";
     let runUrl = "";
 
     if (execute) {
-      if (!user) {
-        return Response.json({ error: "真实执行需要登录受保护的管理站点" }, { status: 401 });
-      }
-      const admins = runtimeEnv("OPS_ADMIN_EMAILS")
-        .split(",")
-        .map((item) => item.trim().toLowerCase())
-        .filter(Boolean);
-      if (!admins.includes(user.email.toLowerCase())) {
-        return Response.json({ error: "当前账号没有执行权限，只能生成计划" }, { status: 403 });
-      }
-
       const token = runtimeEnv("GITHUB_TOKEN");
       const repository = runtimeEnv("GITHUB_REPOSITORY") || "ZH-Kinger/infra";
       const ref = runtimeEnv("GITHUB_REF") || "main";

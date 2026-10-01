@@ -79,6 +79,21 @@ concurrency:
 env:
   ALIBABA_CLOUD_OIDC_AUDIENCE: github-actions
   MANIFEST_ARTIFACT: manifest-${{ github.run_id }}
+  # Workflow inputs enter shell steps through environment variables. Keeping the
+  # expressions here prevents a quote in a dispatch value from becoming shell.
+  INPUT_MODE: ${{ inputs.mode }}
+  INPUT_TRANSFER_MODE: ${{ inputs.transfer_mode }}
+  INPUT_DATASET: ${{ inputs.dataset }}
+  INPUT_REPOSITORY: ${{ inputs.repository }}
+  INPUT_REF: ${{ inputs.ref }}
+  INPUT_PREPARED_DIR: ${{ inputs.prepared_dir }}
+  INPUT_ARCHIVE_PREFIX: ${{ inputs.archive_prefix }}
+  INPUT_SOURCE_BUCKET: ${{ inputs.source_bucket }}
+  INPUT_SOURCE_PREFIX: ${{ inputs.source_prefix }}
+  INPUT_MANIFEST_PATH: ${{ inputs.manifest_path }}
+  INPUT_NO_DIGEST: ${{ inputs.no_digest }}
+  INPUT_PAIMON_SNAPSHOT_ID: ${{ inputs.paimon_snapshot_id }}
+  INPUT_LAKEFS_BRANCH: ${{ inputs.lakefs_branch }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -97,7 +112,7 @@ jobs:
       - name: 校验 ref 不是可变引用
         run: |
           set -euo pipefail
-          ref='${{ inputs.ref }}'
+          ref="${INPUT_REF}"
           case "$ref" in
             latest|main|master|dev|develop|HEAD)
               echo "::error::ref='$ref' 是可变引用。数据集版本必须对应不可变的 Commit 或 Tag。"
@@ -108,26 +123,26 @@ jobs:
       - name: 校验各模式必填参数
         run: |
           set -euo pipefail
-          mode='${{ inputs.mode }}'
+          mode="${INPUT_MODE}"
           case "$mode" in
             cpfs-ingest|cpfs-adopt)
-              [ -n '${{ inputs.prepared_dir }}' ]   || { echo "::error::${mode} 需要 prepared_dir"; exit 1; }
-              [ -n '${{ inputs.archive_prefix }}' ] || { echo "::error::${mode} 需要 archive_prefix"; exit 1; }
+              [ -n "${INPUT_PREPARED_DIR}" ]   || { echo "::error::${mode} 需要 prepared_dir"; exit 1; }
+              [ -n "${INPUT_ARCHIVE_PREFIX}" ] || { echo "::error::${mode} 需要 archive_prefix"; exit 1; }
               ;;
             oss-ingest)
-              [ -n '${{ inputs.source_bucket }}' ] || { echo "::error::oss-ingest 需要 source_bucket"; exit 1; }
-              [ -n '${{ inputs.source_prefix }}' ] || { echo "::error::oss-ingest 需要 source_prefix"; exit 1; }
+              [ -n "${INPUT_SOURCE_BUCKET}" ] || { echo "::error::oss-ingest 需要 source_bucket"; exit 1; }
+              [ -n "${INPUT_SOURCE_PREFIX}" ] || { echo "::error::oss-ingest 需要 source_prefix"; exit 1; }
               # oss-ingest 不接受 prepared_dir / archive_prefix：数据本来就在对象存储上，
               # 没有 staging 目录，也不需要归档。填了说明用错了模式，早说比让它静默无效好。
-              [ -z '${{ inputs.prepared_dir }}' ] || { echo "::error::oss-ingest 不用 prepared_dir——数据已在对象存储上，没有 staging 目录"; exit 1; }
-              [ -z '${{ inputs.archive_prefix }}' ] || { echo "::error::oss-ingest 不用 archive_prefix——存量数据不需要再归档一遍，零拷贝 import 直接引用原位置"; exit 1; }
+              [ -z "${INPUT_PREPARED_DIR}" ] || { echo "::error::oss-ingest 不用 prepared_dir——数据已在对象存储上，没有 staging 目录"; exit 1; }
+              [ -z "${INPUT_ARCHIVE_PREFIX}" ] || { echo "::error::oss-ingest 不用 archive_prefix——存量数据不需要再归档一遍，零拷贝 import 直接引用原位置"; exit 1; }
               ;;
             certify)
-              [ -n '${{ inputs.prepared_dir }}' ]  || { echo "::error::certify 需要 prepared_dir"; exit 1; }
-              [ -n '${{ inputs.manifest_path }}' ] || { echo "::error::certify 需要 manifest_path"; exit 1; }
+              [ -n "${INPUT_PREPARED_DIR}" ]  || { echo "::error::certify 需要 prepared_dir"; exit 1; }
+              [ -n "${INPUT_MANIFEST_PATH}" ] || { echo "::error::certify 需要 manifest_path"; exit 1; }
               ;;
             materialize)
-              [ -n '${{ inputs.manifest_path }}' ] || { echo "::error::materialize 需要 manifest_path"; exit 1; }
+              [ -n "${INPUT_MANIFEST_PATH}" ] || { echo "::error::materialize 需要 manifest_path"; exit 1; }
               ;;
           esac
 
@@ -190,7 +205,7 @@ jobs:
             eval "value=\${$v:-}"
             [ -n "$value" ] || missing="$missing $v"
           done
-          if [ '${{ inputs.transfer_mode }}' = 'dataflow' ] && [ -z "$CPFS_MOUNT_PREFIX" ]; then
+          if [ "${INPUT_TRANSFER_MODE}" = 'dataflow' ] && [ -z "$CPFS_MOUNT_PREFIX" ]; then
             missing="$missing CPFS_MOUNT_PREFIX"
           fi
           # 两种 CPFS 接入都要先归档，再 import 进 lakeFS。cpfs-adopt 还要从
@@ -268,7 +283,7 @@ jobs:
         id: scan
         run: |
           set -euo pipefail
-          dataset-sink scan '${{ inputs.prepared_dir }}' \
+          dataset-sink scan "${INPUT_PREPARED_DIR}" \
             --output "$RUNNER_TEMP/manifest.jsonl" | tee "$RUNNER_TEMP/scan.json"
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
@@ -294,11 +309,11 @@ jobs:
           INPUT_ARCHIVE_PREFIX: ${{ inputs.archive_prefix }}
         run: |
           set -euo pipefail
-          args=(archive '${{ inputs.prepared_dir }}' \
+          args=(archive "${INPUT_PREPARED_DIR}" \
             --manifest "$RUNNER_TEMP/manifest.jsonl" \
-            --prefix '${{ inputs.archive_prefix }}')
+            --prefix "${INPUT_ARCHIVE_PREFIX}")
 
-          if [ '${{ inputs.transfer_mode }}' = 'dataflow' ]; then
+          if [ "${INPUT_TRANSFER_MODE}" = 'dataflow' ]; then
             args+=(--via dataflow
               --cpfs-filesystem-id '${{ vars.CPFS_FILESYSTEM_ID }}'
               --cpfs-mount-prefix '${{ vars.CPFS_MOUNT_PREFIX }}'
@@ -382,17 +397,17 @@ jobs:
           # 数组从一开始就非空，也就不会踩 set -u 下空数组展开的坑。
           args=(
             --source oss
-            --bucket '${{ inputs.source_bucket }}'
+            --bucket "${INPUT_SOURCE_BUCKET}"
             --endpoint-url '${{ vars.OSS_ENDPOINT_URL || vars.ARCHIVE_ENDPOINT_URL }}'
-            --prefix '${{ inputs.source_prefix }}'
+            --prefix "${INPUT_SOURCE_PREFIX}"
             # --destination 必须与随后 commit --destination 完全一致，否则
             # manifest 里的 source_key 与 Commit 内的实际路径对不上，
             # materialize 会全量 NoSuchKey——而那时 Commit 和 Tag 都已经建好了。
-            --destination 'datasets/${{ inputs.dataset }}'
+            --destination "datasets/${INPUT_DATASET}"
             --registry deploy/data-sources.json
             --output "$RUNNER_TEMP/manifest.jsonl"
           )
-          if [ '${{ inputs.no_digest }}' = 'true' ]; then
+          if [ "${INPUT_NO_DIGEST}" = 'true' ]; then
             echo "::warning::--no-digest 已开启。这次发布的 release 将**永久**没有 SHA-256，verify --deep 永远无法校验它。"
             args+=(--no-digest)
           fi
@@ -460,20 +475,20 @@ jobs:
         run: |
           set -euo pipefail
           args=(
-            --repository '${{ inputs.repository }}'
-            --branch '${{ inputs.lakefs_branch }}'
-            --destination 'datasets/${{ inputs.dataset }}'
+            --repository "${INPUT_REPOSITORY}"
+            --branch "${INPUT_LAKEFS_BRANCH}"
+            --destination "datasets/${INPUT_DATASET}"
             --manifest "$RUNNER_TEMP/manifest.jsonl"
-            --tag '${{ inputs.ref }}'
+            --tag "${INPUT_REF}"
           )
 
-          if [ '${{ inputs.mode }}' = 'oss-ingest' ]; then
+          if [ "${INPUT_MODE}" = 'oss-ingest' ]; then
             # **必须是 s3:// 而不是 oss://**。scheme 要匹配 lakeFS 的 blockstore
             # adapter 类型，不是云厂商名字：OSS 是通过 lakeFS 的 s3 adapter 访问的。
             # 2026-08-03 真实 lakeFS 1.84.1 + OSS 后端实测，oss:// 会在服务端报
             # `invalid storage scheme oss: invalid address`。commit 现在会在本地先拦。
-            args+=(--object-store-uri 's3://${{ inputs.source_bucket }}')
-            args+=(--prefix '${{ inputs.source_prefix }}')
+            args+=(--object-store-uri "s3://${INPUT_SOURCE_BUCKET}")
+            args+=(--prefix "${INPUT_SOURCE_PREFIX}")
             # 只有 oss-ingest 走 --registry。preflight 已经查过一次，这里再查
             # 是因为两者之间隔着一次 scan，注册表有可能在中间被改。
             args+=(--registry deploy/data-sources.json)
@@ -489,7 +504,7 @@ jobs:
             # 不需要注册表来判断。
           fi
 
-          snapshot='${{ inputs.paimon_snapshot_id }}'
+          snapshot="${INPUT_PAIMON_SNAPSHOT_ID}"
           [ -n "$snapshot" ] && args+=(--paimon-snapshot-id "$snapshot")
 
           dataset-sink commit "${args[@]}" | tee "$RUNNER_TEMP/commit.json"
@@ -556,12 +571,12 @@ jobs:
         run: |
           set -euo pipefail
           target_root='${{ vars.CPFS_TARGET_ROOT }}'
-          snapshot='${{ inputs.paimon_snapshot_id }}'
+          snapshot="${INPUT_PAIMON_SNAPSHOT_ID}"
 
           # 每个分支各自组一整份参数数组。这样数组永不为空——空数组在
           # set -u 下展开会报错（bash 4.4 之前），而自托管 runner 的 bash
           # 版本是我们控制不了的。
-          if [ '${{ inputs.mode }}' = 'oss-ingest' ] || [ '${{ inputs.mode }}' = 'cpfs-adopt' ]; then
+          if [ "${INPUT_MODE}" = 'oss-ingest' ] || [ "${INPUT_MODE}" = 'cpfs-adopt' ]; then
             # 从 lakeFS 的 S3 Gateway 按 Commit 内路径取数落到 CPFS。
             #
             # 用 --commit 而不是 --ref：Commit 是上一步 import 刚产生的，
@@ -571,45 +586,45 @@ jobs:
             # Commit 内路径。cpfs-adopt 的 scan source_key 是源目录内相对路径，
             # 所以下面只为它补 datasets/<dataset>。
             args=(materialize
-              --dataset '${{ inputs.dataset }}'
-              --repository '${{ inputs.repository }}'
+              --dataset "${INPUT_DATASET}"
+              --repository "${INPUT_REPOSITORY}"
               --commit "$RESOLVED_COMMIT"
-              --lakefs-tag '${{ inputs.ref }}'
+              --lakefs-tag "${INPUT_REF}"
               --manifest "$RUNNER_TEMP/manifest.jsonl"
               --source lakefs-s3
               --target-root "$target_root"
               --workers 32
             )
-            if [ '${{ inputs.mode }}' = 'cpfs-adopt' ]; then
+            if [ "${INPUT_MODE}" = 'cpfs-adopt' ]; then
               # scan(CPFS) 的 source_key 是源目录内相对路径，而 Commit import
               # 把它们放在 datasets/<dataset>/ 下；物化时必须补上这个差值。
-              args+=(--commit-prefix 'datasets/${{ inputs.dataset }}')
+              args+=(--commit-prefix "datasets/${INPUT_DATASET}")
             fi
-          elif [ '${{ inputs.mode }}' = 'materialize' ]; then
+          elif [ "${INPUT_MODE}" = 'materialize' ]; then
             args=(materialize
-              --dataset '${{ inputs.dataset }}'
-              --repository '${{ inputs.repository }}'
-              --ref '${{ inputs.ref }}'
-              --lakefs-tag '${{ inputs.ref }}'
-              --manifest '${{ inputs.manifest_path }}'
+              --dataset "${INPUT_DATASET}"
+              --repository "${INPUT_REPOSITORY}"
+              --ref "${INPUT_REF}"
+              --lakefs-tag "${INPUT_REF}"
+              --manifest "${INPUT_MANIFEST_PATH}"
               --source lakefs-s3
               --target-root "$target_root"
               --workers 32
             )
           else
-            if [ '${{ inputs.mode }}' = 'cpfs-ingest' ]; then
+            if [ "${INPUT_MODE}" = 'cpfs-ingest' ]; then
               manifest="$RUNNER_TEMP/manifest.jsonl"
             else
-              manifest='${{ inputs.manifest_path }}'
+              manifest="${INPUT_MANIFEST_PATH}"
             fi
             args=(certify
-              --prepared-dir '${{ inputs.prepared_dir }}'
+              --prepared-dir "${INPUT_PREPARED_DIR}"
               --target-root "$target_root"
-              --dataset '${{ inputs.dataset }}'
-              --repository '${{ inputs.repository }}'
-              --source-reference '${{ inputs.ref }}'
+              --dataset "${INPUT_DATASET}"
+              --repository "${INPUT_REPOSITORY}"
+              --source-reference "${INPUT_REF}"
               --commit "$RESOLVED_COMMIT"
-              --lakefs-tag '${{ inputs.ref }}'
+              --lakefs-tag "${INPUT_REF}"
               --manifest "$manifest"
             )
           fi
@@ -617,7 +632,7 @@ jobs:
           # materialize 的生产路径通过 CPFS DataFlow Import 预热；Import 完成后
           # CLI 仍执行 Manifest/SHA-256 校验和原子 rename。找不到匹配的 DataFlow
           # 会 fail-closed，不会偷偷回退到客户端逐文件复制。
-          if [ "${args[0]}" = 'materialize' ] && [ '${{ inputs.transfer_mode }}' = 'dataflow' ]; then
+          if [ "${args[0]}" = 'materialize' ] && [ "${INPUT_TRANSFER_MODE}" = 'dataflow' ]; then
             args+=(--via dataflow
               --cpfs-filesystem-id '${{ vars.CPFS_FILESYSTEM_ID }}'
               --cpfs-mount-prefix '${{ vars.CPFS_MOUNT_PREFIX }}'

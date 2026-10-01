@@ -68,6 +68,14 @@ permissions:
 env:
   ALIBABA_CLOUD_OIDC_AUDIENCE: github-actions
   PLAN_JSON: plan-normalized.json
+  # Pass dispatch values to shell steps through env, so quotes and shell
+  # metacharacters stay data instead of changing the generated command.
+  INPUT_PLATFORM: ${{ inputs.platform }}
+  INPUT_SCOPE: ${{ inputs.scope }}
+  INPUT_LAYER: ${{ inputs.layer }}
+  INPUT_STACK_DIR: ${{ inputs.stack_dir }}
+  INPUT_ENV: ${{ inputs.env }}
+  INPUT_ACCOUNT: ${{ inputs.account }}
 
 jobs:
   # ── ① 读能力：不碰任何凭证 ────────────────────────────────────────────────
@@ -94,15 +102,15 @@ jobs:
           set -eu
           # apply / require_approval 取的是 **scope 级**能力：同一朵云上，
           # 用户改 DSW 和管理员改 VPC 走的是两套门禁。
-          PYTHONPATH=src python3 -m delivery.cli describe "${{ inputs.platform }}" \
-            --scope "${{ inputs.scope }}" >> "$GITHUB_OUTPUT"
+          PYTHONPATH=src python3 -m delivery.cli describe "${INPUT_PLATFORM}" \
+            --scope "${INPUT_SCOPE}" >> "$GITHUB_OUTPUT"
       - name: 解析 Terraform 根模块目录
         id: stack
         run: |
           set -euo pipefail
-          dir="${{ inputs.stack_dir }}"
+          dir="${INPUT_STACK_DIR}"
           if [ -z "$dir" ]; then
-            dir="infra/${{ inputs.scope }}/${{ inputs.platform }}/${{ inputs.env }}/${{ inputs.layer }}"
+            dir="infra/${INPUT_SCOPE}/${INPUT_PLATFORM}/${INPUT_ENV}/${INPUT_LAYER}"
           fi
           # 目录不存在就**在这里**失败，而不是等到 terraform init 报一句
           # "No configuration files"——那时候已经换过临时身份、过了审批门，
@@ -197,14 +205,14 @@ jobs:
         run: |
           set -eu
           PYTHONPATH=src python3 -m delivery.cli plan-show "$RUNNER_TEMP/tfplan.json" \
-            --platform "${{ inputs.platform }}" \
-            --env "${{ inputs.env }}" \
-            --account "${{ inputs.account }}" | tee "$RUNNER_TEMP/summary.txt"
+            --platform "${INPUT_PLATFORM}" \
+            --env "${INPUT_ENV}" \
+            --account "${INPUT_ACCOUNT}" | tee "$RUNNER_TEMP/summary.txt"
           rc=${PIPESTATUS[0]}
           PYTHONPATH=src python3 -m delivery.cli plan-show "$RUNNER_TEMP/tfplan.json" \
-            --platform "${{ inputs.platform }}" \
-            --env "${{ inputs.env }}" \
-            --account "${{ inputs.account }}" --json > "$RUNNER_TEMP/${{ env.PLAN_JSON }}" || true
+            --platform "${INPUT_PLATFORM}" \
+            --env "${INPUT_ENV}" \
+            --account "${INPUT_ACCOUNT}" --json > "$RUNNER_TEMP/${{ env.PLAN_JSON }}" || true
           { echo '## 变更预览'; echo '```'; cat "$RUNNER_TEMP/summary.txt"; echo '```'; } \
             >> "$GITHUB_STEP_SUMMARY"
           if [ "$rc" -ne 0 ]; then

@@ -6,15 +6,20 @@ OnFailure=delivery-unit-failed@%n.service
 
 [Service]
 Type=oneshot
-User=delivery
-Group=delivery
+User=root
+Group=root
 WorkingDirectory=/opt/infra
 # 只读 identity/、只写 /var/backups/delivery/。不碰云、不要任何凭证
 ExecStart=/opt/infra/deploy/panel/backup-identity.sh
-# 备份目录必须是 delivery 自己的：面板进程写得进去，别人读不到（下面 0700）
+# 备份由独立的 root 作业持有，面板 delivery 用户不能删除历史副本。
 StateDirectory=
 PrivateTmp=yes
 NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/backups/delivery

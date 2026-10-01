@@ -62,6 +62,7 @@ ENV_AUTH = "DELIVERY_AUTH"
 ENV_SECRET = "DELIVERY_PROXY_SECRET"  # noqa: S105  环境变量名，不是口令
 ENV_SECRET_FILE = "DELIVERY_PROXY_SECRET_FILE"  # noqa: S105
 ENV_USERINFO = "DELIVERY_IAM_USERINFO_URL"
+ENV_VERIFY_IDENTITY = "DELIVERY_PROXY_VERIFY_IDENTITY"
 ENV_LOGOUT = "DELIVERY_LOGOUT_URL"
 ENV_EMAIL_DOMAINS = "DELIVERY_IAM_EMAIL_DOMAINS"
 
@@ -79,6 +80,7 @@ _UNION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _EMAIL_TTL = 300
 _MISS_TTL = 60
 _CACHE_MAX = 1000
+_IDENTITY_TTL = 300
 _TIMEOUT = 5
 _MAX_BODY = 64 * 1024
 
@@ -106,6 +108,7 @@ def _safe_path(value: str) -> bool:
 class ProxyAuthConfig:
     secret: str
     userinfo_url: str = ""
+    verify_identity: bool = False
     logout_url: str = DEFAULT_LOGOUT_URL
     email_domains: tuple = ()
 
@@ -128,6 +131,11 @@ class ProxyAuthConfig:
             # access token 要发过去，明文 HTTP 只允许本机（测试用的模拟 IAM）
             if scheme != "https" and not (scheme == "http" and _is_loopback_url(self.userinfo_url)):
                 raise ProxyAuthError(f"{ENV_USERINFO} 必须是 https 地址")
+        if self.verify_identity and not self.userinfo_url:
+            raise ProxyAuthError(
+                f"设置 {ENV_VERIFY_IDENTITY}=1 就必须同时设置 {ENV_USERINFO}，"
+                "否则无法核对登录者身份"
+            )
         if not _safe_path(self.logout_url):
             raise ProxyAuthError(
                 f"{ENV_LOGOUT} 必须是站内路径，例如 /oauth2/sign_out?rd=<URL 编码的 IAM 退出地址>"
@@ -150,6 +158,8 @@ class ProxyAuthConfig:
         return cls(
             secret=secret,
             userinfo_url=env.get(ENV_USERINFO, ""),
+            verify_identity=env.get(ENV_VERIFY_IDENTITY, "").strip().lower()
+            in {"1", "true", "yes", "on"},
             logout_url=env.get(ENV_LOGOUT, "") or DEFAULT_LOGOUT_URL,
             email_domains=tuple(
                 d.strip().lower().lstrip("@")
@@ -209,6 +219,7 @@ class ProxyIdentity:
         self._clock = clock
         self._lock = threading.Lock()
         self._emails: dict = {}
+        self._identities: dict = {}
 
     @property
     def login_url(self) -> str:
@@ -225,12 +236,46 @@ class ProxyIdentity:
         union_id = (headers.get(H_UNION_ID) or "").strip()
         if not _UNION_ID.match(union_id):
             return None
+        if self.config.verify_identity:
+            token = (headers.get(H_TOKEN) or "").strip()
+            if not token or not self._identity_matches(token, union_id):
+                return None
         name = _header_text((headers.get(H_NAME) or "").strip())
         user_id = (headers.get(H_FEISHU_USER_ID) or "").strip()
         if not _UNION_ID.match(user_id):
             user_id = ""  # 只用于以本人身份发起飞书审批，格式不对就当没有
         # 不带邮箱：管理员只认 union_id；名册关联需要邮箱时由调用方显式调 email()
         return FeishuUser(open_id="", union_id=union_id, name=name, user_id=user_id)
+
+    def _identity_matches(self, token: str, union_id: str) -> bool:
+        """核对代理注入的身份是否真属于这次 IAM 登录。
+
+        共享密钥只能证明请求来自代理，不能证明代理没有被配成固定身份。
+        开启强校验后，每个 access token 的 union_id 都要再和请求头比一次；
+        结果短暂缓存，避免面板每个 API 请求都打 IAM。
+        """
+        key = hashlib.sha256(token.encode()).hexdigest()
+        now = self._clock()
+        with self._lock:
+            hit = self._identities.get(key)
+            if hit is not None and hit[0] > now:
+                return hit[1] == union_id
+        try:
+            data = self._fetch(self.config.userinfo_url, token)
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            print(f"[proxy-auth] identity 查询失败：{type(exc).__name__}", file=sys.stderr)
+            matched = ""
+        else:
+            got = data.get("feishu_union_id") if isinstance(data, Mapping) else ""
+            matched = got if isinstance(got, str) and _UNION_ID.match(got) else ""
+        with self._lock:
+            if len(self._identities) >= _CACHE_MAX:
+                for stale in [k for k, v in self._identities.items() if v[0] <= now]:
+                    self._identities.pop(stale, None)
+                if len(self._identities) >= _CACHE_MAX:
+                    self._identities.clear()
+            self._identities[key] = (now + (_IDENTITY_TTL if matched else _MISS_TTL), matched)
+        return matched == union_id
 
     def email(self, headers: Mapping, union_id: str) -> str:
         """名册首次关联用的企业邮箱。只在名册里查不到这个 union_id 时调用。"""

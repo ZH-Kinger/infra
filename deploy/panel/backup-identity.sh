@@ -18,7 +18,11 @@ KEEP=${DELIVERY_BACKUP_KEEP:-48}
 [ -d "$SRC" ] || { echo "没有 $SRC，不备份" >&2; exit 1; }
 
 # 0700：备份里有申请人姓名、邮箱、手机号，和原文件同样只给属主看
+[ ! -L "$DST" ] || { echo "备份目录不能是符号链接" >&2; exit 1; }
 mkdir -p "$DST"
+if [ "$(id -u)" -eq 0 ]; then
+    chown root:root "$DST"
+fi
 chmod 700 "$DST"
 
 stamp=$(date +%Y%m%d-%H%M%S)
@@ -33,6 +37,9 @@ tar -czf "$tmp" -C "$(dirname "$SRC")" \
     --exclude='*.lock' --exclude='.*.tmp' \
     "$(basename "$SRC")"
 mv "$tmp" "$out"
+# umask 077 already gives this file 0600; keep the invariant explicit so a
+# service-wide umask change cannot turn an identity snapshot into a shared file.
+chmod 600 "$out"
 
 # 只删自己这个命名格式的，且**按文件名排序**（时间戳是定长的，字典序即时间序）——
 # 用 ls -t 的话，恢复演练时 touch 过的旧备份会被当成最新的留下来
