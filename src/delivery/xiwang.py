@@ -101,7 +101,7 @@ def _oss_ini(credentials: dict, *, endpoint: str) -> str:
     ) + "\n"
 
 
-def commands(plan: dict, config: Config, job_id: str) -> dict:
+def commands(plan: dict, config: Config, job_id: str, include_prefixes=None) -> dict:
     """生成两端 worker 命令；命令中不包含 AK/SK。"""
     src, dst = plan["src"], plan["dest"]
     bucket = _safe(src.get("bucket"), "源桶")
@@ -114,12 +114,25 @@ def commands(plan: dict, config: Config, job_id: str) -> dict:
     cfg = f"--config-file {shlex.quote(config_path)}"
     source_uri = f"oss://{bucket}/{source}/"
     relay_uri = f"oss://{relay_bucket}/{relay}/"
+    items = [str(x or "").strip().strip("/") for x in (include_prefixes or [])]
+    if items:
+        if any(not re.fullmatch(r"[A-Za-z0-9._-]+", x) for x in items) or len(set(items)) != len(items):
+            raise XiwangError("曦望同步子目录白名单不合法")
+        copies = " && ".join(
+            f"ossutil cp -r {shlex.quote(source_uri + x + '/') } {shlex.quote(relay_uri + x + '/') } {cfg} "
+            f"--endpoint {shlex.quote(config.source_endpoint)} --region {shlex.quote(config.source_region)} "
+            f"--job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\""
+            for x in items
+        )
+    else:
+        copies = (
+            f"ossutil cp -r {shlex.quote(source_uri)} {shlex.quote(relay_uri)} {cfg} "
+            f"--endpoint {shlex.quote(config.source_endpoint)} --region {shlex.quote(config.source_region)} "
+            f"--job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\""
+        )
     sg = (
         f"mkdir -p \"$WD\" && trap 'rm -rf -- \"$WD/ckpt\"' EXIT && "
-        f"ossutil cp -r {shlex.quote(source_uri)} {shlex.quote(relay_uri)} "
-        f"{cfg} "
-        f"--endpoint {shlex.quote(config.source_endpoint)} --region {shlex.quote(config.source_region)} "
-        f"--job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\" && "
+        f"{copies} && "
         f"printf done > \"$WD/done\" && "
         f"ossutil cp /dev/null {shlex.quote('oss://' + relay_bucket + '/' + marker)} "
         f"{cfg} "
@@ -203,10 +216,10 @@ def _write_config(client, path: str, text: str) -> None:
         sftp.close()
 
 
-def submit(plan: dict, job_id: str, *, config: Optional[Config] = None, credentials: Optional[dict] = None) -> str:
+def submit(plan: dict, job_id: str, *, config: Optional[Config] = None, credentials: Optional[dict] = None, include_prefixes=None) -> str:
     config = config or Config.from_env()
     validate_config(config)
-    got = commands(plan, config, job_id)
+    got = commands(plan, config, job_id, include_prefixes=include_prefixes)
     work = _job_dir(config, job_id)
     ini = _oss_ini(credentials or {}, endpoint=config.relay_endpoint)
     path = got["config_path"]

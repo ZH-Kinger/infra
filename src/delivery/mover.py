@@ -461,7 +461,13 @@ def _submit(
         from . import xiwang
 
         credentials = _xiwang_credentials(plan, ticket, config=config, issuer=issuer, minted=minted)
-        return xiwang.submit(plan, name, config=xiwang.Config.from_env(), credentials=credentials)
+        return xiwang.submit(
+            plan,
+            name,
+            config=xiwang.Config.from_env(),
+            credentials=credentials,
+            include_prefixes=(ticket.get("payload") or {}).get("include_prefixes") or [],
+        )
 
     if plan["engine"] in ("nas", "vepfs"):
         # 预热 / 沉降。**不跨云，也就没有钥匙要交出去** —— 两头都在同一朵云里

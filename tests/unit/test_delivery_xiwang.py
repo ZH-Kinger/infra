@@ -25,6 +25,16 @@ class XiwangCommandTests(unittest.TestCase):
         with self.assertRaises(XiwangError):
             commands(bad, self.config, "move-123")
 
+    def test_include_list_copies_only_named_batches(self):
+        got = commands(self.plan, self.config, "move-123", include_prefixes=["we-20k-batch-001", "we-20k-batch-026"])
+        self.assertIn("we-20k-batch-001", got["sg"])
+        self.assertIn("we-20k-batch-026", got["sg"])
+        self.assertNotIn("ossutil cp -r oss://wuji-bucket-hangzhou/third-party-data/worldengine/ oss://", got["sg"])
+
+    def test_include_list_rejects_nested_or_shell_values(self):
+        with self.assertRaises(XiwangError):
+            commands(self.plan, self.config, "move-123", include_prefixes=["../escape"])
+
 
 if __name__ == "__main__":
     unittest.main()
