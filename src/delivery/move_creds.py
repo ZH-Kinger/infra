@@ -144,7 +144,14 @@ def _exists(exc: Exception) -> bool:
     blob = str(exc)
     return any(
         k in blob
-        for k in ("EntityAlreadyExists", "AlreadyExist", "already exist", "UserAlreadyExist")
+        for k in (
+            "EntityAlreadyExists",
+            "AlreadyExist",
+            "already exist",
+            "UserAlreadyExist",
+            "已存在，不会接管已有账号",
+            "已存在，不会接管",
+        )
     )
 
 
