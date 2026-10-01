@@ -122,23 +122,21 @@ def commands(plan: dict, config: Config, job_id: str, include_prefixes=None) -> 
     if items:
         if any(not re.fullmatch(r"[A-Za-z0-9._-]+", x) for x in items) or len(set(items)) != len(items):
             raise XiwangError("曦望同步子目录白名单不合法")
-        sg_steps = " && ".join(
-            f"mkdir -p {shlex.quote(relay_mount + '/' + x)} && ossutil cp -r {shlex.quote(source_uri + x + '/') } {shlex.quote(relay_mount + '/' + x + '/') } {cfg} "
+        sg_steps = " ".join(
+            f"( mkdir -p {shlex.quote(relay_mount + '/' + x)} && ossutil cp -r {shlex.quote(source_uri + x + '/') } {shlex.quote(relay_mount + '/' + x + '/') } {cfg} "
             f"--endpoint {shlex.quote(config.source_endpoint)} --region {shlex.quote(config.source_region)} "
-            f"--job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\" && "
+            f"--job 30 --parallel 16 --checkpoint-dir \"$WD/ckpt-{x}\" && "
             f"mkdir -p {shlex.quote(config.sg_mount_root + '/' + meta_prefix)} && "
-            f"touch {shlex.quote(config.sg_mount_root + '/' + meta_prefix + '/' + x + '.done')}"
+            f"touch {shlex.quote(config.sg_mount_root + '/' + meta_prefix + '/' + x + '.done')} ) &"
             for x in items
-        )
-        xw_steps = " && ".join(
-            f"i=0; while [ $i -lt 120960 ]; do ossutil stat {shlex.quote('oss://' + relay_bucket + '/' + meta_prefix + '/' + x + '.done')} {cfg} "
+        ) + " wait"
+        xw_steps = " ".join(
+            f"( i=0; while [ $i -lt 120960 ]; do ossutil stat {shlex.quote('oss://' + relay_bucket + '/' + meta_prefix + '/' + x + '.done')} {cfg} "
             f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} >/dev/null 2>&1 && break; i=$((i + 1)); sleep 10; done; "
             f"test $i -lt 120960 || exit 75; ossutil cp -r {shlex.quote(relay_uri + x + '/')} {shlex.quote(target + '/' + x + '/')} {cfg} "
-            f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} --job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\" -u; "
-            f"b=$(du -sb {shlex.quote(target + '/' + x)} 2>/dev/null | awk '{{print $1}}'); o=$(find {shlex.quote(target + '/' + x)} -type f 2>/dev/null | wc -l); "
-            f"total_b=$((total_b + b)); total_o=$((total_o + o)); printf '%s\\n%s\\n' \"$total_b\" \"$total_o\" > \"$WD/progress\""
+            f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} --job 30 --parallel 16 --checkpoint-dir \"$WD/ckpt-{x}\" -u ) &"
             for x in items
-        )
+        ) + " wait; b=$(du -sb " + shlex.quote(target) + " 2>/dev/null | awk '{print $1}'); o=$(find " + shlex.quote(target) + " -type f 2>/dev/null | wc -l); printf '%s\\n%s\\n' \"$b\" \"$o\" > \"$WD/progress\""
         copies = sg_steps
     else:
         copies = (
