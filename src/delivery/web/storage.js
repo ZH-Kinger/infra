@@ -306,13 +306,13 @@ export function datatypeFields(o, { field, update }) {
 // 这个表只是把「该用哪条」从人的脑子里挪到代码里 ——
 // 今天是靠飞书意图关键词抢着匹配的，谁的话术排在前面谁赢。
 
-const URI = /^(oss|tos|cpfs|vepfs):\/\/([A-Za-z0-9][A-Za-z0-9._-]{1,62})(\/.*)?$/;
+const URI = /^(oss|tos|cpfs|vepfs|jz):\/\/([A-Za-z0-9][A-Za-z0-9._-]{1,62})(\/.*)?$/;
 
 export function parseUri(text) {
   const raw = (text || "").trim();
   if (!raw) return { empty: true };
   const m = URI.exec(raw);
-  if (!m) return { error: "格式是 oss://桶名/目录/ 这样。也支持 tos:// cpfs:// vepfs://" };
+  if (!m) return { error: "格式是 oss://桶名/目录/ 这样。也支持 tos://、cpfs://、vepfs:// 和 jz://九章集群/目录/" };
   const [, scheme, bucket, rest = "/"] = m;
   const prefix = rest.replace(/^\/+/, "");
   if (prefix.includes("//")) return { error: "路径里有连续的斜杠。" };
@@ -329,6 +329,10 @@ function regionOf(u, buckets) {
   return b ? String(b.region || "").replace(/^oss-/, "") : "";
 }
 
+function isDomestic(region) {
+  return /^(cn-|cn$)/.test(String(region || ""));
+}
+
 //: 并行文件系统和对象存储之间的数据流动 —— 预热和沉降。**面板接了这四条。**
 //:
 //: 方向由地址推出来，不让人选：让人选「这是预热还是沉降」的后果不是报错，
@@ -338,6 +342,17 @@ const DATAFLOW = {
   "cpfs->oss": { label: "从 CPFS 沉降", note: "把 CPFS 上的改动刷回 OSS。走阿里数据流动。" },
   "tos->vepfs": { label: "预热到 vePFS", note: "从 TOS 把数据加载进 vePFS。走火山数据流动。" },
   "vepfs->tos": { label: "从 vePFS 沉降", note: "把 vePFS 上的改动刷回 TOS。走火山数据流动。" },
+};
+
+const JIUZHANG = {
+  "oss->jz": {
+    label: "杭州 OSS → 九章 GPFS",
+    note: "九章直接从杭州 OSS 拉取，落到 wuji-data-tran/<平台>/<数据类型>/<批次+版本>/。",
+  },
+  "jz->oss": {
+    label: "九章 GPFS → wuji-data-tran/alayanew",
+    note: "九章结果回传到 alayanew 下对应的数据类型目录，按回传桶规范保留来源路径。",
+  },
 };
 
 //: 这几条**确实没接**，而且不是「还没做」是「做不了」：两个并行文件系统之间
@@ -360,6 +375,23 @@ export function routeOf(src, dst, buckets) {
   const sr = regionOf(src, buckets);
   const dr = regionOf(dst, buckets);
 
+  if (JIUZHANG[pair]) {
+    if (pair === "oss->jz" && !/^wuji-data-tran\/(aliyun|turboai|volcano)\/[^/]+\/[^/]+(?:\/|$)/.test(dst.prefix)) {
+      return { error: "九章目的目录格式是 wuji-data-tran/<平台>/<数据类型>/<批次+版本>/。" };
+    }
+    if (pair === "jz->oss" && (dst.bucket !== "wuji-data-tran"
+      || !/^alayanew\/(third-party-data|internet|teleop)(\/|$)/.test(dst.prefix))) {
+      return { error: "九章回传必须写入 oss://wuji-data-tran/alayanew/ 下的词表目录。" };
+    }
+    return {
+      chain: "jiuzhang",
+      label: JIUZHANG[pair].label,
+      hops: [src.bucket, dst.bucket],
+      note: JIUZHANG[pair].note,
+      warn: pair === "jz->oss" ? "九章回传按 alayanew/数据类型/供应商或设备/批次ID 归档。" : "",
+    };
+  }
+  if (pair === "jz->jz") return { error: "九章内部目录之间没有面板直连链路。" };
   if (pair === "oss->oss") {
     if (sr && dr && sr !== dr) {
       // **这里以前画的是「源（杭州）→ wuji-sing（新加坡）→ 目的」，还写着
@@ -371,9 +403,11 @@ export function routeOf(src, dst, buckets) {
       // 申请人是照这些话决定要不要提单的，画一条不存在的链比不画更糟。
       return {
         chain: "bucket-transfer",
-        label: "跨地域复制",
+        label: isDomestic(sr) && !isDomestic(dr) ? "国内 → 海外（专线加速）" : "跨地域复制",
         hops: [`${src.bucket}（${sr}）`, `${dst.bucket}（${dr}）`],
-        note: "同账号跨地域，目的端直接从源端拉，不走中转。",
+        note: isDomestic(sr) && !isDomestic(dr)
+          ? "国内到海外走已登记的专线加速链路，不走公网直传；专线节点和落点由后台固定。"
+          : "同账号跨地域，目的端直接从源端拉。",
         warn: "**搬过去的这份不会自动清理**，要不要留、留多久由你自己管。"
           + "目的地域已经有同名对象时按你选的同名策略处理。",
       };
@@ -417,7 +451,62 @@ export function transferFields(o, { field, update }) {
   const fields = [];
   const read = {};
   const checks = [];
+  if (o.migration_panel) read.migration_panel = () => o.migration_panel;
+  const panelCopy = {
+    jiuzhang: {
+      source: "oss://wuji-bucket-hangzhou/third-party-data/worldengine/",
+      dest: "jz://jz-b200/wuji-data-tran/aliyun/third-party-data/worldengine-v1/",
+      direction: "杭州 OSS → 九章 NAS（GPFS）",
+      hint: "九章：杭州 OSS 直接拉到九章 /root/nas/wuji-data-tran/<平台>/<数据类型>/<批次+版本>/；回传写入杭州 OSS 的 alayanew/。",
+    },
+    xiwang: {
+      source: "oss://wuji-bucket-hangzhou/third-party-data/worldengine/",
+      dest: "oss://wuji-data-tran-sing/aliyun-hz/third-party-data/worldengine/",
+      direction: "杭州 OSS → 新加坡中转 OSS → 曦望 NAS",
+      hint: "曦望：先写入新加坡中转 OSS，再落到曦望 /mnt/data04/296834/<用户>/data/<目录>/；这里填写已登记的中转桶目录。",
+    },
+    "aliyun-region": {
+      source: "oss://wuji-bucket-hangzhou/third-party-data/worldengine/",
+      dest: "oss://wuji-data-tran-sing/aliyun-hz/third-party-data/worldengine/",
+      direction: "阿里云 OSS 地域 A → 地域 B",
+      hint: "阿里云跨地域：填写两个已登记地域的 OSS 桶和目录；国内到海外自动走专线加速，不走公网直传。",
+    },
+    volcano: {
+      source: "oss://wuji-bucket-hangzhou/third-party-data/worldengine/",
+      dest: "tos://volcano-bucket/third-party-data/worldengine/",
+      direction: "杭州 OSS ↔ 火山 TOS",
+      hint: "火山云：阿里云 OSS 与火山 TOS 之间迁移；目标必须是已登记的火山 TOS 桶和目录。",
+    },
+  }[o.migration_panel] || {
+    source: "oss://wuji-bucket-hangzhou/data/",
+    dest: "oss://target-bucket/data/",
+    direction: "已登记云平台之间",
+    hint: "请选择已登记的云平台路径，目录必须以 / 结尾。",
+  };
   const buckets = o.buckets || [];
+
+  const taskName = h("input", {
+    id: "f-transfer-name",
+    class: "input mono",
+    autocomplete: "off",
+    spellcheck: "false",
+    maxlength: "48",
+    placeholder: "worldengine-20261001-v1",
+  });
+  taskName.addEventListener("input", () => { taskName.classList.remove("invalid"); update(); });
+  fields.push(field(
+    "f-transfer-name",
+    "迁移任务名称（用于进度和审计）",
+    taskName,
+    "必须填写。只用英文、数字、点、下划线或横线，2–48 位；格式建议「数据名-日期-版本」，例如 worldengine-20261001-v1。不要写人名、AK/SK 或完整路径。",
+  ));
+  read.task_name = () => taskName.value.trim();
+  checks.push(() => {
+    const value = taskName.value.trim();
+    return /^[A-Za-z0-9][A-Za-z0-9._-]{1,47}$/.test(value)
+      ? ""
+      : [taskName, "请按「数据名-日期-版本」填写迁移名称，例如 worldengine-20261001-v1。"];
+  });
 
   const mkPath = (id, label, placeholder, hint) => {
     const input = h("input", { id, class: "input mono", autocomplete: "off", spellcheck: "false", placeholder });
@@ -427,9 +516,9 @@ export function transferFields(o, { field, update }) {
     return { input, err, row };
   };
 
-  const src = mkPath("f-src", "从哪里", "oss://wuji-bucket-hangzhou/supplier/20260920-ego-kitchen/",
-    "目录要以 / 结尾。面板接的是对象存储：oss:// 和 tos://（同云、跨云都行）。");
-  const dst = mkPath("f-dst", "到哪里", "oss://wuji-bangkok/supplier/20260920-ego-kitchen/", "目标目录不存在会自动建。");
+  const src = mkPath("f-src", "源地址（从哪里）", panelCopy.source,
+    `${panelCopy.hint} 方向由源地址和目标地址自动判断，源目录必须以 / 结尾。`);
+  const dst = mkPath("f-dst", "目标地址（到哪里）", panelCopy.dest, panelCopy.hint);
   fields.push(src.row, dst.row);
   read.source = () => src.input.value.trim();
   read.dest = () => dst.input.value.trim();
@@ -491,7 +580,7 @@ export function transferFields(o, { field, update }) {
   function describe(p) {
     const r = routeOf(parseUri(p.source), parseUri(p.dest), buckets);
     if (!r.chain) return "填完两个路径就能看到会怎么搬。";
-    return `后台按「${r.label}」把 ${p.source} 搬到 ${p.dest}，同名文件${p.overwrite === "overwrite" ? "覆盖" : "跳过"}。`
+    return `迁移「${p.task_name || "（未命名）"}」：按「${panelCopy.direction}」把 ${p.source} 搬到 ${p.dest}，同名文件${p.overwrite === "overwrite" ? "覆盖" : "跳过"}。`
       + "进度和结果会回到「我的申请」，搬完会做端到端校验 —— 不采信搬运器自己报的成功。";
   }
 

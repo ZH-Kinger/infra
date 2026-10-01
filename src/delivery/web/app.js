@@ -16,7 +16,7 @@ import { accessRoutes } from "./access.js";
 import { permissionRoutes } from "./permissions.js";
 import { requestRoutes } from "./requests.js";
 
-const state = { session: null, loginUrl: "", peopleFilter: "all", peopleQuery: "", peopleCache: null, flash: null };
+const state = { session: null, loginUrl: "", peopleFilter: "all", peopleAccount: "", peopleQuery: "", peopleCache: null, peopleJump: "", flash: null };
 
 const FOLD_LIMIT = 8;
 
@@ -93,13 +93,15 @@ const SKELETON_DELAY_MS = 200;
 //: 同理它的 render() 回来得更晚，会把上一页的内容画到当前页上。
 let loadGen = 0;
 
-async function load(fetcher, render) {
+async function load(fetcher, render, { showSkeleton = true } = {}) {
   const attempt = async () => {
     const mine = ++loadGen;
     const stale = () => mine !== loadGen;
-    const timer = setTimeout(() => {
-      if (!stale()) mount(skeleton());
-    }, SKELETON_DELAY_MS);
+    const timer = showSkeleton
+      ? setTimeout(() => {
+          if (!stale()) mount(skeleton());
+        }, SKELETON_DELAY_MS)
+      : null;
     try {
       const data = await fetcher();
       clearTimeout(timer);
@@ -908,13 +910,26 @@ function pendingCard(item, person) {
   );
 }
 
-function stat(value, label, tone) {
+function stat(value, label, tone, onclick) {
+  const tag = onclick ? "button" : "div";
   return h(
-    "div",
-    { class: tone ? `stat ${tone}` : "stat" },
+    tag,
+    { class: `${tone ? `stat ${tone}` : "stat"}${onclick ? " clickable" : ""}`, type: onclick ? "button" : null, onclick },
     h("span", { class: "n" }, value === undefined || value === null ? "—" : String(value)),
     h("span", { class: "l" }, label),
   );
+}
+
+function jumpToPeople(filter) {
+  state.peopleFilter = filter;
+  state.peopleAccount = "";
+  state.peopleJump = "admin-people";
+  renderAdmin();
+}
+
+function jumpToUnlinked() {
+  state.peopleJump = "admin-unlinked";
+  renderAdmin();
 }
 
 // ── 人员总览 ──────────────────────────────────────────────────────────────
@@ -956,6 +971,16 @@ async function renderAdmin() {
   if (stale()) return;
   state.peopleCache = people;
   mount(adminPage(overview, people, records));
+  const jump = state.peopleJump;
+  state.peopleJump = "";
+  if (jump) {
+    setTimeout(() => {
+      const target = document.getElementById(jump);
+      if (!target) return;
+      if ("open" in target) target.open = true;
+      target.scrollIntoView({ block: "start" });
+    }, 0);
+  }
 }
 
 function adminPage(overview, people, records) {
@@ -971,13 +996,13 @@ function adminPage(overview, people, records) {
     h(
       "section",
       { class: "stats" },
-      stat(totals.people, "人"),
+      stat(totals.people, "人", "", () => jumpToPeople("all")),
       stat(totals.cloud_users, "云上用户"),
-      stat(totals.multi_account_people, "多账号的人", totals.multi_account_people ? "warn" : ""),
-      stat(totals.high_risk_people, "有高危权限的人", totals.high_risk_people ? "crit" : ""),
-      stat(totals.unbound_people, "未绑定 union_id", totals.unbound_people ? "warn" : ""),
-      stat(totals.unlinked_accounts, "未关联到人的账号", totals.unlinked_accounts ? "warn" : ""),
-      stat(totals.no_account_people, "无云账号的人"),
+      stat(totals.multi_account_people, "多账号的人", totals.multi_account_people ? "warn" : "", () => jumpToPeople("multi")),
+      stat(totals.high_risk_people, "有高危权限的人", totals.high_risk_people ? "crit" : "", () => jumpToPeople("high_risk")),
+      stat(totals.unbound_people, "未绑定 union_id", totals.unbound_people ? "warn" : "", () => jumpToPeople("unbound")),
+      stat(totals.unlinked_accounts, "未关联到人的账号", totals.unlinked_accounts ? "warn" : "", jumpToUnlinked),
+      stat(totals.no_account_people, "无云账号的人", "", () => jumpToPeople("no_account")),
     ),
   );
 
@@ -1065,16 +1090,40 @@ function peopleSection(people) {
   const tbody = h("tbody");
   const count = h("span", { class: "muted" });
 
+  // 账号平台 / 账号名来自当前名册，不写死「九章、阿里云」这类列表。
+  // 新增一个人工平台或第二个主账号后，管理员刷新页面就能筛到它。
+  const accountFilters = new Map();
+  for (const person of people.people || []) {
+    for (const account of [...(person.accounts || []), ...(person.pending || [])]) {
+      const key = `${account.platform || ""}/${account.account || ""}`;
+      if (!key || key === "/") continue;
+      accountFilters.set(key, `${account.platform_display || account.platform} · ${account.account_label || account.account}`);
+    }
+  }
+  const accountOptions = [...accountFilters.entries()].sort((a, b) => a[1].localeCompare(b[1], "zh-CN"));
+
   const matches = (p, q) => {
     if (!q) return true;
-    const hay = [p.name, p.email, ...(p.accounts || []).map((a) => a.name)].join(" ").toLowerCase();
+    const hay = [
+      p.name,
+      p.email,
+      ...(p.accounts || []).flatMap((a) => [a.name, a.platform_display, a.account_label, a.account]),
+      ...(p.pending || []).flatMap((a) => [a.name, a.platform_display, a.account_label, a.account]),
+    ].join(" ").toLowerCase();
     return hay.includes(q);
+  };
+
+  const hasAccount = (p) => {
+    if (!state.peopleAccount) return true;
+    return [...(p.accounts || []), ...(p.pending || [])].some(
+      (a) => `${a.platform || ""}/${a.account || ""}` === state.peopleAccount,
+    );
   };
 
   const fill = () => {
     clear(tbody);
     const q = state.peopleQuery.trim().toLowerCase();
-    const rows = (people.people || []).filter((p) => matches(p, q));
+    const rows = (people.people || []).filter((p) => hasAccount(p) && matches(p, q));
     count.textContent = `${rows.length} 人`;
     if (!rows.length) {
       tbody.append(h("tr", {}, h("td", { colspan: "5", class: "muted" }, "没有符合条件的人")));
@@ -1086,7 +1135,7 @@ function peopleSection(people) {
   const search = h("input", {
     class: "search",
     type: "search",
-    placeholder: "搜索姓名、邮箱、用户名",
+    placeholder: "搜索姓名、邮箱、用户名、平台或账号",
     "aria-label": "搜索人员",
     value: state.peopleQuery,
     oninput: (e) => {
@@ -1094,6 +1143,21 @@ function peopleSection(people) {
       fill();
     },
   });
+
+  const accountSelect = h(
+    "select",
+    {
+      class: "filter",
+      "aria-label": "按云账号筛选人员",
+      onchange: (e) => {
+        state.peopleAccount = e.target.value;
+        fill();
+      },
+    },
+    h("option", { value: "" }, "全部账号"),
+    accountOptions.map(([key, label]) => h("option", { value: key }, label)),
+  );
+  accountSelect.value = state.peopleAccount;
 
   const chips = FILTERS.map(([key, label]) =>
     h(
@@ -1115,9 +1179,9 @@ function peopleSection(people) {
   fill();
   return h(
     "section",
-    { class: "group" },
+    { class: "group", id: "admin-people" },
     h("div", { class: "group-label" }, "人员"),
-    h("div", { class: "toolbar" }, ...chips, count, search),
+    h("div", { class: "toolbar" }, ...chips, accountSelect, count, search),
     h(
       "div",
       { class: "card scroll" },
@@ -1240,7 +1304,7 @@ function unlinkedSection(items, assignable) {
     : null;
   return h(
     "details",
-    { class: "card fold" },
+    { class: "card fold", id: "admin-unlinked" },
     h("summary", {}, "未关联到人的云账号", h("span", { class: "muted" }, String(items.length))),
     h(
       "div",

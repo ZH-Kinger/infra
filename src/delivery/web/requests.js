@@ -22,6 +22,14 @@ const KIND_INFO = {
   service: { title: "内部服务", desc: "公司自建的服务，比如实验看板。批准后用飞书账号直接登录，不需要云账号。" },
 };
 const KIND_KEY_LABEL = { permission: "权限包", policy: "权限策略", credential: "访问凭证", storage: "数据目录", transfer: "数据迁移", resource: "资源", account: "开账号", datatype: "数据类型", service: "内部服务" };
+// 迁移入口按物理链路拆开显示；提交时仍回到同一个已审批模板，
+// 但申请人会先选清楚「去哪条链」，不会把九章、曦望和其它云混成一张表。
+const MIGRATION_PANELS = [
+  { id: "jiuzhang", title: "阿里云 ↔ 九章", hint: "杭州 OSS 与九章 GPFS 往返" },
+  { id: "xiwang", title: "阿里云 ↔ 曦望", hint: "杭州/新加坡中转后到曦望" },
+  { id: "aliyun-region", title: "阿里云跨地域迁移", hint: "阿里云 OSS 不同地域之间，国内到海外走专线加速" },
+  { id: "volcano", title: "阿里云 ↔ 火山云", hint: "杭州 OSS 与火山 TOS 往返" },
+];
 const CAP_LABEL = { list: "查看清单", download: "下载", write: "上传" };
 const RISK = { low: ["低风险", "good"], medium: ["中风险", "warn"], high: ["高风险", "crit"] };
 const STATUS_TONE = {
@@ -92,20 +100,54 @@ export function requestRoutes(ctx) {
   const { load, errorView } = ctx;
   // 筛选条件跨次渲染保留：从申请详情返回时不用重新筛
   const filters = { kind: "", q: "", category: "all", platform: "all", state: "all" };
+  // 申请页数据只在短时间内有效；同一用户来回切换「申请 / 我的申请」时复用正在进行的
+  // 请求，避免重复触发工作空间动态发现。新申请提交后由页面刷新自然更新。
+  let optionsCache = null;
+  let optionsCacheAt = 0;
+  let optionsPromise = null;
 
   function renderApply(selectedId) {
+    // 路由切换先把入口画出来，动态发现工作空间期间不再显示一整页空白。
+    mount(
+      pageHead("申请", "提交后会以你的名义发起飞书审批，审批通过后自动开通。", h("a", { class: "btn ghost small push", href: "#requests" }, "我的申请")),
+      h("div", { class: "card apply-loading", role: "status", "aria-live": "polite" },
+        h("h2", {}, "正在加载可申请项目"),
+        h("p", { class: "muted" }, "正在读取你的账号和工作空间，请稍候。")),
+    );
+    const getOptions = () => {
+      const now = Date.now();
+      if (optionsCache && now - optionsCacheAt < 30_000) return Promise.resolve(optionsCache);
+      if (optionsPromise) return optionsPromise;
+      optionsPromise = Promise.all([api("/api/requests/options"), api("/api/me").catch(() => null)])
+        .then((value) => {
+          optionsCache = value;
+          optionsCacheAt = Date.now();
+          return value;
+        })
+        .finally(() => { optionsPromise = null; });
+      return optionsPromise;
+    };
     return load(
-      async () => {
-        const [data, me] = await Promise.all([api("/api/requests/options"), api("/api/me").catch(() => null)]);
-        return { data, me };
-      },
+      async () => { const [data, me] = await getOptions(); return { data, me }; },
       ({ data, me }) => {
         const labels = new Map(((me && me.accounts) || []).map((a) => [`${a.platform}/${a.account}`, a.account_label]));
-        const options = (data.options || []).map((o) => ({ ...o, account_label: labels.get(`${o.platform}/${o.account}`) || "" }));
+        const options = (data.options || []).flatMap((o) => {
+          const base = { ...o, account_label: labels.get(`${o.platform}/${o.account}`) || "" };
+          if (o.kind !== "transfer") return [base];
+          return MIGRATION_PANELS.map((panel) => ({
+            ...base,
+            id: `${o.id}--${panel.id}`,
+            template_id: o.id,
+            migration_panel: panel.id,
+            title: `${panel.title} · ${o.title}`,
+            description: panel.hint,
+          }));
+        });
         mount(applyPage(options, data.my_accounts || []));
         const selected = options.find((o) => o.id === selectedId);
         if (selected && selected.available) openForm(selected, data.my_accounts || []);
       },
+      { showSkeleton: false },
     );
   }
 
@@ -450,6 +492,13 @@ export function requestRoutes(ctx) {
       const select = h("select", { id: "f-user", class: "input" }, mine.map((a) => h("option", { value: a.name }, a.name)));
       fields.push(field("f-user", "给哪个子账号开通", select, ""));
       read.cloud_user = () => select.value;
+      if (o.workspace_choices && o.workspace_choices.length) {
+        const workspace = h("select", { id: "f-workspace", class: "input" },
+          o.workspace_choices.map((w) => h("option", { value: w.id }, `${w.name}（${w.region}，${w.gpu || 0} 张卡${w.member ? "，已加入" : ""}）`)));
+        fields.push(field("f-workspace", "加入哪个工作空间", workspace, "只显示有资源或状态未知的空间"));
+        read.workspace_id = () => workspace.value;
+        workspace.addEventListener("change", update);
+      }
       if (o.max_days) {
         const days = h("input", { id: "f-days", class: "input", type: "number", inputmode: "numeric", min: "1", max: String(o.max_days), value: String(Math.min(30, o.max_days)) });
         const presets = h(
@@ -714,10 +763,22 @@ export function requestRoutes(ctx) {
               return;
             }
           }
+          if (o.kind === "transfer") {
+            const p = payload();
+            const direction = o.migration_panel === "jiuzhang" ? "杭州 OSS → 九章 NAS"
+              : o.migration_panel === "xiwang" ? "杭州 OSS → 新加坡中转 → 曦望 NAS"
+                : o.migration_panel === "volcano" ? "杭州 OSS ↔ 火山 TOS" : "已登记云平台之间";
+            const ok = window.confirm(
+              `请二次确认迁移任务：\n\n名称：${p.task_name}\n方向：${direction}\n源地址：${p.source}\n目标地址：${p.dest}\n同名文件：${p.overwrite === "overwrite" ? "覆盖" : "跳过"}\n\n提交后将进入审批，审批通过后开始传输。`,
+            );
+            if (!ok) return;
+          }
           submit.disabled = true;
           submit.textContent = "正在发起审批…";
           try {
-            const res = await apiPost("/api/requests", { template_id: o.id, payload: payload(), reason: reason.value.trim() });
+            const res = await apiPost("/api/requests", { template_id: o.template_id || o.id, payload: payload(), reason: reason.value.trim() });
+            optionsCache = null;
+            optionsCacheAt = 0;
             close();
             location.hash = `request=${encodeURIComponent(res.request.id)}&new=1`;
           } catch (err) {
@@ -967,6 +1028,10 @@ export function requestRoutes(ctx) {
 
     const facts = [
       ["申请内容", r.summary],
+      r.kind === "transfer" && r.move_stage ? ["迁移进度", transferProgress(r)] : null,
+      r.kind === "transfer" && r.move_objects !== undefined ? ["已处理对象", `${Number(r.move_objects || 0).toLocaleString()} 个`] : null,
+      r.kind === "transfer" && r.move_bytes !== undefined ? ["已处理数据", formatBytes(r.move_bytes)] : null,
+      r.kind === "transfer" && r.move_error ? ["迁移提示", r.move_error] : null,
       r.template.policies && r.template.policies.length ? ["授予的权限", policyList(r.template.policies)] : null,
       ["申请理由", r.reason],
       admin ? ["申请人", `${r.applicant.name || ""} ${r.applicant.email || ""}`.trim()] : null,
@@ -986,6 +1051,21 @@ export function requestRoutes(ctx) {
     return nodes;
   }
 
+  function formatBytes(value) {
+    let n = Number(value || 0);
+    for (const unit of ["B", "KB", "MB", "GB", "TB"]) {
+      if (n < 1024 || unit === "TB") return `${n.toFixed(unit === "B" ? 0 : 1)} ${unit}`;
+      n /= 1024;
+    }
+    return `${n.toFixed(1)} TB`;
+  }
+
+  function transferProgress(r) {
+    const labels = { new: "等待提交", running: "传输中", done: "已完成", failed: "传输失败", review: "等待管理员确认" };
+    const base = labels[r.move_stage] || r.move_stage || "等待调度";
+    return r.move_stage === "running" ? `${base}（后台定时刷新）` : base;
+  }
+
   function feishuLink(r) {
     // 飞书 AppLink 手机端和电脑端是两条路径：窄屏或移动端 UA 用手机链接
     const mobile = window.matchMedia("(max-width: 640px)").matches || /Android|iPhone|iPad/i.test(navigator.userAgent);
@@ -1003,6 +1083,9 @@ export function requestRoutes(ctx) {
       case "executing":
         return r.kind === "credential" ? "审批已通过，正在发放凭证。" : "审批已通过，正在开通。";
       case "fulfilling":
+        if (r.kind === "transfer" && r.move_stage === "running") {
+          return `迁移正在进行：${transferProgress(r)}。${r.move_objects !== undefined ? `已处理 ${Number(r.move_objects || 0).toLocaleString()} 个对象、${formatBytes(r.move_bytes || 0)}。` : "后台会继续刷新进度。"}`;
+        }
         if (isManualAccount(r)) {
           const where = PLATFORM_NAME[(r.template || {}).platform || r.platform] || "那个平台";
           return admin

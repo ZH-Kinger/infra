@@ -146,7 +146,10 @@ h2{font:var(--t-title) var(--ui); letter-spacing:var(--tr-title); margin:0; text
 /* 统计卡 */
 .stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(7.5rem,1fr)); gap:.75rem}
 .stat{background:var(--surface); border:1px solid var(--hair); border-radius:14px;
-      box-shadow:var(--shadow); padding:.7rem 1rem; display:flex; flex-direction:column; gap:.15rem}
+       box-shadow:var(--shadow); padding:.7rem 1rem; display:flex; flex-direction:column; gap:.15rem}
+.stat.clickable{cursor:pointer; text-align:left; width:100%; font:inherit; color:inherit}
+.stat.clickable:hover{border-color:var(--hair-strong); transform:translateY(-1px)}
+.stat.clickable:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
 .stat .n{font-size:1.5rem; font-weight:600; letter-spacing:-.02em; font-variant-numeric:tabular-nums}
 .stat .l{font-size:.75rem; color:var(--ink-2)}
 .stat.crit .n{color:var(--crit)}
@@ -237,6 +240,9 @@ details.fold[open] > summary::before{transform:rotate(90deg)}
 body.admin-space .topbar{box-shadow:inset 0 3px 0 var(--ink)}
 
 .btn.tiny{padding:.15rem .55rem; font-size:.75rem; border-radius:6px}
+.btn.danger{border-color:color-mix(in srgb,var(--crit) 55%,var(--hair)); color:var(--crit); background:var(--crit-soft)}
+.btn.danger:hover{border-color:var(--crit); background:color-mix(in srgb,var(--crit-soft) 72%,var(--surface))}
+.btn.danger.confirming{border-color:var(--crit); color:#fff; background:var(--crit); box-shadow:0 0 0 3px color-mix(in srgb,var(--crit) 20%,transparent)}
 .btn:disabled{opacity:.45; cursor:not-allowed}
 .group-head{display:flex; align-items:baseline; gap:.75rem; flex-wrap:wrap; padding-inline:.15rem}
 .eyebrow{font-size:.6875rem; font-weight:600; letter-spacing:.06em; color:var(--accent); margin-bottom:.15rem}
@@ -528,6 +534,8 @@ dl.kv dd{margin:0; display:flex; gap:.5rem; align-items:center; min-width:0}
 .login-foot{margin:1.4rem 0 0; color:var(--ink-3); font-size:.75rem}
 @media (max-width:420px){ .login-wrap{padding-top:6vh} .login-go{width:100%} }
 .skeleton{display:flex; flex-direction:column; gap:1rem}
+.apply-loading{min-height:10rem; display:grid; align-content:center; gap:.35rem}
+.apply-loading h2,.apply-loading p{margin:0}
 .sk{background:linear-gradient(90deg,var(--surface-2),var(--surface),var(--surface-2));
     background-size:200% 100%; border-radius:12px; animation:sk 1.2s ease-in-out infinite}
 .sk-title{height:2rem; width:40%}
@@ -595,6 +603,13 @@ dl.kv dd{margin:0; display:flex; gap:.5rem; align-items:center; min-width:0}
 .pad-notes{margin:0 1.25rem 1rem}
 .pad-foot{padding:0 1.25rem 2rem}
 
+/* 没有自动接口的平台：先说清楚来源和替换语义，再让管理员粘名单。 */
+.manual-guide h2{margin:0 0 .35rem}
+.manual-guide p{margin:.25rem 0 .65rem}
+.manual-guide ol{margin:.35rem 0 0; padding-left:1.35rem; color:var(--ink-2); font-size:.8125rem; line-height:1.65}
+.manual-guide li{padding-left:.15rem}
+.manual-text-label{display:block; margin:.9rem 0 .35rem; font-size:.8125rem; font-weight:600}
+
 /* AK 台账：已停用的那几行压暗（还在，但不用管），「从来没用过」标黄 */
 tr.dim td{opacity:.55}
 .warn-text{color:var(--warn)}
@@ -647,6 +662,16 @@ tr.dim td{opacity:.55}
 .recon-kind{display:flex; align-items:baseline; gap:.5rem; flex-wrap:wrap; margin:.7rem 0 .3rem}
 .recon-row{display:flex; align-items:baseline; gap:.5rem; flex-wrap:wrap}
 .recon-act{display:inline-flex; align-items:center; gap:.5rem; flex-wrap:wrap}
+.confirm-hint{color:var(--crit); font-size:.75rem; max-width:42rem}
+.confirm-dialog{width:min(32rem,calc(100vw - 2rem)); max-width:32rem; padding:0; border:1px solid var(--hair-strong);
+                border-radius:16px; color:var(--ink); background:var(--surface); box-shadow:0 24px 80px rgba(0,0,0,.24)}
+.confirm-dialog::backdrop{background:rgba(0,0,0,.38); backdrop-filter:blur(2px)}
+.confirm-dialog-body{padding:1.4rem; display:grid; gap:.8rem}
+.confirm-dialog-body h2,.confirm-dialog-body p{margin:0}
+.confirm-dialog-warning{padding:.7rem .8rem; border-radius:10px; color:var(--crit); background:var(--crit-soft); font-size:.8125rem}
+.confirm-dialog-actions{display:flex; justify-content:flex-end; gap:.6rem; margin-top:.25rem}
+.offboard-callout{margin-bottom:.75rem}
+.offboard-callout p{margin:.25rem 0 0}
 .good-text{color:var(--good)}
 /* 导航上的待办角标。埋在二级页里的待办等于没有待办 */
 .tab-badge{display:inline-flex; align-items:center; justify-content:center; min-width:1.1rem;
@@ -669,6 +694,22 @@ tbody tr.prow:active{background:var(--surface-2)}
 .topbar::after{content:""; position:absolute; left:0; right:0; top:100%; height:.75rem;
                pointer-events:none;
                background:linear-gradient(color-mix(in srgb,var(--ground) 55%,transparent),transparent)}
+
+/* 管理端有 9 个入口。导航本身可以横向滚动，但品牌和用户区必须保持在同一行，
+   否则中等宽度的笔记本会把用户名挤到第二行，顶栏高度随着页面切换来回跳。 */
+body.admin-space .topbar-inner{max-width:80rem; flex-wrap:nowrap}
+body.admin-space .topbar-inner > .tabs{min-width:0; overflow-x:auto; scrollbar-width:none}
+body.admin-space .topbar-inner > .tabs::-webkit-scrollbar{display:none}
+body.admin-space .topbar-inner > .tabs .tab{flex:none}
+body.admin-space .topbar-inner > .who{flex:none}
+/* 上面这条规则必须放在通用 .topbar 的阴影之后，否则管理态的顶部标识会被覆盖。 */
+body.admin-space .topbar{box-shadow:inset 0 3px 0 var(--ink), 0 1px 0 color-mix(in srgb,var(--hair) 70%,transparent)}
+
+@media (max-width:640px){
+  body.admin-space .topbar-inner{flex-wrap:wrap}
+  body.admin-space .topbar-inner > .tabs{order:3; flex-basis:100%; width:100%}
+  body.admin-space .topbar-inner > .who{width:auto; margin-left:auto}
+}
 
 /* 层次：卡片之间用「同一组更近、不同组更远」表达关系，不靠加更多边框。
    邻近即关系 —— 需要一条线来说明的分组，说明间距没做对 */
@@ -708,7 +749,7 @@ tbody tr.prow:active{background:var(--surface-2)}
 
 /* 待办页。一行一件事：左边说清楚「发生了什么 + 不处理会怎样」，右边一个去处 */
 .todo-row{display:flex; gap:1rem; align-items:flex-start; justify-content:space-between;
-          padding:.7rem var(--pad-x); border-top:1px solid var(--line)}
+          padding:.7rem var(--gutter); border-top:1px solid var(--hair)}
 .todo-row:first-of-type{border-top:0}
 .todo-main{min-width:0}
 .todo-what{margin:.15rem 0 0; color:var(--ink-2)}

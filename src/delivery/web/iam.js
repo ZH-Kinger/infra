@@ -18,7 +18,7 @@ const FILE = API + "/file";
 //: 对账的四类差异。**顺序就是严重程度** —— 最上面那两类是「现在就有人登错号 / 离职的人还有权限」，
 //: 下面两类只是两边没同步。合成一类的话，最要紧的会被淹在一堆「少一条多一条」里
 const DRIFT = [
-  ["inactive", "已离职，云登录名还挂着", "crit", "点「确认离职」删掉登录名和云上的账号，数据不动"],
+  ["inactive", "已离职，云登录名还挂着", "crit", "点「确认离职并回收」删掉登录名和云上的账号，数据不动"],
   ["different", "两边值不一样", "crit", "SSO 会用 IAM 那一边的值。确认哪个对，然后下发"],
   ["missing", "名册有，IAM 没有", "warn", "下发一次"],
   ["left", "IAM 有，名册没有", "", "先在名册这边确认这个人的情况"],
@@ -454,10 +454,13 @@ function reconcileSection(ui, data) {
   btn.addEventListener("click", run);
   if (cached) box.replaceChildren(...reconcileBody(cached));
   else box.replaceChildren(h("p", { class: "hint" }, "读 IAM 侧现在的 cloud_accounts，和名册比对。只读。"));
+  const inactive = cached
+    ? (cached.apps || []).reduce((n, app) => n + (app.drift || []).filter((d) => d.kind === "inactive").length, 0)
+    : 0;
   return h(
     "section",
-    { class: "group" },
-    h("div", { class: "group-label" }, "和 IAM 对账", btn),
+    { class: "group", id: "iam-reconcile" },
+    h("div", { class: "group-label" }, inactive ? `离职回收与 IAM 对账 · 待处理 ${inactive}` : "和 IAM 对账", btn),
     box,
   );
 }
@@ -475,12 +478,11 @@ function offboardSection(items) {
   const rows = items.map((r) => {
     const out = h("span", { class: "hint" });
     const byHand = BY_HAND.has(r.platform);
-    const del = h("button", { type: "button", class: "btn tiny", hidden: !!r.unverified },
+    const del = h("button", { type: "button", class: "btn tiny danger", hidden: !!r.unverified },
       byHand ? "我已在控制台处理" : "确认删除");
     const keep = h("button", { type: "button", class: "btn tiny ghost" },
       r.state === "disabled" ? "恢复" : "没离职");
-    const act = async (op, ask) => {
-      if (!window.confirm(ask)) return;
+    const act = async (op) => {
       del.disabled = true;
       keep.disabled = true;
       try {
@@ -497,16 +499,18 @@ function offboardSection(items) {
         out.replaceChildren(h("span", { class: "recon-bad" }, e.message));
       }
     };
-    del.addEventListener("click", () => act("offboard_delete",
+    armDestructive(del, out,
+      byHand ? "再次点击确认已处理" : "再次点击确认删除",
+      () => act("offboard_delete"),
       byHand
-        ? `${CLOUD[r.platform] || r.platform}没有接口，面板停不了也删不了。\n\n`
-          + `确认你已经在${CLOUD[r.platform] || r.platform}控制台停用或删除了 ${r.user}？这条会从待办里消掉。`
-        : `删除 ${r.person} 的${CLOUD[r.platform] || r.platform}账号 ${r.user}？\n\n`
-          + "会删掉这个云账号本身（先移出用户组、摘掉策略、删 AK）。他在桶里的文件、数据集、实例都不动。删了不能恢复。"));
-    keep.addEventListener("click", () => act("offboard_restore",
-      r.state === "disabled"
+        ? `请先确认你已经在${CLOUD[r.platform] || r.platform}控制台停用或删除了 ${r.user}；第二次点击只会把这条待办销账。`
+        : `将删除 ${r.person} 的${CLOUD[r.platform] || r.platform}账号 ${r.user}。云账号会被移出用户组、摘掉策略并删除 AK，桶里的文件、数据集、实例不动。`);
+    keep.addEventListener("click", () => {
+      const ask = r.state === "disabled"
         ? `恢复 ${r.user}？会把停用时关掉的登录和 AK 开回去，之后不再自动停这个号。`
-        : `${r.person} 没离职？这条会从待确认里拿掉。`));
+        : `${r.person} 没离职？这条会从待确认里拿掉。`;
+      if (window.confirm(ask)) act("offboard_restore");
+    });
     // 标签 = 事实 + 谁说的 + 什么时候。「未停用」是在替云上做断言，而面板并不知道云上现在什么样
     const when = /^\d{4}-\d{2}-\d{2}/.test(String(r.at || "")) ? r.at.slice(5, 10) : "";
     const state = r.state === "disabled"
@@ -525,21 +529,88 @@ function offboardSection(items) {
   });
   return h("section", { class: "group" },
     h("div", { class: "group-label" }, `离职人员的云账号，待确认删除 ${items.length}`),
-    h("p", { class: "hint pad" }, "检测到离职会自动停用阿里、火山的号（关登录、禁 AK）。九章没有接口，只提醒你去它的控制台处理。通讯录里找不到的也只提醒。确认后才删号，数据一律不动。"),
+    h("p", { class: "hint pad" }, "检测到离职会自动停用阿里、火山的号（关登录、禁 AK）。九章没有接口，只提醒你去它的控制台处理。通讯录里找不到的也只提醒。高风险按钮第一次点击只进入确认状态，第二次点击才执行；删号不会删除桶、数据集或实例。"),
     ...rows);
+}
+
+// 删除云账号是不可逆动作。第一次点击进入确认态，并在支持 <dialog> 的浏览器里弹出
+// 明确的二次确认；旧浏览器才回退为再次点击同一个按钮。
+function armDestructive(btn, out, armedLabel, run, explanation) {
+  const idleLabel = btn.textContent;
+  let armed = false;
+  let timer = null;
+  const reset = () => {
+    armed = false;
+    btn.classList.remove("confirming");
+    btn.textContent = idleLabel;
+    if (timer) clearTimeout(timer);
+    timer = null;
+    out.replaceChildren();
+  };
+  btn.addEventListener("click", async () => {
+    if (!armed) {
+      armed = true;
+      btn.classList.add("confirming");
+      btn.textContent = armedLabel;
+      out.replaceChildren(h("span", { class: "confirm-hint" }, explanation));
+      timer = setTimeout(reset, 8000);
+      if (timer && typeof timer.unref === "function") timer.unref();
+      const dialogTitle = armedLabel.replace(/^再次点击确认/, "确认");
+      if (openConfirmDialog(dialogTitle, explanation, async () => {
+        if (timer) clearTimeout(timer);
+        timer = null;
+        await run();
+      }, reset)) return;
+      return;
+    }
+    if (timer) clearTimeout(timer);
+    timer = null;
+    await run();
+  });
+}
+
+function openConfirmDialog(title, explanation, run, cancel) {
+  const dialog = h("dialog", { class: "confirm-dialog", "aria-labelledby": "confirm-dialog-title" });
+  // 没有原生 dialog 的旧浏览器沿用页面内二次点击，不挂一个打不开的节点。
+  if (typeof dialog.showModal !== "function") return false;
+  const close = () => {
+    if (dialog.open && typeof dialog.close === "function") dialog.close();
+    dialog.remove();
+  };
+  const no = h("button", { type: "button", class: "btn ghost" }, "取消");
+  const yes = h("button", { type: "button", class: "btn danger" }, "确认执行");
+  no.addEventListener("click", () => {
+    close();
+    cancel();
+  });
+  yes.addEventListener("click", async () => {
+    yes.disabled = true;
+    yes.textContent = "处理中…";
+    close();
+    await run();
+  });
+  dialog.addEventListener("cancel", () => {
+    close();
+    cancel();
+  });
+  dialog.append(
+    h("div", { class: "confirm-dialog-body" },
+      h("h2", { id: "confirm-dialog-title" }, title),
+      h("p", {}, explanation),
+      h("p", { class: "confirm-dialog-warning" }, "这个操作不能撤销，请核对姓名、平台和登录名。"),
+      h("div", { class: "confirm-dialog-actions" }, no, yes)),
+  );
+  document.body.append(dialog);
+  dialog.showModal();
+  return true;
 }
 
 // 「确认离职」= 管理员用自己这一下顶替「名册里也没有」那个信号。
 // **服务端会重新读一次 IAM 核对**，所以这个按钮不能凭空删掉一个在职的人。
 function reclaimButton(d) {
-  const btn = h("button", { type: "button", class: "btn tiny" }, "确认离职，回收");
+  const btn = h("button", { type: "button", class: "btn tiny danger" }, "确认离职并回收");
   const out = h("span", { class: "hint" });
-  btn.addEventListener("click", async () => {
-    if (!window.confirm(
-      `确认 ${d.name || d.username} 已离职？\n\n`
-      + `删掉他在 ${d.app} 的登录名 ${d.theirs}，并删除云上的账号。\n`
-      + `他在桶里的文件、数据集、实例都不动。删了不能恢复。`
-    )) return;
+  const reclaim = async () => {
     btn.disabled = true;
     btn.textContent = "回收中…";
     try {
@@ -549,10 +620,17 @@ function reclaimButton(d) {
         `已删除登录名${r.previous ? ` ${r.previous}` : ""}。${r.cloud || ""}`));
     } catch (e) {
       btn.disabled = false;
-      btn.textContent = "确认离职，回收";
+      btn.textContent = "再次点击确认离职并回收";
       out.replaceChildren(h("span", { class: "recon-bad" }, e.message));
     }
-  });
+  };
+  armDestructive(
+    btn,
+    out,
+    "再次点击确认离职并回收",
+    reclaim,
+    `将删除 ${d.name || d.username} 在 ${d.app} 的登录名 ${d.theirs || "（未显示）"}，并删除云上的账号；桶里的文件、数据集、实例不动。`,
+  );
   return h("span", { class: "recon-act" }, btn, out);
 }
 
@@ -574,6 +652,15 @@ function snoozeButton(d) {
 
 function reconcileBody(report) {
   const out = [];
+  const inactiveTotal = (report.apps || []).reduce(
+    (n, app) => n + (app.drift || []).filter((d) => d.kind === "inactive").length,
+    0,
+  );
+  if (inactiveTotal) {
+    out.push(h("div", { class: "banner crit offboard-callout" },
+      h("b", {}, `发现 ${inactiveTotal} 个离职登录仍在 IAM 中`),
+      h("p", {}, "请逐条核对姓名、应用和登录名。按钮第一次点击只进入确认状态，第二次点击才会删除登录名和云账号；桶、数据集、实例不会删除。")));
+  }
   if (report.checked_at) {
     out.push(h("p", { class: "hint" },
       `上次对账 ${ago(report.checked_at)}`,

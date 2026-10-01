@@ -22,12 +22,26 @@ function page(data) {
   const accounts = data.accounts || [];
   return h("div", {},
     h("header", { class: "masthead" },
-      h("h1", {}, "人工登记"),
+      h("h1", {}, "手工账号名单"),
       h("p", { class: "lede" },
-        "没有采集接口的平台（九章），账号名单靠这里登记。保存后下一轮刷新进名册、「我的账号」和离职检查。")),
+        "给没有自动采集接口的平台登记完整账号名单。保存后下一轮刷新进名册、「我的账号」和离职检查。")),
+    guide(),
     data.error ? h("div", { class: "banner warn" }, `登记表读不了：${data.error}`) : null,
     ...accounts.map((acc) => accountCard(acc, data.stale_days)),
     editor(accounts),
+  );
+}
+
+function guide() {
+  return h("section", { class: "card manual-guide" },
+    h("div", { class: "pad" },
+      h("h2", {}, "什么时候用这页"),
+      h("p", { class: "muted" }, "只用于九章、TurboAI（曦望）这类没有自动账号接口的平台。阿里云和火山引擎由系统采集，不要粘到这里。"),
+      h("ol", {},
+        h("li", {}, "打开对应平台控制台的用户列表。"),
+        h("li", {}, "全选并复制完整页面，连同表头一起粘贴；不要只复制新增的一行。"),
+        h("li", {}, "先点“预览”，确认新增和移除名单，再点“保存”。保存会用这份名单整体替换旧名单。")),
+    ),
   );
 }
 
@@ -61,11 +75,15 @@ function accountCard(acc, staleDays) {
 
 function editor(accounts) {
   const first = accounts[0] || {};
-  const platform = h("input", { id: "f-off-platform", class: "input narrow", value: first.platform || "jiuzhang", autocomplete: "off" });
+  const platformNames = new Map([["jiuzhang", "九章"], ["turboai", "TurboAI（曦望）"]]);
+  for (const acc of accounts) if (acc.platform && acc.platform_name) platformNames.set(acc.platform, acc.platform_name);
+  const platform = h("select", { id: "f-off-platform", class: "input", autocomplete: "off" },
+    [...platformNames].map(([id, name]) => h("option", { value: id }, name)));
+  platform.value = first.platform || "jiuzhang";
   const account = h("input", { id: "f-off-account", class: "input narrow", value: first.account || "", autocomplete: "off", placeholder: "主账号名，如 wuji" });
-  const prefix = h("input", { id: "f-off-prefix", class: "input narrow", value: first.login_prefix || "", autocomplete: "off", placeholder: "如 wuji-" });
+  const prefix = h("input", { id: "f-off-prefix", class: "input narrow", value: first.login_prefix || "", autocomplete: "off", placeholder: "可选，如 wuji-" });
   const text = h("textarea", { id: "f-off-text", class: "input", rows: "10", spellcheck: "false",
-    placeholder: "在平台控制台的用户列表里全选复制，整页粘进来（表头、按钮文字不用删）" });
+    placeholder: "把平台控制台的用户列表整页粘贴到这里（表头、按钮文字不用删）" });
   const confirm = h("input", { type: "checkbox", class: "check", id: "f-off-confirm" });
   const confirmRow = h("label", { class: "check-row", for: "f-off-confirm", hidden: true }, confirm, "确认移除这些人（名单真的变了，不是粘漏了）");
   const out = h("div", {});
@@ -113,14 +131,15 @@ function editor(accounts) {
   saveBtn.addEventListener("click", save);
 
   return h("section", { class: "card" },
-    h("div", { class: "group-label" }, "更新名单"),
+    h("div", { class: "group-label" }, "粘贴并更新名单"),
     h("div", { class: "pad" },
       h("div", { class: "inline" },
-        h("label", { for: "f-off-platform" }, "平台 "), platform,
-        h("label", { for: "f-off-account" }, " 主账号 "), account,
-        h("label", { for: "f-off-prefix" }, " 登录名前缀 "), prefix),
+        h("label", { for: "f-off-platform" }, "平台"), platform,
+        h("label", { for: "f-off-account" }, "主账号 / 租户"), account,
+        h("label", { for: "f-off-prefix" }, "登录名前缀（可选）"), prefix),
+      h("label", { class: "manual-text-label", for: "f-off-text" }, "控制台用户列表"),
       text,
-      h("p", { class: "muted" }, "保存是整体替换：粘进来的就是完整名单。手机号那一列不会保存。"),
+      h("p", { class: "muted" }, "整页名单会整体替换旧名单；手机号等无关列不会保存。没有先预览就不能保存。"),
       h("div", { class: "inline" },
         h("button", { type: "button", class: "btn ghost", onclick: preview }, "预览"), saveBtn),
       confirmRow),
