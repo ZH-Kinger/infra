@@ -531,7 +531,13 @@ def _workspaces(spec, where: str, registry) -> tuple:
 _FS_KEYS = {"id", "region", "cloud"}
 #: id 前缀 → 哪朵云。**不让模板自己写 cloud**，除非前缀认不出来 ——
 #: 写错了的表现是拿阿里的凭证去调火山的接口，报错指不到根因
-_FS_CLOUD = {"bmcpfs-": "aliyun", "cpfs-": "aliyun", "vepfs-": "volcano"}
+_FS_CLOUD = {
+    "bmcpfs-": "aliyun",
+    "cpfs-": "aliyun",
+    "vepfs-": "volcano",
+    # 九章不是云文件系统，但沿用这份登记表让迁移模板也能白名单它的集群。
+    "jz-": "jiuzhang",
+}
 
 
 def _filesystems(spec, where: str) -> tuple:
@@ -559,9 +565,9 @@ def _filesystems(spec, where: str) -> tuple:
         cloud = str(row.get("cloud") or "").strip()
         if not cloud:
             cloud = next((v for k, v in _FS_CLOUD.items() if fid.startswith(k)), "")
-        if cloud not in ("aliyun", "volcano"):
+        if cloud not in ("aliyun", "volcano", "jiuzhang"):
             raise CatalogError(
-                f"{at}：认不出 {fid} 是哪朵云的（前缀应是 bmcpfs- / cpfs- / vepfs-），"
+                f"{at}：认不出 {fid} 是哪朵云的（前缀应是 bmcpfs- / cpfs- / vepfs- / jz-），"
                 "认不出就显式写 cloud"
             )
         out.append({"id": fid, "region": region, "cloud": cloud})

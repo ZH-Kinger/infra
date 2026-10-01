@@ -16,7 +16,7 @@ import re
 import sys
 import time
 import urllib.parse
-from dataclasses import MISSING, asdict, dataclass, fields
+from dataclasses import MISSING, asdict, dataclass, fields, replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Mapping, Optional, Sequence
 
@@ -545,6 +545,7 @@ class Flows:
         executor_ready: Optional[Callable[[str, str], bool]] = None,
         #: (platform, account) -> bool；这个云账号的凭证发放身份配了没有。None = 不判断
         issuer_ready: Optional[Callable[[str, str], bool]] = None,
+        workspace_choices: Optional[Callable[[str, str, str, str], list]] = None,
         clock: Callable[[], float] = time.time,
     ):
         self.store = store
@@ -566,6 +567,7 @@ class Flows:
         #: (platform, account) -> bool；这个云账号的开通身份配了没有。None = 不判断
         self._executor_ready = executor_ready
         self._issuer_ready = issuer_ready
+        self._workspace_choices = workspace_choices
         self._clock = clock
         self._last_sync: dict = {}
 
@@ -605,6 +607,27 @@ class Flows:
         tickets = self.store.mine(union_id) if union_id else []
         now = self._clock()
         out = []
+        # 一个申请页会同时展示多个权限模板；它们经常共用同一个账号和地域。
+        # 工作空间发现包含列表、配额和（有子账号时）成员查询，不能因为模板重复就
+        # 把同一组 PAI 请求打好几遍。缓存只活在这次 options() 调用里，云上成员变化
+        # 不会被跨请求的长期缓存掩盖。
+        workspace_cache = {}
+        workspace_errors = {}
+
+        def workspace_choices(platform, account, region, user):
+            key = (str(platform or ""), str(account or ""), str(region or ""), str(user or ""))
+            if key not in workspace_cache:
+                try:
+                    workspace_cache[key] = list(
+                        self._workspace_choices(platform, account, region, user) or []
+                    )
+                except Exception:
+                    # 发现失败不能让整张申请页 500，但也不能把「查不到」伪装成
+                    # 「没有工作空间」让人继续提交。
+                    workspace_errors[key] = True
+                    workspace_cache[key] = []
+            return workspace_cache[key]
+
         for tpl in self._catalog().templates:
             item = tpl.public()
             name = names.get((tpl.platform, tpl.account), "")
@@ -687,6 +710,33 @@ class Flows:
                 and not (tpl.kind == catalog_mod.KIND_ACCOUNT and state == "owned"),
             )
             item["unavailable_reason"] = "" if item["available"] else note
+            if tpl.kind == catalog_mod.KIND_PERMISSION and self._workspace_choices:
+                choices = {}
+                for ws in tpl.workspaces:
+                    for choice in workspace_choices(tpl.platform, tpl.account, ws["region"], name):
+                        wid = str(choice.get("id") or "")
+                        if wid:
+                            choices.setdefault(wid, choice)
+                item["workspace_choices"] = sorted(
+                    choices.values(),
+                    key=lambda x: (
+                        str(x.get("name") or "").lower(),
+                        str(x.get("id") or ""),
+                    ),
+                )
+                failed = any(
+                    workspace_errors.get((tpl.platform, tpl.account, ws["region"], name))
+                    for ws in tpl.workspaces
+                )
+                if tpl.workspaces and not choices:
+                    item["state"] = "unavailable"
+                    item["available"] = False
+                    item["state_note"] = (
+                        "工作空间列表暂时不可用，请稍后重试"
+                        if failed
+                        else "当前没有检测到有资源的工作空间"
+                    )
+                    item["unavailable_reason"] = item["state_note"]
             out.append(item)
         return out
 
@@ -885,6 +935,53 @@ class Flows:
             )
         if clean is None:
             clean, summary = self._validate(tpl, applicant, payload)
+        dynamic_spaces = bool(
+            tpl.kind == catalog_mod.KIND_PERMISSION and tpl.workspaces and self._workspace_choices
+        )
+        discovered = []
+        if dynamic_spaces:
+            try:
+                for ws in tpl.workspaces:
+                    discovered += (
+                        self._workspace_choices(
+                            tpl.platform, tpl.account, ws["region"], clean.get("cloud_user", "")
+                        )
+                        or []
+                    )
+            except Exception as exc:
+                raise FlowError("工作空间列表暂时不可用，请稍后重试", 503) from exc
+            if not discovered:
+                raise FlowError("当前没有检测到有资源的工作空间，暂时不能提交", 409)
+        if tpl.kind == catalog_mod.KIND_PERMISSION and clean.get("workspace_id"):
+            wid = clean["workspace_id"]
+            choice = (
+                next(
+                    (x for x in discovered if str(x.get("id")) == wid),
+                    None,
+                )
+                if dynamic_spaces
+                else None
+            )
+            if choice:
+                # 动态空间复用同地域登记空间的存储落点；目录本来就是按用户名隔离，
+                # 不需要为每个 PAI Workspace 再建一套 CPFS/OSS 配置。
+                base = next((ws for ws in tpl.workspaces if ws["region"] == choice["region"]), {})
+                snapshot["workspaces"] = [
+                    {
+                        **{
+                            k: v
+                            for k, v in base.items()
+                            if k in ("mount", "bucket", "bucket_region", "bucket_prefix", "roles")
+                        },
+                        "id": wid,
+                        "label": choice.get("name") or wid,
+                        "region": choice["region"],
+                    }
+                ]
+            elif dynamic_spaces:
+                raise FlowError("请选择当前列表中的工作空间", 409)
+        elif dynamic_spaces:
+            raise FlowError("请选择当前列表中的工作空间", 409)
         for other in self.store.mine(applicant.union_id):
             if (
                 other.get("status") in t.OPEN
@@ -1046,6 +1143,27 @@ class Flows:
                     f"授权天数必须在 1–{tpl.max_days} 之间" if tpl.max_days else "授权天数不对"
                 )
             groups = "、".join(tpl.groups)
+            selected = str(payload.get("workspace_id") or "")
+            if selected and self._workspace_choices:
+                found = []
+                for ws in tpl.workspaces:
+                    found += (
+                        self._workspace_choices(tpl.platform, tpl.account, ws["region"], user) or []
+                    )
+                choice = next((x for x in found if str(x.get("id")) == selected), None)
+                if choice is None:
+                    raise FlowError("请选择当前列表中的工作空间")
+                return (
+                    {
+                        "cloud_user": user,
+                        "days": days,
+                        "workspace_id": selected,
+                        "workspace_name": str(choice.get("name") or selected),
+                    },
+                    f"{where}：把 {tpl.platform}/{tpl.account} 的子账号 {user} 加入工作空间 "
+                    f"{choice.get('name') or selected}，用户组 {groups}"
+                    + (f"，{days} 天" if days else ""),
+                )
             return (
                 {"cloud_user": user, "days": days},
                 f"{where}：把 {tpl.platform}/{tpl.account} 的子账号 {user} 加入用户组 {groups}"
@@ -1233,8 +1351,13 @@ class Flows:
     #: 这一段会原样进 OSS key 和 RAM 策略的 `oss:Prefix` 条件，
     #: 一个 `*` 或 `../` 就能让一条策略覆盖到别人的数据
     _BATCH = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,62}\Z")
+    _TRANSFER_NAME = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{1,47}\Z")
     #: 迁移路径：`<scheme>://<桶>/<前缀>/`
-    _URI = re.compile(r"\A(oss|tos|cpfs|vepfs)://([A-Za-z0-9][A-Za-z0-9._-]{1,62})(/[^\s]*)?\Z")
+    _URI = re.compile(r"\A(oss|tos|cpfs|vepfs|jz)://([A-Za-z0-9][A-Za-z0-9._-]{1,62})(/[^\s]*)?\Z")
+    # 面板中继桶的固定落点。前端提示不是安全边界，申请包被改写时也必须拦住。
+    _TRANSFER_ROOTS = {
+        "xiwang": {"oss": {"wuji-data-tran-sing": ("aliyun-hz/", "turboai/")}},
+    }
 
     def _validate_storage(self, tpl: catalog_mod.Template, payload: dict, where: str) -> tuple:
         """新建数据目录。**桶和 stage 都只能从模板里选**，批次 ID 逐字符校验。
@@ -1328,6 +1451,16 @@ class Flows:
         这里只保证「这两个地址是合法的、而且都在允许的范围内」。
         """
         allowed = {n for n, _ in tpl.buckets}
+        raw_name = str(payload.get("task_name") or payload.get("name") or "").strip()
+        if not raw_name:
+            raise FlowError(
+                "请填写迁移名称，建议用「数据名-日期-版本」，例如 worldengine-20261001-v1"
+            )
+        if not self._TRANSFER_NAME.fullmatch(raw_name):
+            raise FlowError(
+                "迁移名称只能用英文、数字、点、下划线和横线，需以英文或数字开头，"
+                "长度 2–48 位；例如 worldengine-20261001-v1"
+            )
         filesystems = {f["id"]: f.get("cloud", "") for f in tpl.filesystems}
         out = {}
         for side, label in (("source", "源"), ("dest", "目标")):
@@ -1341,7 +1474,15 @@ class Flows:
                 raise FlowError(f"{label}只能是目录，结尾要有 /")
             if ".." in prefix or "//" in prefix or "*" in prefix:
                 raise FlowError(f"{label}路径里不能有 .. 、连续斜杠或通配符")
-            if scheme in ("cpfs", "vepfs"):
+            # 路径会被写进 OSS 前缀、GPFS/NFS 相对目录和远端 shell。统一限制每一段，
+            # 避免同一张单在不同链路上被解析成不同的目录。
+            segments = [part for part in prefix.rstrip("/").split("/") if part]
+            if any(not self._BATCH.fullmatch(part) for part in segments):
+                raise FlowError(
+                    f"{label}路径每一级只能用英文、数字、点、下划线和横线，"
+                    "且每级最多 63 位"
+                )
+            if scheme in ("cpfs", "vepfs", "jz"):
                 # 并行文件系统走数据流动那两条链（预热 / 沉降）。
                 # **白名单是另一份**：文件系统不是桶，拿桶那份去比会把所有
                 # cpfs:// 都判成「不在可申请的范围里」，而那句话指不到真正的原因
@@ -1352,7 +1493,7 @@ class Flows:
                     )
                 # scheme 和文件系统所属的云要对得上：`cpfs://vepfs-…` 会拿阿里的凭证
                 # 去调一个火山的文件系统，审批通过后执行时才炸
-                want = "aliyun" if scheme == "cpfs" else "volcano"
+                want = {"cpfs": "aliyun", "vepfs": "volcano", "jz": "jiuzhang"}[scheme]
                 if filesystems[bucket] != want:
                     raise FlowError(f"{label}写的是 {scheme}://，但 {bucket} 不是这朵云的文件系统")
             elif bucket not in allowed:
@@ -1360,6 +1501,15 @@ class Flows:
             out[side] = f"{scheme}://{bucket}/{prefix}"
         if out["source"] == out["dest"]:
             raise FlowError("源和目标是同一个地方")
+        panel_roots = self._TRANSFER_ROOTS.get(str(payload.get("migration_panel") or ""))
+        if panel_roots:
+            target = out["dest"]
+            hit = self._URI.match(target)
+            scheme, bucket, rest = hit.group(1), hit.group(2), (hit.group(3) or "/")
+            allowed_prefixes = panel_roots.get(scheme, {}).get(bucket)
+            if not allowed_prefixes or not any(rest.lstrip("/").startswith(p) for p in allowed_prefixes):
+                allowed = "、".join(f"{scheme}://{b}/{p}" for b, ps in panel_roots.get(scheme, {}).items() for p in ps)
+                raise FlowError(f"该迁移入口只能使用规定的传输落点：{allowed}")
         # **链路成不成立在提交时就判**，不留到审批通过之后：cpfs→tos、vepfs→cpfs
         # 这种组合原先能走完整个飞书审批，到执行时才被拒 —— 白等一轮审批，
         # 还留一张要人工处理的失败单
@@ -1373,8 +1523,14 @@ class Flows:
         if overwrite not in ("skip", "overwrite"):
             raise FlowError("同名策略只能是 skip 或 overwrite")
         out["overwrite"] = overwrite
+        out["task_name"] = raw_name
+        panel = str(payload.get("migration_panel") or "").strip()
+        if panel and panel not in {"jiuzhang", "xiwang", "aliyun-region", "volcano"}:
+            raise FlowError("迁移入口无效，请从面板选择九章、曦望或其它云平台")
+        if panel:
+            out["migration_panel"] = panel
         how = "覆盖同名" if overwrite == "overwrite" else "跳过同名"
-        return out, f"{out['source']} → {out['dest']}（{how}）"
+        return out, f"迁移 {out['task_name']}：{out['source']} → {out['dest']}（{how}）"
 
     def _validate_resource(self, tpl: catalog_mod.Template, payload: dict, where: str) -> tuple:
         """资源开通：能选的一律选，不让填。
@@ -2857,7 +3013,13 @@ class Flows:
             # **加入别的工作空间也要在那儿建一条数据集。**
             # 数据集是工作空间的下级资源 —— 只加成员的话，人进去了、
             # 自己的数据却看不到，他会以为是权限没给全
-            space = self._provision_workspace(tpl, ticket, user)
+            # 动态选择的工作空间保存在申请单快照里；执行时不能重新按模板的旧地域
+            # 登记表解析，否则会把审批人批的空间换回默认空间。
+            provision_tpl = tpl
+            snap_spaces = (ticket.get("template") or {}).get("workspaces")
+            if snap_spaces:
+                provision_tpl = replace(tpl, workspaces=tuple(dict(x) for x in snap_spaces))
+            space = self._provision_workspace(provision_tpl, ticket, user)
             if space:
                 done.append(space.lstrip("；"))
             return "；".join(done) or space.lstrip("；")

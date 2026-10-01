@@ -169,7 +169,7 @@ def _locate(plan: dict, ticket: dict) -> dict:
         node = plan[side]
         if node["scheme"] == "src":
             continue  # 第三方源的地域在登记表里，不在模板清单里
-        if node["scheme"] in ("cpfs", "vepfs"):
+        if node["scheme"] in ("cpfs", "vepfs", "jz"):
             # 并行文件系统的地域在模板的 `filesystems` 登记表里，不在桶表里。
             # **不跳过的话每一张预热 / 沉降单都在这里被挡死**：文件系统 id 永远查不到桶，
             # 每 5 分钟报一次「查不到桶的地域」（审计 H-A）
@@ -358,6 +358,50 @@ def _drop_cred(ticket: dict, *, config: Config, issuer=None) -> list:
     return move_creds.drop(make(cloud, _account_for(cloud, ticket, config)), user)
 
 
+def _jiuzhang_credentials(
+    plan: dict,
+    ticket: dict,
+    *,
+    config: Config,
+    issuer=None,
+    minted: Optional[dict] = None,
+) -> dict:
+    """为九章这一趟签一把阿里云前缀凭证。
+
+    去程只给源目录 list/read；回程只给 ``alayanew`` 目标目录 list/write。
+    凭证不进任务单，也不出现在远端命令行，只由 jiuzhang 引擎写入 0600
+    临时 ossutil 配置，任务结束后立即撤销。
+    """
+    from . import grants
+
+    direction = str(plan.get("direction") or "")
+    if direction == "oss->jz":
+        node = plan["src"]
+        purpose = "jzread"
+        caps = (grants.CAP_LIST, grants.CAP_DOWNLOAD)
+    elif direction == "jz->oss":
+        node = plan["dest"]
+        purpose = "jzwrite"
+        caps = (grants.CAP_LIST, grants.CAP_WRITE)
+    else:
+        raise MoverError(f"九章不支持方向 {direction}")
+    account = _account_for("aliyun", ticket, config)
+    make = issuer if issuer is not None else _issuer_from_env
+    key, secret, user = move_creds.mint(
+        make("aliyun", account),
+        ticket_id=str(ticket.get("id") or ""),
+        bucket=str(node.get("bucket") or ""),
+        prefix=str(node.get("prefix") or ""),
+        platform="aliyun",
+        now=time.time(),
+        days=config.cred_days,
+        caps=caps,
+        purpose=purpose,
+    )
+    _remember(minted, user, "aliyun")
+    return {"access_key_id": key, "access_key_secret": secret}
+
+
 def _submit(
     plan: dict,
     name: str,
@@ -380,6 +424,19 @@ def _submit(
     account = str((ticket.get("template") or {}).get("account") or "")
     src, dest = plan["src"], plan["dest"]
 
+    if plan["engine"] == "jiuzhang":
+        from . import jiuzhang
+
+        credentials = _jiuzhang_credentials(
+            plan, ticket, config=config, issuer=issuer, minted=minted
+        )
+        return jiuzhang.submit(
+            plan,
+            name,
+            config=jiuzhang.Config.from_env(),
+            credentials=credentials,
+        )
+
     if plan["engine"] in ("nas", "vepfs"):
         # 预热 / 沉降。**不跨云，也就没有钥匙要交出去** —— 两头都在同一朵云里
         return _submit_dataflow(plan, ticket, config=config, executor=executor)
@@ -394,7 +451,8 @@ def _submit(
         elif src["scheme"] == "tos":
             # **先问云上有没有这张单的任务，有就复用、不签新钥匙。** 先签后查的话，
             # 签新钥匙那一步会把上一把撤掉，而云上那个任务的源地址里存的正是上一把 ——
-            # 任务照样启动，然后全部 403（审计 H-C）
+            # 任务照样启动，然后全部 403（审计 H-C）。同云 OSS 现在也使用逐单钥匙，
+            # 所以必须走同一条复用守卫。
             where = dict(
                 user_id=account,
                 endpoint=config.mgw_endpoint,
@@ -406,11 +464,15 @@ def _submit(
                 # 复用也要把钥匙名记下：上一轮可能在「签出来」和「写回单子」之间被杀掉，
                 # 单子上没有名字的话 `reclaim` 永远找不到它（审计 R2）。名字按单号定，
                 # 算得出来；云上万一没有这个号，撤的时候「不存在」按成功算
-                _remember(minted, move_creds.user_name(str(ticket.get("id") or "")), "volcano")
+                _remember(
+                    minted,
+                    move_creds.user_name(str(ticket.get("id") or "")),
+                    "volcano" if src["scheme"] == "tos" else "aliyun",
+                )
                 return mgw.relaunch(**where)
-            # 跨云：这把钥匙要交给**阿里**的迁移服务去读火山的桶
+            # 源端是火山或阿里时，现场签对应云的前缀凭证。
             key, secret, cred_user = _source_creds(plan, ticket, config=config, issuer=issuer)
-            _remember(minted, cred_user, "volcano")
+            _remember(minted, cred_user, "volcano" if src["scheme"] == "tos" else "aliyun")
         return mgw.submit(
             user_id=account,
             endpoint=config.mgw_endpoint,
@@ -462,6 +524,10 @@ def _poll(ticket: dict, *, config: Config, executor=None) -> dict:
     # 老单子没有这个字段，回落任务名 —— 阿里那条两者本来就相等
     job = str(ticket.get("move_ref") or ticket.get("move_job") or "")
     engine = str(ticket.get("move_engine") or "")
+    if engine == "jiuzhang":
+        from . import jiuzhang
+
+        return jiuzhang.poll(job, config=jiuzhang.Config.from_env())
     if engine in ("nas", "vepfs"):
         return _poll_dataflow(ticket, job, engine, config=config, executor=executor)
     if engine == "mgw":
@@ -577,6 +643,14 @@ def start_one(
             now=now,
         )
     except Exception as exc:
+        if minted and plan.get("engine") == "jiuzhang":
+            # 九章还没成功下发时，远端没有任务可以继续使用这把钥匙；
+            # 立即撤销，避免 BUSY/SSH 失败留下可用子账号。
+            try:
+                _drop_cred({**ticket, **minted}, config=config, issuer=issuer)
+                minted.clear()
+            except Exception as revoke_exc:  # noqa: BLE001
+                minted["move_cred_left"] = _stable(_brief(revoke_exc))
         # 签出来了但提交没成：**钥匙名要跟着异常一起落进单子**（`_one` 读 `fields`），
         # 只写进文案的话单子上查不到它，搬运结束时也就没人去撤（审计 M-1）。
         # 原始错误要留着 —— `from None` 会把真正的根因吞掉，人只看到一句「提交失败」
@@ -642,9 +716,24 @@ def sweep(
     """
     cfg = config or Config.from_env()
     problems = 0
-    for ticket in pending(store):
+    rows = pending(store)
+    # 链路级串行：任务名和目录不同也不能占用同一条中继链路。只看明确在途
+    # 的单子；失败/完成后的凭证会在本轮回收，下一轮才允许下一单启动。
+    active_chains = set()
+    for row in rows:
+        if str(row.get("move_stage") or "") != moves.STAGE_RUNNING:
+            continue
+        key = _ticket_chain(row)
+        if key:
+            active_chains.add(key)
+    reserved_chains = set(active_chains)
+    for ticket in rows:
         stage = str(ticket.get("move_stage") or "")
         if stage in (moves.STAGE_DONE, moves.STAGE_FAILED, STAGE_REVIEW):
+            continue
+        chain = _ticket_chain(ticket)
+        if stage != moves.STAGE_RUNNING and chain and chain in reserved_chains:
+            # 这是正常排队，不算错误，不写失败事件，也不重复提醒用户。
             continue
         # **整张单子的处理都在 try 里，写盘也在。**
         # 写盘会抛：`store.update` 带 `expect=[FULFILLING]`，而管理员随时可能在
@@ -661,11 +750,23 @@ def sweep(
                 log=log,
                 announce=announce,
             )
+            # _one 可能刚刚提交了任务；把它占用的链路留给下一轮/下一张单。
+            if chain and str(ticket.get("move_stage") or "") == moves.STAGE_RUNNING:
+                reserved_chains.add(chain)
         except Exception as exc:  # noqa: BLE001 — 见上
             problems += 1
             log(f"{str(ticket.get('id') or '')}：这轮没处理成 {_brief(exc)}")
     problems += reclaim(store, config=cfg, issuer=issuer, log=log)
     return problems
+
+
+def _ticket_chain(ticket: dict) -> str:
+    """从申请单重算链路 key；历史坏单不应阻塞整个调度器。"""
+    payload = ticket.get("payload") or {}
+    try:
+        return moves.chain_key(str(payload.get("source") or ""), str(payload.get("dest") or ""))
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def reclaim(store, *, config: Config, issuer=None, log: Callable = print) -> int:
@@ -690,7 +791,10 @@ def reclaim(store, *, config: Config, issuer=None, log: Callable = print) -> int
             continue
         stage = str(ticket.get("move_stage") or "")
         status = str(ticket.get("status") or "")
-        finished = stage in (moves.STAGE_DONE, moves.STAGE_FAILED) or status != t.FULFILLING
+        finished = (
+            stage in (moves.STAGE_DONE, moves.STAGE_FAILED, STAGE_ERROR)
+            or status != t.FULFILLING
+        )
         if not finished:
             continue
         tid = str(ticket.get("id") or "")

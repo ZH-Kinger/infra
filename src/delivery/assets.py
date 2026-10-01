@@ -758,6 +758,33 @@ def cards_state(workspace_id: str, quotas: dict, skipped) -> str:
     return CARDS_UNKNOWN if skipped else CARDS_NO
 
 
+def workspace_choices(creds, region: str, *, user: str = "", transport=None) -> list:
+    rows = _pai_page(creds, region, "/api/v1/workspaces", "Workspaces", transport=transport)
+    quotas, skipped = quotas_by_workspace(creds, (region,), transport=transport)
+    out = []
+    for row in rows:
+        wid = str(row.get("WorkspaceId") or "")
+        if not wid:
+            continue
+        state = cards_state(wid, quotas, skipped)
+        if state == CARDS_NO:
+            continue
+        got = quotas.get(wid) or {}
+        members = _pai_members(creds, region, wid, transport=transport) if user else {}
+        out.append(
+            {
+                "id": wid,
+                "name": str(row.get("WorkspaceName") or wid),
+                "region": region,
+                "member": bool(user and user in {x.get("login") for x in members.values()}),
+                "resource_state": state,
+                "gpu": int(got.get("gpu") or 0),
+                "quotas": list(got.get("quotas") or ()),
+            }
+        )
+    return sorted(out, key=lambda x: (x["name"].lower(), x["id"]))
+
+
 def workspaces_in_use(snapshot: Optional[dict]) -> list:
     """云上实际存在的工作空间：`[{platform, region, id, name}]`。
 

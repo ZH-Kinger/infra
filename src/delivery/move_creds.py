@@ -51,8 +51,7 @@ class MoveCredError(DeliveryError):
 def needed(plan: dict) -> str:
     """这次搬运要不要跨云凭证；要的话返回**源端**是哪朵云。
 
-    同云不走这里：阿里那条源用 RAM 角色（根本没有 AK 要交），
-    火山那条的钥匙从头到尾没离开火山。
+    同云迁移由云服务角色完成，没有数据 AK/SK 下发到远端。
     """
     src = str((plan.get("src") or {}).get("scheme") or "")
     dest = str((plan.get("dest") or {}).get("scheme") or "")
@@ -63,7 +62,7 @@ def needed(plan: dict) -> str:
     return ""
 
 
-def user_name(ticket_id: str) -> str:
+def user_name(ticket_id: str, *, purpose: str = "") -> str:
     """这张单子的源端子账号名。
 
     **按单号定名，不随机。** 随机的话，进程在「建了号还没写回单子」之间挂掉，
@@ -75,7 +74,8 @@ def user_name(ticket_id: str) -> str:
         raise MoveCredError("没有单号，签不出源端凭证")
     # **按外部算**：这把钥匙是交给对方云的迁移服务去拉数据的，会离开我们的边界，
     # 不是发给内部同事的（内部那套现在是 staff-，见 grants.USER_PREFIX）
-    return f"{grants_mod.EXTERNAL_USER_PREFIX}move-{tail}"
+    suffix = "".join(c for c in str(purpose or "") if c.isalnum()).lower()
+    return f"{grants_mod.EXTERNAL_USER_PREFIX}move-{tail}{('-' + suffix) if suffix else ''}"
 
 
 def mint(
@@ -87,6 +87,9 @@ def mint(
     platform: str,
     now: float,
     days: int = DEFAULT_DAYS,
+    caps=CAPS,
+    purpose: str = "",
+    targets: Optional[list] = None,
 ) -> tuple:
     """签一把只读的源端钥匙。返回 `(ak, sk, 子账号名)`。
 
@@ -95,10 +98,18 @@ def mint(
     指不到根因是上一次留下的残留。
     """
     expire = now + days * 86400
-    doc = grants_mod.build_policy(
-        platform, bucket, prefix=prefix, caps=CAPS, not_before=now, expire=expire
-    )
-    user = user_name(ticket_id)
+    if targets:
+        doc = grants_mod.build_policy_many(
+            platform,
+            targets,
+            not_before=now,
+            expire=expire,
+        )
+    else:
+        doc = grants_mod.build_policy(
+            platform, bucket, prefix=prefix, caps=caps, not_before=now, expire=expire
+        )
+    user = user_name(ticket_id, purpose=purpose)
     try:
         cred = issuer.issue_long_term(user, f"面板跨云搬运 {ticket_id}", doc)
     except Exception as exc:  # noqa: BLE001

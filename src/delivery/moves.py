@@ -23,6 +23,7 @@ bot 的编排把任务记在 Redis，30 天 TTL。那对它够用 —— 它要�
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Callable, Optional
 
@@ -45,6 +46,43 @@ class MoveError(DeliveryError):
     """迁移编排出错。"""
 
 
+JIUZHANG_RETURN_TYPES = frozenset({"third-party-data", "internet", "teleop"})
+JIUZHANG_INBOUND_PLATFORMS = frozenset({"aliyun", "turboai", "volcano"})
+
+# 用户给迁移起的名字只用于人和云控制台识别；单号仍会拼进最终任务名，
+# 防止两个申请人写同一个名字时云上任务互相复用。
+_TASK_NAME = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{1,47}\Z")
+
+
+def validate_task_name(value: str) -> str:
+    """校验申请人填写的迁移名称，并返回规范化后的值。"""
+    name = str(value or "").strip()
+    if not _TASK_NAME.fullmatch(name):
+        raise MoveError(
+            "迁移名称只能用英文、数字、点、下划线和横线，需以英文或数字开头，"
+            "长度 2–48 位；建议写成 worldengine-20261001-v1"
+        )
+    return name
+
+
+def _valid_jiuzhang_return_prefix(prefix: str) -> bool:
+    """九章回传必须落在 ``wuji-data-tran/alayanew/<词表类型>/``。"""
+    clean = str(prefix or "").strip("/")
+    parts = clean.split("/")
+    return len(parts) >= 2 and parts[0] == "alayanew" and parts[1] in JIUZHANG_RETURN_TYPES
+
+
+def _valid_jiuzhang_inbound_prefix(prefix: str) -> bool:
+    """九章 GPFS 上已有的其它平台落点。"""
+    clean = str(prefix or "").strip("/")
+    parts = clean.split("/")
+    return (
+        len(parts) >= 4
+        and parts[0] == "wuji-data-tran"
+        and parts[1] in JIUZHANG_INBOUND_PLATFORMS
+    )
+
+
 def plan(source: str, dest: str) -> dict:
     """两个地址 → 用哪条链。纯函数，不碰网络。
 
@@ -60,6 +98,26 @@ def plan(source: str, dest: str) -> dict:
     """
     src, dst = _parse(source, "源"), _parse(dest, "目标")
     pair = f"{src['scheme']}->{dst['scheme']}"
+    # 九章是面板自己的 SSH 迁移引擎。去程直接从杭州 OSS 拉到 GPFS；回程只允许
+    # 落在既定的 wuji-data-tran/alayanew/<词表类型>/ 下，路径按回传桶规范登记。
+    if pair in ("oss->jz", "jz->oss"):
+        if pair == "oss->jz" and not _valid_jiuzhang_inbound_prefix(dst.get("prefix", "")):
+            raise MoveError(
+                "九章目的目录必须使用已有落点，格式为："
+                "jz://jz-b200/wuji-data-tran/<平台>/<数据类型>/<批次+版本>/，"
+                "平台只能是 aliyun、turboai 或 volcano"
+            )
+        if pair == "jz->oss" and (
+            dst["bucket"] != "wuji-data-tran"
+            or not _valid_jiuzhang_return_prefix(dst.get("prefix", ""))
+        ):
+            raise MoveError(
+                "九章回传必须落到 oss://wuji-data-tran/alayanew/ 下的词表目录："
+                "third-party-data、internet 或 teleop"
+            )
+        return {"engine": "jiuzhang", "src": src, "dest": dst, "direction": pair}
+    if pair == "jz->jz":
+        raise MoveError("九章内部目录之间没有面板直连链路")
     # 并行文件系统那两条先判：它们和对象存储之间的组合会被下面的 `dst == oss`
     # 误收进在线迁移分支（`cpfs -> oss` 的目的确实是 oss），而那条链根本搬不了文件系统
     if {src["scheme"], dst["scheme"]} & {"cpfs", "vepfs"}:
@@ -78,6 +136,25 @@ def plan(source: str, dest: str) -> dict:
     else:
         raise MoveError(f"{pair} 这个方向面板还接不了，找管理员用命令行搬")
     return {"engine": engine, "src": src, "dest": dst, "direction": pair}
+
+
+def chain_key(source: str, dest: str) -> str:
+    """返回稳定的物理链路标识，用于同链路串行调度。
+
+    不把目录和批次放进标识：同一条中继链路上的不同目录也必须排队；
+    不同桶端点的直接复制可以并行。调用 ``plan`` 先校验方向，避免非法
+    地址组合通过一个新 key 绕过并发限制。
+    """
+    got = plan(source, dest)
+    src, dst = got["src"], got["dest"]
+    pair = got["direction"]
+    fixed = {
+        "oss->jz": "aliyun-hangzhou->jiuzhang",
+        "jz->oss": "jiuzhang->aliyun-hangzhou",
+    }
+    if pair in fixed:
+        return fixed[pair]
+    return f"{pair}:{src['bucket']}->{dst['bucket']}"
 
 
 def _dataflow(src: dict, dst: dict, pair: str) -> dict:
@@ -147,7 +224,7 @@ def needs_review(size_bytes: int, *, known: bool) -> bool:
     return size_bytes / (1024**4) > REVIEW_TB
 
 
-def job_name(ticket_id: str, attempt: int = 1) -> str:
+def job_name(ticket_id: str, attempt: int = 1, task_name: str = "") -> str:
     """迁移任务名。**用申请单号** —— 两朵云都按名字认任务，
     所以同一张单重复提交不会搬第二遍，而且云上那个任务名能直接对回台账。
 
@@ -166,8 +243,14 @@ def job_name(ticket_id: str, attempt: int = 1) -> str:
     except (TypeError, ValueError):
         nth = 1
     tail = "" if nth <= 1 else f"-r{nth}"
-    # 截的是单号，不是整个串 —— 截整串会把 `-r2` 削掉，于是重试又用回原名
-    return f"panel-{clean[: 60 - len('panel-') - len(tail)]}{tail}"
+    label = str(task_name or "").strip()
+    if label:
+        label = validate_task_name(label)
+        stem = f"{label}-{clean[-16:]}"
+    else:
+        stem = clean
+    # 截的是主体，不是整个串 —— 截整串会把 -r2 削掉，于是重试又用回原名。
+    return f"panel-{stem[: 60 - len('panel-') - len(tail)]}{tail}"
 
 
 def start(ticket: dict, *, submit: Callable, now: Optional[float] = None) -> dict:
@@ -189,7 +272,11 @@ def start(ticket: dict, *, submit: Callable, now: Optional[float] = None) -> dic
     payload = ticket.get("payload") or {}
     got = plan(str(payload.get("source") or ""), str(payload.get("dest") or ""))
     nth = int(ticket.get("move_attempt") or 1)
-    name = job_name(str(ticket.get("id") or ""), nth)
+    name = job_name(
+        str(ticket.get("id") or ""),
+        nth,
+        str(payload.get("task_name") or payload.get("name") or ""),
+    )
     ref = submit(got, name)
     return {
         "move_stage": STAGE_RUNNING,

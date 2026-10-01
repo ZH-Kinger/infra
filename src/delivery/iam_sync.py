@@ -750,6 +750,49 @@ def cached_reconcile(paths: SyncPaths) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
+def mark_reconciled(paths: SyncPaths, union_id: str, app: str) -> None:
+    """从对账缓存移除刚刚已经回收的离职项。
+
+    `confirm_reclaim` 已经现读 IAM 并删除属性；如果仍保留旧缓存，管理员刷新页面后会再次
+    看见同一个「确认离职并回收」按钮。缓存只是页面快照，成功动作必须同步折叠这条旧结果。
+    读不到或写不了缓存时不影响真实回收结果。
+    """
+    report = cached_reconcile(paths)
+    if not isinstance(report, dict):
+        return
+    uid = str(union_id or "")
+    name = str(app or "")
+    changed = False
+    for entry in report.get("apps") or []:
+        before = list(entry.get("drift") or [])
+        entry["drift"] = [
+            row
+            for row in before
+            if not (
+                row.get("kind") == "inactive"
+                and str(row.get("union_id") or "") == uid
+                and str(row.get("app") or entry.get("app") or "") == name
+            )
+        ]
+        changed = changed or len(entry["drift"]) != len(before)
+    if not changed:
+        return
+    report["total"] = sum(
+        len(entry.get("drift") or []) + len(entry.get("blind") or [])
+        for entry in report.get("apps") or []
+    )
+    held = load_snooze(paths)
+    report["pending"] = sum(
+        1
+        for entry in report.get("apps") or []
+        for row in entry.get("drift") or []
+        if row.get("kind") == "inactive"
+        and f"{entry.get('app')}/{row.get('union_id')}" not in held
+    )
+    with contextlib.suppress(DeliveryError, OSError):
+        _write_private_json(_side_file(paths, RECONCILE_CACHE), report)
+
+
 def _cloud_users(paths: SyncPaths, scope: str):
     """某个云账号上**现在还存在**的子账号登录名。拿不到返回 None（那一类就整类不判）。
 

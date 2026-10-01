@@ -290,3 +290,48 @@ def build_policy(
     doc = {"Statement": stmts}
     # 阿里要 Version，火山**不能有**这个字段
     return {"Version": "1", **doc} if spec.versioned else doc
+
+
+def build_policy_many(
+    platform: str,
+    targets: Iterable[dict],
+    *,
+    not_before: float,
+    expire: float,
+    source_ips: Optional[Iterable[str]] = None,
+) -> dict:
+    """把一张迁移单需要的多个桶/前缀合成**一份**最小策略。
+
+    迁移链可能同时读杭州源前缀、写新加坡中转前缀。凭证仍然只能有一对 AK/SK，
+    但每个资源单独生成 Allow 条目，不能把桶权限合并成整桶通配符。
+    """
+    rows = list(targets or ())
+    if not rows:
+        raise GrantError("迁移凭证至少要有一个资源范围")
+    statements = []
+    seen = set()
+    deny = None
+    for row in rows:
+        if not isinstance(row, dict):
+            raise GrantError("迁移资源范围格式不对")
+        doc = build_policy(
+            platform,
+            str(row.get("bucket") or ""),
+            prefix=str(row.get("prefix") or ""),
+            caps=tuple(row.get("caps") or ()),
+            not_before=not_before,
+            expire=expire,
+            source_ips=source_ips,
+        )
+        for statement in doc.get("Statement") or ():
+            if statement.get("Effect") == "Deny":
+                deny = deny or statement
+                continue
+            marker = json.dumps(statement, sort_keys=True, ensure_ascii=False)
+            if marker not in seen:
+                seen.add(marker)
+                statements.append(statement)
+    if deny is not None:
+        statements.append(deny)
+    spec = platforms.storage_of(platform)
+    return {"Version": "1", "Statement": statements} if spec.versioned else {"Statement": statements}

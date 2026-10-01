@@ -345,6 +345,11 @@ def _service_tokens() -> dict:
         stamp = (path, st.st_mtime_ns, st.st_size)
     except OSError:
         return {}
+    # This file contains bearer credentials. A group/world-readable copy turns
+    # a local read permission into access to the external service, so fail
+    # closed instead of silently accepting an unsafe deployment.
+    if st.st_mode & 0o077:
+        return {}
     with _pickup_lock:
         cached = _service_token_cache.get("v")
         if cached is not None and cached[0] == stamp:
@@ -1078,6 +1083,9 @@ class Backend:
         self.approval_path = approval_path
         self._feishu_token = feishu_token
         self._executor = executor or executor_from_env
+        # 工作空间发现会访问 PAI 的列表、配额和成员接口。短 TTL 只合并连续点击造成的
+        # 重复请求，过期后仍会动态重新发现，不会把新空间永久缓存住。
+        self._workspace_choice_cache: dict = {}
         # 凭证发放身份：和开通身份是两把不同的 AK（云上策略分开收窄）。
         # 测试注入自定义 executor 时沿用同一个，免得每个用例都要再造一份
         self._issuer = (
@@ -1443,8 +1451,33 @@ class Backend:
                 notify=self._notify,
                 executor_ready=provision_executor_configured,
                 issuer_ready=provision_issuer_configured,
+                workspace_choices=self.workspace_choices,
             )
         return self._flows
+
+    def workspace_choices(self, platform: str, account: str, region: str, user: str = "") -> list:
+        if platform != "aliyun" or not account or not region:
+            return []
+        # 工作空间列表按调用者成员关系裁剪。优先用资产采集身份，才能看到
+        # 申请人尚未加入的空间；执行身份只作为旧部署的回退。
+        from .clouds import aliyun
+
+        ak = os.environ.get("ALIYUN_ACCESS_KEY_ID", "")
+        sk = os.environ.get("ALIYUN_ACCESS_KEY_SECRET", "")
+        creds = aliyun.Credentials(ak, sk) if ak and sk else None
+        if creds is None:
+            ex = self._executor(platform, account)
+            creds = getattr(ex, "_creds", None)
+        if creds is None:
+            raise RuntimeError("没有配置工作空间发现身份")
+        cache_key = (platform, account, region, user)
+        now = time.monotonic()
+        cached = self._workspace_choice_cache.get(cache_key)
+        if cached and now - cached[0] < 30:
+            return list(cached[1])
+        choices = list(assets_mod.workspace_choices(creds, region, user=user))
+        self._workspace_choice_cache[cache_key] = (now, choices)
+        return list(choices)
 
     def _register_manual(
         self, platform: str, account: str, user: dict, actor: str, ticket_id: str
@@ -1654,6 +1687,36 @@ def make_handler(
             )
         return card_hook_mod.toast("success", f"已删除 {who}，数据没动")
 
+    def _card_action_with_deadline(open_id: str, value: dict, *, seconds: float = 2.0) -> dict:
+        """在飞书的回调期限内尽量返回结果，慢的云操作转到后台继续。
+
+        飞书要求卡片回调很快返回。阿里云删 RAM 用户可能要做多次 API 调用，
+        如果同步等完再回包，操作其实已经成功，飞书却会先断开连接并把它显示成失败。
+        快路径保留原来的成功/错误提示；超过期限则先确认收到，后台线程完成真实操作。
+        """
+        done = threading.Event()
+        result: dict = {}
+        timed_out = False
+
+        def run() -> None:
+            try:
+                result["value"] = _card_action(open_id, value)
+            except Exception as exc:  # noqa: BLE001 — 主线程仍会把已完成的错误转成 toast
+                result["error"] = exc
+                if timed_out:
+                    print(f"[card] 后台执行失败 {type(exc).__name__}: {exc}", file=sys.stderr)
+            finally:
+                done.set()
+
+        threading.Thread(target=run, name="feishu-card-action", daemon=True).start()
+        if not done.wait(seconds):
+            timed_out = True
+            print(f"[card] 执行超过 {seconds:.1f}s，已转后台", file=sys.stderr)
+            return card_hook_mod.toast("info", "已收到，正在后台处理，稍后到面板查看")
+        if "error" in result:
+            raise result["error"]
+        return result["value"]
+
     def _claim_resources(platform: str, account: str, ids: list, email: str) -> None:
         """资源登记完把实例指给申请人。**开通那一刻是唯一确定主人的时机**，错过只能靠猜。
 
@@ -1833,7 +1896,10 @@ def make_handler(
                 return self._send(
                     302,
                     b"",
-                    headers={"Location": "/", "Set-Cookie": f"{COOKIE_NAME}=; Max-Age=0; Path=/"},
+                    headers={
+                        "Location": "/",
+                        "Set-Cookie": _session_cookie("", base_url, max_age=0),
+                    },
                 )
             return self._send(404, _page("404", "<h1>没有这个页面</h1>"))
 
@@ -2435,6 +2501,9 @@ def make_handler(
                         actor=who.user.union_id,
                         log=_log,
                     )
+                    # `reconcile` 展示的是落盘缓存。真实属性已经删掉后要立刻折叠旧项，
+                    # 否则刷新页面仍会让管理员再次确认同一个离职人。
+                    iam_sync.mark_reconciled(paths, row.get("union_id", ""), row.get("app", ""))
                     scope = next((k for k, v in iam_api.APPS.items() if v == row["app"]), "")
                     platform, _, account = scope.partition("/")
                     user = offboard_mod.cloud_user(row.get("previous") or row.get("value"))
@@ -2572,7 +2641,8 @@ def make_handler(
             **三道门**（见 card_hook 的说明）：验签（没配 Encrypt Key 一律拒）、
             Verification Token、点的人必须在管理员名单里（open_id 换 union_id 再比）。
 
-            **3 秒内必须回**，所以这里只做一件事就返回，不去刷新卡片。
+            **3 秒内必须回**。云端删号可能较慢，超过期限会先确认收到，再由后台线程完成，
+            避免操作已经成功却因为飞书连接超时显示成失败。
             """
             raw, sent = self._raw_body(64 * 1024)
             if raw is None:
@@ -2606,7 +2676,7 @@ def make_handler(
                 return self._json(200, card_hook_mod.toast("info", "刚刚已经处理过了"))
             who, value = card_hook.action(body)
             try:
-                return self._json(200, _card_action(who, value))
+                return self._json(200, _card_action_with_deadline(who, value))
             except DeliveryError as exc:
                 return self._json(200, card_hook_mod.toast("error", str(exc).splitlines()[0]))
             except Exception as exc:  # noqa: BLE001
@@ -3319,13 +3389,20 @@ def make_handler(
             session_id = secrets.token_urlsafe(32)
             store.sessions[session_id] = _WebSession(user=user)
             store.save()
-            cookie = (
-                f"{COOKIE_NAME}={session_id}; Path=/; HttpOnly; SameSite=Lax; "
-                f"Max-Age={_SESSION_TTL}"
-            )
+            cookie = _session_cookie(session_id, base_url, max_age=_SESSION_TTL)
             return self._send(302, b"", headers={"Location": "/", "Set-Cookie": cookie})
 
     return Handler
+
+
+def _session_cookie(session_id: str, base_url: str, *, max_age: int) -> str:
+    """Cookie security follows the configured public URL, never a request header."""
+    cookie = (
+        f"{COOKIE_NAME}={session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}"
+    )
+    if urllib.parse.urlsplit(base_url).scheme.lower() == "https":
+        cookie += "; Secure"
+    return cookie
 
 
 def _tenant_token_cache(app_id: str, app_secret: str) -> Callable[[], str]:
