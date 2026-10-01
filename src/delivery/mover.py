@@ -402,6 +402,26 @@ def _jiuzhang_credentials(
     return {"access_key_id": key, "access_key_secret": secret}
 
 
+def _xiwang_credentials(plan: dict, ticket: dict, *, config: Config, issuer=None, minted=None) -> dict:
+    """为曦望双端同步签发一把同时覆盖源读和中转写/读的最小凭证。"""
+    from . import grants
+
+    src, dest = plan["src"], plan["dest"]
+    account = _account_for("aliyun", ticket, config)
+    make = issuer if issuer is not None else _issuer_from_env
+    targets = [
+        {"bucket": src["bucket"], "prefix": src.get("prefix", ""), "caps": (grants.CAP_LIST, grants.CAP_DOWNLOAD)},
+        {"bucket": dest["bucket"], "prefix": dest.get("prefix", ""), "caps": (grants.CAP_LIST, grants.CAP_DOWNLOAD, grants.CAP_WRITE)},
+    ]
+    key, secret, user = move_creds.mint(
+        make("aliyun", account), ticket_id=str(ticket.get("id") or ""), bucket=src["bucket"],
+        prefix=src.get("prefix", ""), platform="aliyun", now=time.time(), days=config.cred_days,
+        targets=targets, purpose="xiwang",
+    )
+    _remember(minted, user, "aliyun")
+    return {"access_key_id": key, "access_key_secret": secret}
+
+
 def _submit(
     plan: dict,
     name: str,
@@ -436,6 +456,12 @@ def _submit(
             config=jiuzhang.Config.from_env(),
             credentials=credentials,
         )
+
+    if plan["engine"] == "xiwang":
+        from . import xiwang
+
+        credentials = _xiwang_credentials(plan, ticket, config=config, issuer=issuer, minted=minted)
+        return xiwang.submit(plan, name, config=xiwang.Config.from_env(), credentials=credentials)
 
     if plan["engine"] in ("nas", "vepfs"):
         # 预热 / 沉降。**不跨云，也就没有钥匙要交出去** —— 两头都在同一朵云里
@@ -528,6 +554,10 @@ def _poll(ticket: dict, *, config: Config, executor=None) -> dict:
         from . import jiuzhang
 
         return jiuzhang.poll(job, config=jiuzhang.Config.from_env())
+    if engine == "xiwang":
+        from . import xiwang
+
+        return xiwang.poll(job, config=xiwang.Config.from_env())
     if engine in ("nas", "vepfs"):
         return _poll_dataflow(ticket, job, engine, config=config, executor=executor)
     if engine == "mgw":
@@ -606,6 +636,8 @@ def start_one(
     plan = _locate(
         moves.plan(str(payload.get("source") or ""), str(payload.get("dest") or "")), ticket
     )
+    if str(payload.get("migration_panel") or "") == "xiwang":
+        plan["engine"] = "xiwang"
     account = str((ticket.get("template") or {}).get("account") or "")
 
     if not ticket.get("move_reviewed"):
@@ -641,6 +673,7 @@ def start_one(
                 minted=minted,
             ),
             now=now,
+            engine=("xiwang" if str((ticket.get("payload") or {}).get("migration_panel") or "") == "xiwang" else ""),
         )
     except Exception as exc:
         if minted and plan.get("engine") == "jiuzhang":

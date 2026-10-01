@@ -40,6 +40,7 @@ class Config:
     source_region: str = "cn-hangzhou"
     relay_prefix: str = "aliyun-hz/"
     lock_file: str = "/tmp/wuji-panel-xiwang-transfer.lock"
+    work_root: str = "/tmp"
 
     @classmethod
     def from_env(cls, environ: Optional[dict] = None):
@@ -62,6 +63,7 @@ class Config:
             source_region=str(env.get("XIWANG_SOURCE_REGION", cls.source_region) or cls.source_region),
             relay_prefix=str(env.get("XIWANG_RELAY_PREFIX", cls.relay_prefix) or cls.relay_prefix).strip("/") + "/",
             lock_file=str(env.get("XIWANG_LOCK_FILE", cls.lock_file) or cls.lock_file),
+            work_root=str(env.get("XIWANG_WORK_ROOT", cls.work_root) or cls.work_root).rstrip("/"),
         )
 
 
@@ -108,29 +110,35 @@ def commands(plan: dict, config: Config, job_id: str) -> dict:
     relay = _safe(dst.get("prefix", ""), "中转目录")
     target = _remote_dest(config, relay)
     marker = f"{relay.rstrip('/')}/.panel-done"
+    config_path = _config_file(job_id)
+    cfg = f"--config-file {shlex.quote(config_path)}"
     source_uri = f"oss://{bucket}/{source}/"
     relay_uri = f"oss://{relay_bucket}/{relay}/"
     sg = (
         f"mkdir -p \"$WD\" && trap 'rm -rf -- \"$WD/ckpt\"' EXIT && "
         f"ossutil cp -r {shlex.quote(source_uri)} {shlex.quote(relay_uri)} "
+        f"{cfg} "
         f"--endpoint {shlex.quote(config.source_endpoint)} --region {shlex.quote(config.source_region)} "
         f"--job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\" && "
         f"printf done > \"$WD/done\" && "
         f"ossutil cp /dev/null {shlex.quote('oss://' + relay_bucket + '/' + marker)} "
+        f"{cfg} "
         f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)}; "
         f"rc=$?; printf '%s\\n' \"$rc\" > \"$WD/relay.rc\"; exit \"$rc\""
     )
     xw = (
-        f"mkdir -p {shlex.quote(target)} \"$WD\"; trap 'rm -rf -- \"$WD/ckpt\"' EXIT; "
-        f"while :; do "
+        f"mkdir -p {shlex.quote(target)} \"$WD\"; trap 'rm -rf -- \"$WD/ckpt\"' EXIT; i=0; "
+        f"while [ $i -lt 8640 ]; do "
         f"ossutil cp -r {shlex.quote(relay_uri)} {shlex.quote(target + '/')} "
+        f"{cfg} "
         f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} "
         f"--job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\" -u; "
         f"ossutil ls {shlex.quote('oss://' + relay_bucket + '/' + marker)} "
+        f"{cfg} "
         f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} >/dev/null 2>&1 && break; "
-        f"sleep 10; done"
+        f"i=$((i + 1)); sleep 10; done; exit 75"
     )
-    return {"sg": sg, "xw": xw, "target": target, "marker": marker, "config_path": _config_file(job_id)}
+    return {"sg": sg, "xw": xw, "target": target, "marker": marker, "config_path": config_path}
 
 
 def validate_config(config: Config) -> None:
@@ -143,3 +151,110 @@ def validate_config(config: Config) -> None:
             raise XiwangError(f"{label}不可读：{exc}") from exc
         if mode & 0o077:
             raise XiwangError(f"{label}权限必须是 0600 或 0400")
+
+
+def _job_dir(config: Config, job_id: str) -> str:
+    clean = re.sub(r"[^A-Za-z0-9_-]", "", str(job_id or ""))
+    if not clean:
+        raise XiwangError("曦望任务号为空")
+    return f"{config.work_root}/wuji-panel-xiwang-{clean}"
+
+
+def _connect(host: str, port: int, user: str, key_file: str, host_key: str):
+    try:
+        import paramiko
+    except ImportError as exc:  # pragma: no cover
+        raise XiwangError("曦望链路需要 paramiko") from exc
+    if not host or not key_file or not host_key:
+        raise XiwangError("曦望链路缺少 SSH 主机、私钥或 host key")
+    mode = stat.S_IMODE(os.stat(key_file).st_mode)
+    if mode & 0o077:
+        raise XiwangError("曦望 SSH 私钥权限必须是 0600 或 0400")
+    fields = host_key.split()
+    if len(fields) < 2:
+        raise XiwangError("曦望 host key 格式不对")
+    kind, encoded = fields[-2], fields[-1]
+    ctor = {"ssh-ed25519": paramiko.Ed25519Key, "ssh-rsa": paramiko.RSAKey}.get(kind)
+    if ctor is None:
+        raise XiwangError(f"不支持的曦望 host key：{kind}")
+    client = paramiko.SSHClient()
+    client.get_host_keys().add(f"[{host}]:{port}" if port != 22 else host, kind, ctor(data=__import__("base64").b64decode(encoded)))
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    try:
+        client.connect(host, port=port, username=user, key_filename=key_file, timeout=20, banner_timeout=20, auth_timeout=20, allow_agent=False, look_for_keys=False)
+    except Exception as exc:
+        client.close()
+        raise XiwangError(f"连接曦望链路主机失败：{exc}") from exc
+    return client
+
+
+def _exec(client, script: str, timeout: int = 30) -> tuple[int, str, str]:
+    _, out, err = client.exec_command(script, timeout=timeout)
+    return out.channel.recv_exit_status(), out.read().decode("utf-8", "replace"), err.read().decode("utf-8", "replace")
+
+
+def _write_config(client, path: str, text: str) -> None:
+    sftp = client.open_sftp()
+    try:
+        with sftp.open(path, "w") as fh:
+            fh.write(text)
+        sftp.chmod(path, 0o600)
+    finally:
+        sftp.close()
+
+
+def submit(plan: dict, job_id: str, *, config: Optional[Config] = None, credentials: Optional[dict] = None) -> str:
+    config = config or Config.from_env()
+    validate_config(config)
+    got = commands(plan, config, job_id)
+    work = _job_dir(config, job_id)
+    ini = _oss_ini(credentials or {}, endpoint=config.relay_endpoint)
+    path = got["config_path"]
+    clients = []
+    try:
+        for host, port, user, key, script in (
+            (config.sg_host, config.sg_port, config.sg_user, config.sg_key_file, got["sg"]),
+            (config.xw_host, config.xw_port, config.xw_user, config.xw_key_file, got["xw"]),
+        ):
+            client = _connect(host, port, user, key, config.sg_host_key if host == config.sg_host else config.xw_host_key)
+            clients.append(client)
+            _write_config(client, path, ini)
+            encoded = base64.b64encode((f"set -eu\nWD={shlex.quote(work)}\nexport WD\n{script}\nrc=$?; printf '%s\\n' \"$rc\" > \"$WD/{'relay' if host == config.sg_host else 'pull'}.rc\"\n").encode()).decode()
+            rc, out, err = _exec(client, f"mkdir -p {shlex.quote(work)}; nohup bash -c \"$(echo {encoded} | base64 -d)\" > {shlex.quote(work)}/{'relay' if host == config.sg_host else 'pull'}.log 2>&1 & echo $!", timeout=30)
+            if rc != 0 or not out.strip():
+                raise XiwangError(f"曦望 worker 下发失败：{(err or out)[:240]}")
+        return str(job_id)
+    except Exception:
+        for client in clients:
+            try:
+                _exec(client, f"rm -f -- {shlex.quote(path)}")
+            finally:
+                client.close()
+        raise
+    finally:
+        for client in clients:
+            client.close()
+
+
+def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
+    config = config or Config.from_env()
+    work = _job_dir(config, job_id)
+    results = []
+    for host, port, user, key, host_key, marker in (
+        (config.sg_host, config.sg_port, config.sg_user, config.sg_key_file, config.sg_host_key, "relay"),
+        (config.xw_host, config.xw_port, config.xw_user, config.xw_key_file, config.xw_host_key, "pull"),
+    ):
+        client = _connect(host, port, user, key, host_key)
+        try:
+            rc, out, err = _exec(client, f"cat {shlex.quote(work)}/{marker}.rc 2>/dev/null || true")
+            results.append((marker, out.strip()))
+        finally:
+            client.close()
+    relay, pull = dict(results).get("relay", ""), dict(results).get("pull", "")
+    if pull == "0" and relay == "0":
+        return {"status": "DONE", "done": True, "failed": False, "error": ""}
+    if relay.isdigit() and relay != "0":
+        return {"status": "FAILED", "done": False, "failed": True, "error": f"新加坡 worker 退出码 {relay}"}
+    if pull.isdigit() and pull != "0":
+        return {"status": "FAILED", "done": False, "failed": True, "error": f"曦望 worker 退出码 {pull}"}
+    return {"status": "RUNNING", "done": False, "failed": False, "error": ""}

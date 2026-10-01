@@ -253,7 +253,7 @@ def job_name(ticket_id: str, attempt: int = 1, task_name: str = "") -> str:
     return f"panel-{stem[: 60 - len('panel-') - len(tail)]}{tail}"
 
 
-def start(ticket: dict, *, submit: Callable, now: Optional[float] = None) -> dict:
+def start(ticket: dict, *, submit: Callable, now: Optional[float] = None, engine: str = "") -> dict:
     """把任务提上去。返回要写回单子的字段。
 
     `submit(plan, job)` 由调用方注入（真跑时是 `mgw.submit` / `dms.submit`，
@@ -287,7 +287,7 @@ def start(ticket: dict, *, submit: Callable, now: Optional[float] = None) -> dic
         "move_job": name,
         "move_ref": str(ref or name),
         "move_attempt": nth,
-        "move_engine": got["engine"],
+        "move_engine": engine or got["engine"],
         "move_started_ts": at,
         "move_updated_ts": at,
         "move_polled_ts": at,
