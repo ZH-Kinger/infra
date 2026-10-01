@@ -146,6 +146,7 @@ def commands(plan: dict, config: Config, job_id: str, include_prefixes=None) -> 
         f"{cfg} "
         f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} "
         f"--job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\" -u; "
+        f"{{ du -sb {shlex.quote(target)} 2>/dev/null | awk '{{print $1}}'; find {shlex.quote(target)} -type f 2>/dev/null | wc -l; }} > \"$WD/progress\"; "
         f"ossutil ls {shlex.quote('oss://' + relay_bucket + '/' + marker)} "
         f"{cfg} "
         f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} >/dev/null 2>&1 && break; "
@@ -259,15 +260,20 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
     ):
         client = _connect(host, port, user, key, host_key)
         try:
-            rc, out, err = _exec(client, f"cat {shlex.quote(work)}/{marker}.rc 2>/dev/null || true")
-            results.append((marker, out.strip()))
+            rc, out, err = _exec(client, f"cat {shlex.quote(work)}/{marker}.rc 2>/dev/null || true; echo PROGRESS; cat {shlex.quote(work)}/progress 2>/dev/null || true")
+            raw, _, progress = out.partition("PROGRESS\n")
+            results.append((marker, raw.strip(), progress.strip()))
         finally:
             client.close()
-    relay, pull = dict(results).get("relay", ""), dict(results).get("pull", "")
+    info = {row[0]: row[1:] for row in results}
+    relay, pull = info.get("relay", ("", ""))[0], info.get("pull", ("", ""))[0]
+    progress = info.get("pull", ("", ""))[1].splitlines()
+    bytes_done = int(progress[0]) if progress and progress[0].isdigit() else 0
+    objects_done = int(progress[1]) if len(progress) > 1 and progress[1].isdigit() else 0
     if pull == "0" and relay == "0":
-        return {"status": "DONE", "done": True, "failed": False, "error": ""}
+        return {"status": "DONE", "done": True, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done}
     if relay.isdigit() and relay != "0":
-        return {"status": "FAILED", "done": False, "failed": True, "error": f"新加坡 worker 退出码 {relay}"}
+        return {"status": "FAILED", "done": False, "failed": True, "error": f"新加坡 worker 退出码 {relay}", "bytes": bytes_done, "objects": objects_done}
     if pull.isdigit() and pull != "0":
-        return {"status": "FAILED", "done": False, "failed": True, "error": f"曦望 worker 退出码 {pull}"}
-    return {"status": "RUNNING", "done": False, "failed": False, "error": ""}
+        return {"status": "FAILED", "done": False, "failed": True, "error": f"曦望 worker 退出码 {pull}", "bytes": bytes_done, "objects": objects_done}
+    return {"status": "RUNNING", "done": False, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done}

@@ -983,10 +983,12 @@ export function requestRoutes(ctx) {
     if (r.status === "rejected") nodes.push(h("div", { class: "banner warn" }, "审批没有通过。可以在飞书里查看审批意见，调整后重新申请。"));
     if (admin && needsLink(r)) nodes.push(h("div", { class: "banner warn" }, h("b", {}, "新账号还没对应到申请人。"), " 请在「人员与名册」里把这个子账号确认给申请人，否则他之后申请权限时选不到这个账号。 ", h("a", { href: "#admin" }, "去人员与名册 →")));
     if (r.status === "done" && r.result) nodes.push(h("div", { class: "banner good" }, h("b", {}, r.kind === "credential" ? "凭证已发放。" : "已开通。"), " ", r.result));
-    if (r.status === "fulfilling") nodes.push(h("div", { class: "banner" }, h("b", {}, "审批已通过，等待开通。"),
+    if (r.status === "fulfilling") nodes.push(h("div", { class: `banner ${r.kind === "transfer" && r.move_stage === "running" ? "good" : ""}` }, h("b", {}, r.kind === "transfer" && r.move_stage === "running" ? "数据正在传输。" : "审批已通过，等待开通。"),
       isManualAccount(r)
         ? ` 面板开不了${PLATFORM_NAME[(r.template || {}).platform || r.platform] || "这个平台"}的号，要管理员去它的控制台手工建。建好之后这里会更新。`
-        : " 这类资源由管理员按 IaC 流程创建，面板不直接创建。开通后这里会更新。"));
+        : r.kind === "transfer" && r.move_stage === "running"
+          ? ` 已处理 ${Number(r.move_objects || 0).toLocaleString()} 个对象，${formatBytes(r.move_bytes || 0)}；后台会持续刷新。`
+          : " 这类资源由管理员按 IaC 流程创建，面板不直接创建。开通后这里会更新。"));
     if (r.kind === "credential" && ["done", "revoked"].includes(r.status)) nodes.push(h("div", { class: "banner" }, h("b", {}, "查看凭证的地址在飞书审批的评论里。"), " 那个链接可以反复打开，每次打开都会记在下面的事件里。面板存的是密文，自己也解不开。"));
 
     const actions = h("div", { class: "actions" });
@@ -1031,6 +1033,7 @@ export function requestRoutes(ctx) {
       r.kind === "transfer" && r.move_stage ? ["迁移进度", transferProgress(r)] : null,
       r.kind === "transfer" && r.move_objects !== undefined ? ["已处理对象", `${Number(r.move_objects || 0).toLocaleString()} 个`] : null,
       r.kind === "transfer" && r.move_bytes !== undefined ? ["已处理数据", formatBytes(r.move_bytes)] : null,
+      r.kind === "transfer" && r.move_speed_bps ? ["当前速度", `${formatBytes(r.move_speed_bps)}/秒`] : null,
       r.kind === "transfer" && r.move_error ? ["迁移提示", r.move_error] : null,
       r.template.policies && r.template.policies.length ? ["授予的权限", policyList(r.template.policies)] : null,
       ["申请理由", r.reason],

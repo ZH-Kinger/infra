@@ -722,6 +722,11 @@ def advance_one(
 ) -> dict:
     """推进一张在途的单。返回要写回单子的字段（没变化就空）。"""
     status = _poll(ticket, config=config, executor=executor)
+    if status.get("bytes") is not None:
+        previous = int(ticket.get("move_bytes") or 0)
+        elapsed = float((now or time.time()) - float(ticket.get("move_updated_ts") or ticket.get("move_started_ts") or 0))
+        if elapsed > 0 and int(status.get("bytes") or 0) >= previous:
+            status["speed_bps"] = int((int(status.get("bytes") or 0) - previous) / elapsed)
     return moves.advance(ticket, status, now=now)
 
 
