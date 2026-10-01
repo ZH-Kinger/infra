@@ -445,3 +445,13 @@ CLI 和浏览器用同一个客户端，令牌的 audience 一致，代理走主
 ## 回退
 
 去掉 `DELIVERY_AUTH=proxy`，重新配飞书应用环境变量，访问面板端口即可。
+# 曦望同步上线前检查
+
+曦望同步需要两台远端机器的固定 host key 和 SSH 私钥。新加坡 ECS 的私钥放到
+`/etc/delivery/xiwang/sg_id_ed25519`，曦望私钥放到 `/etc/delivery/xiwang/id_ed25519`，
+权限只能是 `0600` 或 `0400`，由 `delivery` 用户读取。把对应的 `XIWANG_*` 变量加入
+`/etc/delivery/panel.env` 后，先用小目录跑一张迁移单，再开启定时器。
+
+中转桶建议配置 3 天生命周期规则清理 `aliyun-hz/` 下的历史数据；worker 只清理本地
+checkpoint，不申请删除 OSS 对象的权限。每张单只有一把临时 AK/SK，成功或失败都会由
+面板撤销，策略只覆盖杭州源前缀和新加坡中转前缀。
