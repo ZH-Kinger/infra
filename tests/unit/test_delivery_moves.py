@@ -11,6 +11,31 @@ from delivery.errors import DeliveryError
 
 
 class PlanTests(unittest.TestCase):
+    def test_jiuzhang_round_trip_uses_the_dedicated_engine(self):
+        forward = moves.plan(
+            "oss://wuji-bucket-hangzhou/raw/20260930-run/",
+            "jz://jz-b200/wuji-data-tran/aliyun/third-party-data/20260930-run-v1/",
+        )
+        self.assertEqual(forward["engine"], "jiuzhang")
+        backward = moves.plan(
+            "jz://jz-b200/processed/20260930-run/",
+            "oss://wuji-data-tran/alayanew/third-party-data/supplier/20260930-run/",
+        )
+        self.assertEqual(backward["engine"], "jiuzhang")
+
+    def test_jiuzhang_return_cannot_write_a_primary_bucket_directly(self):
+        with self.assertRaisesRegex(DeliveryError, "wuji-data-tran/alayanew"):
+            moves.plan(
+                "jz://jz-b200/processed/run/",
+                "oss://wuji-processed-hz/processed/run/",
+            )
+        with self.assertRaisesRegex(DeliveryError, "wuji-data-tran/alayanew"):
+            moves.plan("jz://jz-b200/processed/run/", "oss://wuji-data-tran/staging/REQ-1/")
+
+    def test_jiuzhang_internal_copy_is_refused(self):
+        with self.assertRaises(DeliveryError):
+            moves.plan("jz://jz-b200/a/", "jz://jz-b200/b/")
+
     def test_into_oss_goes_to_the_alibaba_service(self):
         for src in ("oss://a/x/", "tos://a/x/"):
             got = moves.plan(src, "oss://b/y/")
@@ -79,6 +104,18 @@ class ReviewGateTests(unittest.TestCase):
 
 
 class JobNameTests(unittest.TestCase):
+    def test_user_name_is_visible_but_ticket_keeps_jobs_unique(self):
+        one = moves.job_name("REQ-1", task_name="worldengine-20261001-v1")
+        two = moves.job_name("REQ-2", task_name="worldengine-20261001-v1")
+        self.assertNotEqual(one, two)
+        self.assertIn("worldengine-20261001-v1", one)
+
+    def test_user_name_has_a_safe_small_alphabet(self):
+        with self.assertRaises(DeliveryError):
+            moves.validate_task_name("../secrets")
+        with self.assertRaises(DeliveryError):
+            moves.validate_task_name("中文名称")
+
     def test_it_comes_from_the_ticket_id(self):
         """迁移服务按名字幂等，所以重试同一张单不会搬第二遍，
         而且云上那个任务名能直接对回台账。"""

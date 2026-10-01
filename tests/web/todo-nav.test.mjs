@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 const REPO = fileURLToPath(new URL("../..", import.meta.url));
 const APP = readFileSync(`${REPO}src/delivery/web/app.js`, "utf8");
 const HTML = readFileSync(`${REPO}src/delivery/web/index.html`, "utf8");
+const CSS = readFileSync(`${REPO}src/delivery/web/app.css`, "utf8");
 
 const TAB = "admin-todo";
 const HASH = "#admin/todo";
@@ -77,6 +78,13 @@ print(json.dumps(sorted(server._STATIC)))`,
   const paths = JSON.parse(out);
   assert.ok(paths.length > 5, `_STATIC 只有 ${paths.length} 条，读错了`);
   assert.ok(paths.includes("/todo.js"), `server._STATIC 里没有 /todo.js：${paths.join(", ")}`);
+});
+
+test("待办行使用全局留白和分隔线变量，不会贴住卡片边框", () => {
+  const row = CSS.match(/\.todo-row\{[^}]+\}/)?.[0] || "";
+  assert.match(row, /padding:\.7rem var\(--gutter\)/);
+  assert.match(row, /border-top:1px solid var\(--hair\)/);
+  assert.doesNotMatch(row, /var\(--(?:pad-x|line)\)/);
 });
 
 test("app.js 引的每个页面模块都在静态白名单里", () => {

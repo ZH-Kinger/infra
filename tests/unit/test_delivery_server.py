@@ -221,6 +221,25 @@ class ExchangeEndpointTests(unittest.TestCase):
 
 
 class SecurityPropertyTests(unittest.TestCase):
+    def test_https_login_and_logout_cookie_has_secure_flag(self):
+        from delivery.server import _session_cookie
+
+        for sid, max_age in (("test-session", 28800), ("", 0)):
+            cookie = http.cookies.SimpleCookie()
+            cookie.load(_session_cookie(sid, "https://cloud.example.test", max_age=max_age))
+            session = cookie[COOKIE_NAME]
+            self.assertTrue(session["secure"])
+            self.assertTrue(session["httponly"])
+            self.assertEqual(session["samesite"], "Lax")
+            self.assertEqual(session["max-age"], str(max_age))
+
+    def test_local_http_cookie_remains_usable(self):
+        from delivery.server import _session_cookie
+
+        cookie = http.cookies.SimpleCookie()
+        cookie.load(_session_cookie("test-session", "http://127.0.0.1", max_age=28800))
+        self.assertFalse(cookie[COOKIE_NAME]["secure"])
+
     def test_handler_does_not_log_callback_urls(self):
         import inspect
 
@@ -237,13 +256,20 @@ class SecurityPropertyTests(unittest.TestCase):
         self.assertEqual(sig.parameters["host"].default, "127.0.0.1")
 
     def test_session_cookie_is_httponly_and_samesite(self):
-        import inspect
-
-        from delivery import server as mod
-
-        source = inspect.getsource(mod.make_handler)
-        self.assertIn("HttpOnly", source)
-        self.assertIn("SameSite", source)
+        user = FeishuUser(open_id="ou_test", union_id="on_test", name="测试")
+        with _Live(base_url="https://cloud.example.test") as live:
+            live.store.put_pending("test-state", _Pending(verifier="v", redirect_uri="u"))
+            with (
+                mock.patch("delivery.server.exchange_code", return_value="test-token"),
+                mock.patch("delivery.server.fetch_user", return_value=user),
+            ):
+                status, headers, _ = live.get("/auth/callback?code=test-code&state=test-state")
+            self.assertEqual(status, 302)
+            cookie = http.cookies.SimpleCookie()
+            cookie.load(headers["Set-Cookie"])
+            self.assertTrue(cookie[COOKIE_NAME]["secure"])
+            self.assertTrue(cookie[COOKIE_NAME]["httponly"])
+            self.assertEqual(cookie[COOKIE_NAME]["samesite"], "Lax")
 
 
 if __name__ == "__main__":

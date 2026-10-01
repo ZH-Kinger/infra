@@ -51,6 +51,21 @@ test("跨云两个方向都有结论", () => {
   assert.match(down.label, /跨云/);
 });
 
+test("九章去程直连，回程落既定 alayanew 命名空间", () => {
+  const up = route("oss://wuji-bucket-hangzhou/raw/run/", "jz://jz-b200/wuji-data-tran/aliyun/third-party-data/run-v1/");
+  assert.equal(up.chain, "jiuzhang");
+  assert.match(up.label, /九章 GPFS/);
+  assert.match(up.note, /直接从杭州 OSS/);
+
+  const down = route("jz://jz-b200/processed/run/", "oss://wuji-data-tran/alayanew/teleop/arm/20260930-run/");
+  assert.equal(down.chain, "jiuzhang");
+  assert.match(down.note, /alayanew/);
+  assert.match(down.warn, /数据类型/);
+
+  const bad = route("jz://jz-b200/processed/run/", "oss://wuji-processed-hz/processed/run/");
+  assert.match(bad.error, /wuji-data-tran\/alayanew/);
+});
+
 test("预热和沉降走同一个表单，方向由地址推出来", () => {
   // **不让人选「这是预热还是沉降」** —— 那是系统能自己看出来的事，
   // 而人选错的表现是把数据往相反方向覆盖一遍，不可逆。

@@ -5,11 +5,11 @@
 // 为什么要有这条：后端只认记录文件里的 key（`platform/account/user`），前端拼错一位
 // （比如少了 account、或者把 person 当 user）的话，服务端一律 409「没有这条离职记录」——
 // 页面上每一个「确认删除」都点不成，而服务端用例全绿。另外两件事也只能在这一层锁：
-//   · 取消确认框 = 什么请求都不发（删号不可恢复）；
+//   · 第一次点击只进入确认态，第二次点击才发请求（删号不可恢复）；
 //   · 按钮文案随状态变：已停用的是「恢复」，没停用的嫌疑人是「没离职」。
 import assert from "node:assert/strict";
 import test from "node:test";
-import "./dom.mjs";
+import { Node } from "./dom.mjs";
 
 globalThis.history = { replaceState() {} };
 globalThis.location = { hash: "", pathname: "/" };
@@ -63,6 +63,12 @@ function captureFetch(respond = () => ({ ok: true, status: 200, json: async () =
   return sent;
 }
 
+async function clickTwice(button) {
+  await button.dispatch("click");
+  assert.match(button.textContent, /再次点击确认/);
+  await button.dispatch("click");
+}
+
 test("没有待办就不渲染这一节", () => {
   const root = render([]);
   assert.ok(!root.textContent.includes("离职人员的云账号"));
@@ -89,14 +95,14 @@ test("每条记录一组按钮，文案随状态变", () => {
   assert.ok(root.textContent.includes("上次没删干净：摘策略 X：Throttling"));
 });
 
-test("确认删除发的 key 是 platform/account/user", async () => {
+test("第一次点击只进入确认态，第二次才发 platform/account/user", async () => {
   const root = render([DISABLED]);
   const sent = captureFetch();
-  globalThis.window.confirm = (msg) => {
-    assert.ok(msg.includes("lisi") && msg.includes("不动"), msg);
-    return true;
-  };
-  await buttons(root, "确认删除")[0].dispatch("click");
+  const del = buttons(root, "确认删除")[0];
+  await del.dispatch("click");
+  assert.deepEqual(sent, []);
+  assert.ok(root.textContent.includes("桶里的文件、数据集、实例不动"));
+  await del.dispatch("click");
   assert.deepEqual(sent, [
     {
       path: "/api/admin/iam-attributes",
@@ -108,6 +114,38 @@ test("确认删除发的 key 是 platform/account/user", async () => {
   // 于是不敢点；只说后半句则看不出号到底删没删
   assert.ok(root.textContent.includes("已删除云账号"), root.textContent);
   assert.ok(root.textContent.includes("没动"), root.textContent);
+});
+
+test("支持 dialog 的浏览器用弹窗完成第二次确认", async () => {
+  const oldShow = Node.prototype.showModal;
+  const oldClose = Node.prototype.close;
+  Node.prototype.showModal = function showModal() { this.open = true; };
+  Node.prototype.close = function close() { this.open = false; };
+  try {
+    const root = render([DISABLED]);
+    const sent = captureFetch();
+    const del = buttons(root, "确认删除")[0];
+    await del.dispatch("click");
+    assert.deepEqual(sent, []);
+
+    const dialog = globalThis.document.body.children.at(-1);
+    assert.equal(dialog.tagName, "DIALOG");
+    assert.ok(dialog.open);
+    assert.match(dialog.textContent, /桶里的文件、数据集、实例不动/);
+    const confirm = all(dialog).find((n) => n.tagName === "BUTTON" && n.textContent === "确认执行");
+    assert.ok(confirm, "弹窗里没有最终确认按钮");
+    await confirm.dispatch("click");
+    assert.equal(dialog.open, false);
+    assert.deepEqual(sent.map((s) => s.body), [
+      { op: "offboard_delete", key: "aliyun/1000000000000001/lisi" },
+    ]);
+  } finally {
+    if (oldShow) Node.prototype.showModal = oldShow;
+    else delete Node.prototype.showModal;
+    if (oldClose) Node.prototype.close = oldClose;
+    else delete Node.prototype.close;
+    globalThis.document.body.replaceChildren();
+  }
 });
 
 test("恢复 / 没离职 发 offboard_restore", async () => {
@@ -125,7 +163,7 @@ test("恢复 / 没离职 发 offboard_restore", async () => {
   );
 });
 
-test("取消确认框就什么都不发", async () => {
+test("第一次点击不发请求，恢复取消也不发", async () => {
   const root = render([DISABLED]);
   const sent = captureFetch();
   globalThis.window.confirm = () => false;
@@ -139,7 +177,7 @@ test("服务端拒绝时显示原因、按钮可以再点", async () => {
   captureFetch(() => ({ ok: false, status: 409, json: async () => ({ error: "没删干净：摘策略 X" }) }));
   globalThis.window.confirm = () => true;
   const del = buttons(root, "确认删除")[0];
-  await del.dispatch("click");
+  await clickTwice(del);
   assert.ok(root.textContent.includes("没删干净：摘策略 X"));
   assert.equal(del.disabled, false);
 });
@@ -161,6 +199,30 @@ test("离职记录读不了：页面照常出，顶上一条警告", () => {
 test("没有 offboard_error 时没有这条警告", () => {
   const root = render([DISABLED]);
   assert.ok(!root.textContent.includes("离职记录读不了"));
+});
+
+test("IAM 对账的离职回收入口醒目，并且必须点两次", async () => {
+  const root = render([], {
+    reconcile: {
+      checked_at: "2026-09-22T10:00:00+0800",
+      total: 1,
+      apps: [{
+        app: "九章",
+        theirs: 1,
+        compared: 1,
+        drift: [{ kind: "inactive", union_id: "u-1", name: "李四", app: "九章", theirs: "lisi" }],
+        blind: [],
+      }],
+    },
+  });
+  assert.ok(root.textContent.includes("发现 1 个离职登录仍在 IAM 中"));
+  const sent = captureFetch(() => ({ ok: true, status: 200, json: async () => ({ previous: "lisi", cloud: "已删除云账号" }) }));
+  const reclaim = buttons(root, "确认离职并回收")[0];
+  await reclaim.dispatch("click");
+  assert.deepEqual(sent, []);
+  assert.ok(root.textContent.includes("桶里的文件、数据集、实例不动"));
+  await reclaim.dispatch("click");
+  assert.deepEqual(sent.map((s) => s.body), [{ op: "reclaim", union_id: "u-1", app: "九章" }]);
 });
 
 // ── 没有接口的平台（九章 / TurboAI）：按钮文案必须不一样 ────────────────────
@@ -190,8 +252,7 @@ test("有接口的平台还是「确认删除」", () => {
 test("销账发的 key 带的是那个平台自己的标识", async () => {
   const root = render([MANUAL[1]]);
   const sent = captureFetch();
-  globalThis.window.confirm = () => true;
-  await buttons(root, "我已在控制台处理")[0].dispatch("click");
+  await clickTwice(buttons(root, "我已在控制台处理")[0]);
   assert.deepEqual(sent.map((s) => s.body), [
     { op: "offboard_delete", key: "turboai/wuji/lisi-tb" },
   ]);

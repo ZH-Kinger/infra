@@ -102,6 +102,7 @@ class TokenGateTests(unittest.TestCase):
 
     def write(self, data, *, raw: str = ""):
         self.path.write_text(raw if raw else json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        self.path.chmod(0o600)
         # mtime 在本机的粒度是 1ms，用例里连写两版常落在同一毫秒 —— 不把时间戳推开的话，
         # 测的就不是「改了令牌文件认不认」而是「这毫秒过完没」
         was = getattr(self, "_mtime_ns", 0)
@@ -117,6 +118,10 @@ class TokenGateTests(unittest.TestCase):
 
     def test_good_token_maps_to_its_service(self):
         self.assertEqual(self.ask(f"Bearer {TOKEN}"), SERVICE)
+
+    def test_group_or_world_readable_token_file_is_rejected(self):
+        self.path.chmod(0o640)
+        self.assertEqual(self.ask(f"Bearer {TOKEN}"), "")
 
     def test_rotation_both_old_and_new_token_work(self):
         """`tokens` 是**数组**：轮换期新旧并存，换完删掉旧的即可，两边都不用重启。"""
@@ -317,6 +322,7 @@ class ServiceAccessEndpointBase(unittest.TestCase):
 
     def _write(self, path: Path, payload):
         path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        path.chmod(0o600)
         # 文件 mtime 粒度 1ms、缓存键就是 mtime：把时间戳推到严格递增，
         # 免得用例测的是「这毫秒过完没」
         self._mtime_ns = max(getattr(self, "_mtime_ns", 0), path.stat().st_mtime_ns) + 2_000_000

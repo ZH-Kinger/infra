@@ -462,14 +462,33 @@ class StorageAndTransferValidationTests(unittest.TestCase):
 
     def move_ok(self, **over):
         f, tpl = self.flows_of(self.MOVE_TPL)
-        payload = {"source": "oss://wuji-a/x/", "dest": "oss://wuji-b/y/"}
+        payload = {"source": "oss://wuji-a/x/", "dest": "oss://wuji-b/y/", "task_name": "test-transfer"}
         payload.update(over)
         return f._validate_transfer(tpl, payload, "x")
 
     def test_a_good_move_normalises_both_sides(self):
         clean, summary = self.move_ok()
         self.assertEqual(clean["source"], "oss://wuji-a/x/")
+        self.assertEqual(clean["task_name"], "test-transfer")
         self.assertIn("跳过同名", summary)
+
+    def test_a_move_without_a_name_is_refused(self):
+        with self.assertRaises(FlowError):
+            f, tpl = self.flows_of(self.MOVE_TPL)
+            f._validate_transfer(
+                tpl,
+                {"source": "oss://wuji-a/x/", "dest": "oss://wuji-b/y/"},
+                "x",
+            )
+
+    def test_a_user_move_name_is_kept_and_bad_path_segments_are_refused(self):
+        clean, summary = self.move_ok(task_name="worldengine-20261001-v1")
+        self.assertEqual(clean["task_name"], "worldengine-20261001-v1")
+        self.assertIn("worldengine-20261001-v1", summary)
+        with self.assertRaises(FlowError):
+            self.move_ok(task_name="world engine")
+        with self.assertRaises(FlowError):
+            self.move_ok(source="oss://wuji-a/供应商/20261001/")
 
     def test_a_bucket_outside_the_template_is_refused_on_both_sides(self):
         for side in ("source", "dest"):

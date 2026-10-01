@@ -23,7 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from delivery import iam_api, offboard
+from delivery import iam_api, iam_sync, offboard
 from delivery.errors import DeliveryError
 from delivery.feishu import FeishuUser
 from delivery.people import AccountRef, Person
@@ -52,6 +52,10 @@ class FakeEx:
         self.book.calls.append(("enable", self.platform, self.account, user, login, tuple(keys)))
 
     def delete_user(self, user):
+        if self.book.delay:
+            import time
+
+            time.sleep(self.book.delay)
         self.book.calls.append(("delete", self.platform, self.account, user))
         return list(self.book.left.get(user, []))
 
@@ -67,6 +71,7 @@ class FakeEx:
 class Book:
     def __init__(self):
         self.calls, self.fail, self.left = [], set(), {}
+        self.delay = 0.0
 
     def factory(self, platform, account, **kw):
         self.calls.append(("factory", platform, account, tuple(sorted(kw))))
@@ -699,6 +704,40 @@ class OffboardApiTests(unittest.TestCase):
         rec = offboard.load(self.path)[offboard.key_of("aliyun", ALI_ACC, "lisi")]
         self.assertEqual(rec["state"], "deleted")
         self.assertEqual(rec["signal"], "管理员确认离职")
+
+    def test_reclaim_removes_confirmed_person_from_cached_reconcile(self):
+        """回收成功后刷新页面不能继续拿旧缓存要求再次确认。"""
+        cache = {
+            "apps": [
+                {
+                    "app": ALI_APP,
+                    "drift": [
+                        {
+                            "kind": "inactive",
+                            "app": ALI_APP,
+                            "union_id": "on_1",
+                            "name": "李四",
+                            "theirs": "lisi",
+                        }
+                    ],
+                    "blind": [],
+                }
+            ],
+            "total": 1,
+            "pending": 1,
+            "snoozed": 0,
+            "checked_at": "2026-09-30T10:00:00+0800",
+        }
+        (self.dir / iam_sync.RECONCILE_CACHE).write_text(
+            json.dumps(cache, ensure_ascii=False), encoding="utf-8"
+        )
+
+        status, body, _ = self.reclaim(self.row())
+
+        self.assertEqual(status, 200, body)
+        got = iam_sync.cached_reconcile(self.backend.iam_paths())
+        self.assertEqual(got["apps"][0]["drift"], [])
+        self.assertEqual((got["total"], got["pending"]), (0, 0))
 
     def test_reclaim_volcano_bare_name_uses_roster_spelling(self):
         """M-2：归属比对不分大小写，删的时候用名册里的拼写。"""

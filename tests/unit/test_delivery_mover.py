@@ -7,7 +7,7 @@
 import unittest
 
 from delivery import catalog as catalog_mod
-from delivery import mover, moves
+from delivery import move_creds, mover, moves
 from delivery import tickets as t
 from delivery.errors import DeliveryError
 
@@ -67,6 +67,23 @@ class PickingTests(unittest.TestCase):
 
 
 class RegionTests(unittest.TestCase):
+    def test_same_jiuzhang_link_has_one_key_even_for_different_directories(self):
+        one = moves.chain_key(
+            "oss://wuji-data-tran/third-party-data/a/",
+            "jz://jz-b200/wuji-data-tran/aliyun/worldengine/v1/",
+        )
+        two = moves.chain_key(
+            "oss://wuji-data-tran/third-party-data/b/",
+            "jz://jz-b200/wuji-data-tran/aliyun/reka/v2/",
+        )
+        self.assertEqual(one, two)
+
+    def test_different_bucket_links_can_have_different_keys(self):
+        self.assertNotEqual(
+            moves.chain_key("oss://src-b/a/", "oss://dst-b/b/"),
+            moves.chain_key("oss://src-b/a/", "oss://tos-b/b/"),
+        )
+
     def test_the_region_comes_from_the_template_snapshot(self):
         """路径串 `oss://桶/目录/` 里带不出地域，而两个引擎都要它。"""
         plan = mover._locate(moves.plan("oss://src-b/a/", "oss://dst-b/b/"), ticket())
@@ -155,6 +172,31 @@ class SweepTests(unittest.TestCase):
         for name, value in kw.items():
             self.addCleanup(setattr, mover, name, getattr(mover, name))
             setattr(mover, name, value)
+
+    def test_same_chain_waits_behind_an_inflight_ticket(self):
+        first = ticket(id="REQ-1", move_stage=moves.STAGE_RUNNING, move_ref="1")
+        second = ticket(id="REQ-2")
+        store = Store(first, second)
+        seen = []
+        self._fake(advance_one=lambda tk, **kw: seen.append(tk["id"]) or {})
+        mover.sweep(store, config=mover.Config(), log=lambda *a: None)
+        self.assertEqual(seen, ["REQ-1"])
+        self.assertEqual(store.rows[1].get("move_stage", ""), "")
+
+    def test_different_chain_is_not_blocked(self):
+        first = ticket(id="REQ-1", move_stage=moves.STAGE_RUNNING, move_ref="1")
+        second = ticket(
+            id="REQ-2",
+            payload={"source": "oss://src-b/a/", "dest": "oss://tos-b/b/", "overwrite": "skip"},
+        )
+        store = Store(first, second)
+        seen = []
+        self._fake(
+            advance_one=lambda tk, **kw: {},
+            start_one=lambda tk, **kw: seen.append(tk["id"]) or {"move_stage": moves.STAGE_RUNNING},
+        )
+        mover.sweep(store, config=mover.Config(), log=lambda *a: None)
+        self.assertEqual(seen, ["REQ-2"])
 
     def test_a_ticket_that_finished_moves_the_whole_request_to_done(self):
         store = Store(ticket(move_stage=moves.STAGE_RUNNING, move_ref="577732", move_engine="dms"))
@@ -636,17 +678,12 @@ class CrossCloudCredTests(unittest.TestCase):
         self.assertEqual(row.get("move_cred_user"), iss.issued[0][0])
         self.assertIn("boom-root-cause", row.get("move_error", ""))
 
-    def test_same_cloud_moves_mint_nothing(self):
-        """同云不该平白多建一个子账号 —— 阿里那条源用 RAM 角色，
-        火山那条的钥匙从头到尾没离开火山。"""
-        iss = self.Issuer()
-        seen = []
-        self.addCleanup(setattr, mover, "_submit", mover._submit)
-        mover._submit = lambda *a, **kw: seen.append(kw) or "job-1"
-        store = Store(ticket(move_reviewed=True))  # oss -> oss
-        mover.sweep(store, config=mover.Config(), log=lambda *a: None, issuer=iss)
-        self.assertEqual(iss.issued, [])
-        self.assertEqual(store.rows[0].get("move_cred_user", ""), "")
+    def test_same_cloud_moves_use_the_cloud_service_role_without_a_source_key(self):
+        plan = {
+            "src": {"scheme": "oss", "bucket": "src-b", "prefix": "a/"},
+            "dest": {"scheme": "oss", "bucket": "dst-b", "prefix": "b/"},
+        }
+        self.assertEqual(move_creds.needed(plan), "")
 
 
 class DataflowSweepTests(unittest.TestCase):

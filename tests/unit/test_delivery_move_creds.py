@@ -45,8 +45,7 @@ PLAN_CROSS = {
 
 
 class NeededTests(unittest.TestCase):
-    """同云不走这条：阿里那条源用 RAM 角色（根本没有 AK 要交），
-    火山那条的钥匙从头到尾没离开火山。"""
+    """对象存储迁移的源端凭证按每张单签发，完成后回收。"""
 
     def test_cross_cloud_needs_one_and_says_which_side(self):
         self.assertEqual(move_creds.needed(PLAN_CROSS), "aliyun")
@@ -54,11 +53,15 @@ class NeededTests(unittest.TestCase):
             move_creds.needed({"src": {"scheme": "tos"}, "dest": {"scheme": "oss"}}), "volcano"
         )
 
-    def test_same_cloud_needs_nothing(self):
-        for a, b in (("oss", "oss"), ("tos", "tos")):
-            self.assertEqual(
-                move_creds.needed({"src": {"scheme": a}, "dest": {"scheme": b}}), "", f"{a}->{b}"
-            )
+    def test_same_cloud_uses_the_cloud_service_role(self):
+        self.assertEqual(
+            move_creds.needed({"src": {"scheme": "oss"}, "dest": {"scheme": "oss"}}),
+            "",
+        )
+        self.assertEqual(
+            move_creds.needed({"src": {"scheme": "tos"}, "dest": {"scheme": "tos"}}),
+            "",
+        )
 
 
 class MintTests(unittest.TestCase):
@@ -72,6 +75,16 @@ class MintTests(unittest.TestCase):
             now=1_700_000_000.0,
             **kw,
         )
+
+    def test_one_key_can_cover_multiple_explicit_prefixes_without_bucket_wildcard(self):
+        key, secret, _user = self._mint(
+            FakeIssuer(),
+            targets=[
+                {"bucket": "src-b", "prefix": "in/", "caps": ("list", "download")},
+                {"bucket": "relay-b", "prefix": "out/", "caps": ("list", "write")},
+            ],
+        )
+        self.assertEqual((key, secret), ("AK-new", "SK-new"))
 
     def test_what_goes_out_can_only_read_and_only_this_prefix(self):
         """**交出去的东西能干什么，是这个模块存在的全部理由。**

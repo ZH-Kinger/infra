@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from delivery import catalog as catalog_mod
@@ -202,6 +203,44 @@ class OptionStateTests(unittest.TestCase):
         env.submit()
         for opt in env.flows.options(""):
             self.assertNotIn(opt["state"], ("pending", "ready"))
+
+
+class WorkspaceDiscoveryTests(unittest.TestCase):
+    def _env(self, callback):
+        env = Env()
+        catalog = env.flows._catalog()
+        permission = catalog.get("oss-read")
+        patched = replace(
+            permission,
+            workspaces=(
+                {
+                    "id": "registered",
+                    "region": "cn-hangzhou",
+                    "mount": "cpfs.example",
+                    "bucket": "bucket",
+                    "bucket_region": "cn-hangzhou",
+                },
+            ),
+        )
+        env.flows._catalog = lambda: catalog_mod.Catalog(
+            templates=tuple(patched if t.id == permission.id else t for t in catalog.templates)
+        )
+        env.flows._workspace_choices = callback
+        return env
+
+    def test_empty_discovery_makes_workspace_permission_unavailable(self):
+        env = self._env(lambda *args: [])
+        got = env.options()["oss-read"]
+        self.assertFalse(got["available"])
+        self.assertIn("没有检测到", got["state_note"])
+
+    def test_discovery_failure_is_visible_and_unavailable(self):
+        def broken(*args):
+            raise RuntimeError("PAI unavailable")
+
+        got = self._env(broken).options()["oss-read"]
+        self.assertFalse(got["available"])
+        self.assertIn("暂时不可用", got["state_note"])
 
 
 if __name__ == "__main__":

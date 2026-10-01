@@ -77,6 +77,19 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ProxyAuthError):
             ProxyAuthConfig.from_env({})
 
+    def test_identity_verification_requires_userinfo(self):
+        with self.assertRaises(ProxyAuthError):
+            ProxyAuthConfig(secret=SECRET, verify_identity=True)
+        cfg = ProxyAuthConfig.from_env(
+            {
+                "DELIVERY_PROXY_SECRET": SECRET,
+                "DELIVERY_IAM_USERINFO_URL": "https://iam.example.com/userinfo",
+                "DELIVERY_IAM_EMAIL_DOMAINS": "wuji.tech",
+                "DELIVERY_PROXY_VERIFY_IDENTITY": "1",
+            }
+        )
+        self.assertTrue(cfg.verify_identity)
+
     def test_from_env_secret_and_file_are_exclusive(self):
         d = Path(tempfile.mkdtemp())
         (d / "secret").write_text(SECRET + "\n", encoding="utf-8")
@@ -90,7 +103,9 @@ class ConfigTests(unittest.TestCase):
 
 
 class IdentityTests(unittest.TestCase):
-    def _identity(self, fetch=None, userinfo="https://iam.example.com/userinfo", clock=None):
+    def _identity(
+        self, fetch=None, userinfo="https://iam.example.com/userinfo", clock=None, verify=False
+    ):
         calls = []
 
         def default_fetch(url, token):
@@ -101,7 +116,10 @@ class IdentityTests(unittest.TestCase):
         if clock:
             kw["clock"] = clock
         cfg = ProxyAuthConfig(
-            secret=SECRET, userinfo_url=userinfo, email_domains=("wuji.tech",) if userinfo else ()
+            secret=SECRET,
+            userinfo_url=userinfo,
+            verify_identity=verify,
+            email_domains=("wuji.tech",) if userinfo else (),
         )
         return ProxyIdentity(cfg, **kw), calls
 
@@ -119,6 +137,22 @@ class IdentityTests(unittest.TestCase):
         self.assertIsNone(ident.user(_headers(**{H_SECRET: None})))
         self.assertIsNone(ident.user(_headers(**{H_SECRET: "x" * 40})))
         self.assertIsNone(ident.user(_headers(**{H_SECRET: SECRET + " "})))
+
+    def test_identity_verification_rejects_fixed_or_mismatched_proxy_identity(self):
+        ident, calls = self._identity(verify=True)
+        self.assertIsNone(ident.user(_headers(**{H_TOKEN: None})))
+        self.assertEqual(calls, [])
+        self.assertIsNone(ident.user(_headers(**{H_UNION_ID: "on_admin", H_TOKEN: "tok"})))
+        self.assertEqual(calls, [("https://iam.example.com/userinfo", "tok")])
+        self.assertEqual(ident.user(_headers(**{H_TOKEN: "tok"})).union_id, "on_1")
+        self.assertEqual(len(calls), 1)
+
+    def test_identity_verification_does_not_accept_another_tokens_union_id(self):
+        ident, _ = self._identity(
+            verify=True,
+            fetch=lambda url, token: {"feishu_union_id": "on_token_owner"},
+        )
+        self.assertIsNone(ident.user(_headers(**{H_TOKEN: "tok"})))
 
     def test_header_names_case_insensitive(self):
         from email.message import Message

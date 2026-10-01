@@ -556,6 +556,23 @@ class ValueTests(CardEndpointBase):
 
 
 class DecideTests(CardEndpointBase):
+    def test_a_slow_cloud_delete_is_acknowledged_and_finishes_in_background(self):
+        """云 API 超过飞书回调期限时，不能把已接受的操作显示成失败。"""
+        key = self.seed_disabled()
+        self.book.delay = 2.2
+        started = time.monotonic()
+        with self.live() as s:
+            status, body = self.click(s, "del", key)
+        elapsed = time.monotonic() - started
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["toast"]["type"], "info")
+        self.assertIn("后台处理", body["toast"]["content"])
+        self.assertLess(elapsed, 2.9)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and self.state_of(key) != "deleted":
+            time.sleep(0.02)
+        self.assertEqual(self.state_of(key), "deleted")
+
     def test_delete_deletes_the_account_and_records_who_decided(self):
         key = self.seed_disabled()
         with self.live() as s:
