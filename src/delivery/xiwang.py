@@ -291,6 +291,11 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
     percent = re.findall(r"(\d+(?:\.\d+)?)%", relay_log)
     if percent:
         discovered["source_percent"] = float(percent[-1])
+    done = re.findall(r"done:\((\d+)\s+(?:files|objects),\s*([0-9.]+)\s*(KiB|MiB|GiB|TiB)\)", relay_log)
+    if done:
+        n, amount, unit = done[-1]
+        bytes_done = int(float(amount) * {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[unit])
+        objects_done = int(n)
     if pull == "0" and relay == "0":
         return {"status": "DONE", "done": True, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, **discovered}
     if relay.isdigit() and relay != "0":
