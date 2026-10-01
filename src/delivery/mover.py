@@ -415,10 +415,11 @@ def _xiwang_credentials(plan: dict, ticket: dict, *, config: Config, issuer=None
         # 曦望端只读已经落地的中转对象，完成标记由网关账号写入。
         {"bucket": dest["bucket"], "prefix": dest.get("prefix", ""), "caps": (grants.CAP_LIST, grants.CAP_DOWNLOAD)},
     ]
+    attempt = int(ticket.get("move_attempt") or 1)
     key, secret, user = move_creds.mint(
         make("aliyun", account), ticket_id=str(ticket.get("id") or ""), bucket=src["bucket"],
         prefix=src.get("prefix", ""), platform="aliyun", now=time.time(), days=config.cred_days,
-        targets=targets, purpose="xiwang",
+        targets=targets, purpose=f"xiwang-r{attempt}",
     )
     _remember(minted, user, "aliyun")
     return {"access_key_id": key, "access_key_secret": secret}
