@@ -110,6 +110,7 @@ def commands(plan: dict, config: Config, job_id: str, include_prefixes=None) -> 
     relay = _safe(dst.get("prefix", ""), "中转目录")
     target = _remote_dest(config, relay)
     marker = f"{relay.rstrip('/')}/.panel-done"
+    meta_prefix = f"{relay.rstrip('/')}/.panel-meta"
     config_path = _config_file(job_id)
     cfg = f"--config-file {shlex.quote(config_path)}"
     source_uri = f"oss://{bucket}/{source}/"
@@ -118,20 +119,39 @@ def commands(plan: dict, config: Config, job_id: str, include_prefixes=None) -> 
     if items:
         if any(not re.fullmatch(r"[A-Za-z0-9._-]+", x) for x in items) or len(set(items)) != len(items):
             raise XiwangError("曦望同步子目录白名单不合法")
-        copies = " && ".join(
+        sg_steps = " && ".join(
             f"ossutil cp -r {shlex.quote(source_uri + x + '/') } {shlex.quote(relay_uri + x + '/') } {cfg} "
             f"--endpoint {shlex.quote(config.source_endpoint)} --region {shlex.quote(config.source_region)} "
-            f"--job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\""
+            f"--job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\" && "
+            f"ossutil cp /dev/null {shlex.quote('oss://' + relay_bucket + '/' + meta_prefix + '/' + x + '.done')} {cfg} "
+            f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)}"
             for x in items
         )
+        xw_steps = " && ".join(
+            f"i=0; while [ $i -lt 8640 ]; do ossutil ls {shlex.quote('oss://' + relay_bucket + '/' + meta_prefix + '/' + x + '.done')} {cfg} "
+            f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} >/dev/null 2>&1 && break; i=$((i + 1)); sleep 10; done; "
+            f"test $i -lt 8640 && ossutil cp -r {shlex.quote(relay_uri + x + '/')} {shlex.quote(target + '/' + x + '/')} {cfg} "
+            f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} --job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\" -u; "
+            f"b=$(du -sb {shlex.quote(target + '/' + x)} 2>/dev/null | awk '{{print $1}}'); o=$(find {shlex.quote(target + '/' + x)} -type f 2>/dev/null | wc -l); "
+            f"total_b=$((total_b + b)); total_o=$((total_o + o)); printf '%s\\n%s\\n' \"$total_b\" \"$total_o\" > \"$WD/progress\""
+            for x in items
+        )
+        copies = sg_steps
     else:
         copies = (
             f"ossutil cp -r {shlex.quote(source_uri)} {shlex.quote(relay_uri)} {cfg} "
             f"--endpoint {shlex.quote(config.source_endpoint)} --region {shlex.quote(config.source_region)} "
             f"--job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\""
         )
+        xw_steps = (
+            f"ossutil cp -r {shlex.quote(relay_uri)} {shlex.quote(target + '/')} {cfg} "
+            f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} "
+            f"--job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\" -u; "
+            f"{{ du -sb {shlex.quote(target)} 2>/dev/null | awk '{{print $1}}'; find {shlex.quote(target)} -type f 2>/dev/null | wc -l; }} > \"$WD/progress\""
+        )
     sg = (
         f"mkdir -p \"$WD\" && trap 'rm -rf -- \"$WD/ckpt\"' EXIT && "
+        f"total_b=0; total_o=0; "
         f"{copies} && "
         f"printf done > \"$WD/done\" && "
         f"ossutil cp /dev/null {shlex.quote('oss://' + relay_bucket + '/' + marker)} "
@@ -140,17 +160,8 @@ def commands(plan: dict, config: Config, job_id: str, include_prefixes=None) -> 
         f"rc=$?; printf '%s\\n' \"$rc\" > \"$WD/relay.rc\"; exit \"$rc\""
     )
     xw = (
-        f"mkdir -p {shlex.quote(target)} \"$WD\"; trap 'rm -rf -- \"$WD/ckpt\"' EXIT; i=0; "
-        f"while [ $i -lt 8640 ]; do "
-        f"ossutil cp -r {shlex.quote(relay_uri)} {shlex.quote(target + '/')} "
-        f"{cfg} "
-        f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} "
-        f"--job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\" -u; "
-        f"{{ du -sb {shlex.quote(target)} 2>/dev/null | awk '{{print $1}}'; find {shlex.quote(target)} -type f 2>/dev/null | wc -l; }} > \"$WD/progress\"; "
-        f"ossutil ls {shlex.quote('oss://' + relay_bucket + '/' + marker)} "
-        f"{cfg} "
-        f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} >/dev/null 2>&1 && break; "
-        f"i=$((i + 1)); sleep 10; done; exit 75"
+        f"mkdir -p {shlex.quote(target)} \"$WD\"; trap 'rm -rf -- \"$WD/ckpt\"' EXIT; {xw_steps}; "
+        f"ossutil ls {shlex.quote('oss://' + relay_bucket + '/' + marker)} {cfg} --endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} >/dev/null 2>&1 || exit 75"
     )
     return {"sg": sg, "xw": xw, "target": target, "marker": marker, "config_path": config_path}
 
