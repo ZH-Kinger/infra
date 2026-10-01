@@ -411,7 +411,9 @@ def _xiwang_credentials(plan: dict, ticket: dict, *, config: Config, issuer=None
     make = issuer if issuer is not None else _issuer_from_env
     targets = [
         {"bucket": src["bucket"], "prefix": src.get("prefix", ""), "caps": (grants.CAP_LIST, grants.CAP_DOWNLOAD)},
-        {"bucket": dest["bucket"], "prefix": dest.get("prefix", ""), "caps": (grants.CAP_LIST, grants.CAP_DOWNLOAD, grants.CAP_WRITE)},
+        # 数据由新加坡 ECS 的 OSS 网关/NFS 挂载写入桶，任务 AK/SK 不需要写桶权限；
+        # 曦望端只读已经落地的中转对象，完成标记由网关账号写入。
+        {"bucket": dest["bucket"], "prefix": dest.get("prefix", ""), "caps": (grants.CAP_LIST, grants.CAP_DOWNLOAD)},
     ]
     key, secret, user = move_creds.mint(
         make("aliyun", account), ticket_id=str(ticket.get("id") or ""), bucket=src["bucket"],

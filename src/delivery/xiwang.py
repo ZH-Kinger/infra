@@ -34,6 +34,7 @@ class Config:
     xw_key_file: str = ""
     xw_host_key: str = ""
     xw_dest_root: str = "/mnt/data04/296834/Wuji-Algorithm@wuji.tech/data"
+    sg_mount_root: str = "/mnt"
     relay_endpoint: str = "oss-cn-singapore.aliyuncs.com"
     source_endpoint: str = "oss-cn-hangzhou-internal.aliyuncs.com"
     relay_region: str = "ap-southeast-1"
@@ -57,6 +58,7 @@ class Config:
             xw_key_file=str(env.get("XIWANG_KEY_FILE", "") or ""),
             xw_host_key=str(env.get("XIWANG_HOST_KEY", "") or ""),
             xw_dest_root=(str(env.get("XIWANG_DEST_ROOT", cls.xw_dest_root) or cls.xw_dest_root).rstrip("/")),
+            sg_mount_root=(str(env.get("XIWANG_SG_MOUNT_ROOT", cls.sg_mount_root) or cls.sg_mount_root).rstrip("/")),
             relay_endpoint=str(env.get("XIWANG_RELAY_ENDPOINT", cls.relay_endpoint) or cls.relay_endpoint),
             source_endpoint=str(env.get("XIWANG_SOURCE_ENDPOINT", cls.source_endpoint) or cls.source_endpoint),
             relay_region=str(env.get("XIWANG_RELAY_REGION", cls.relay_region) or cls.relay_region),
@@ -109,28 +111,29 @@ def commands(plan: dict, config: Config, job_id: str, include_prefixes=None) -> 
     relay_bucket = _safe(dst.get("bucket"), "中转桶")
     relay = _safe(dst.get("prefix", ""), "中转目录")
     target = _remote_dest(config, relay)
-    marker = f"{relay.rstrip('/')}/.panel-done"
-    meta_prefix = f"{relay.rstrip('/')}/.panel-meta"
+    meta_prefix = f"{relay.rstrip('/')}/.panel-meta/{_safe(job_id, '任务号')}"
+    marker = f"{meta_prefix}/done"
     config_path = _config_file(job_id)
     cfg = f"--config-file {shlex.quote(config_path)}"
     source_uri = f"oss://{bucket}/{source}/"
     relay_uri = f"oss://{relay_bucket}/{relay}/"
+    relay_mount = f"{config.sg_mount_root}/{relay}"
     items = [str(x or "").strip().strip("/") for x in (include_prefixes or [])]
     if items:
         if any(not re.fullmatch(r"[A-Za-z0-9._-]+", x) for x in items) or len(set(items)) != len(items):
             raise XiwangError("曦望同步子目录白名单不合法")
         sg_steps = " && ".join(
-            f"ossutil cp -r {shlex.quote(source_uri + x + '/') } {shlex.quote(relay_uri + x + '/') } {cfg} "
+            f"mkdir -p {shlex.quote(relay_mount + '/' + x)} && ossutil cp -r {shlex.quote(source_uri + x + '/') } {shlex.quote(relay_mount + '/' + x + '/') } {cfg} "
             f"--endpoint {shlex.quote(config.source_endpoint)} --region {shlex.quote(config.source_region)} "
             f"--job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\" && "
-            f"ossutil cp /dev/null {shlex.quote('oss://' + relay_bucket + '/' + meta_prefix + '/' + x + '.done')} {cfg} "
-            f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)}"
+            f"mkdir -p {shlex.quote(config.sg_mount_root + '/' + meta_prefix)} && "
+            f"touch {shlex.quote(config.sg_mount_root + '/' + meta_prefix + '/' + x + '.done')}"
             for x in items
         )
         xw_steps = " && ".join(
-            f"i=0; while [ $i -lt 8640 ]; do ossutil ls {shlex.quote('oss://' + relay_bucket + '/' + meta_prefix + '/' + x + '.done')} {cfg} "
+            f"i=0; while [ $i -lt 120960 ]; do ossutil stat {shlex.quote('oss://' + relay_bucket + '/' + meta_prefix + '/' + x + '.done')} {cfg} "
             f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} >/dev/null 2>&1 && break; i=$((i + 1)); sleep 10; done; "
-            f"test $i -lt 8640 && ossutil cp -r {shlex.quote(relay_uri + x + '/')} {shlex.quote(target + '/' + x + '/')} {cfg} "
+            f"test $i -lt 120960 || exit 75; ossutil cp -r {shlex.quote(relay_uri + x + '/')} {shlex.quote(target + '/' + x + '/')} {cfg} "
             f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} --job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\" -u; "
             f"b=$(du -sb {shlex.quote(target + '/' + x)} 2>/dev/null | awk '{{print $1}}'); o=$(find {shlex.quote(target + '/' + x)} -type f 2>/dev/null | wc -l); "
             f"total_b=$((total_b + b)); total_o=$((total_o + o)); printf '%s\\n%s\\n' \"$total_b\" \"$total_o\" > \"$WD/progress\""
@@ -139,7 +142,7 @@ def commands(plan: dict, config: Config, job_id: str, include_prefixes=None) -> 
         copies = sg_steps
     else:
         copies = (
-            f"ossutil cp -r {shlex.quote(source_uri)} {shlex.quote(relay_uri)} {cfg} "
+            f"mkdir -p {shlex.quote(relay_mount)} && ossutil cp -r {shlex.quote(source_uri)} {shlex.quote(relay_mount + '/')} {cfg} "
             f"--endpoint {shlex.quote(config.source_endpoint)} --region {shlex.quote(config.source_region)} "
             f"--job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\""
         )
@@ -154,14 +157,11 @@ def commands(plan: dict, config: Config, job_id: str, include_prefixes=None) -> 
         f"total_b=0; total_o=0; "
         f"{copies} && "
         f"printf done > \"$WD/done\" && "
-        f"ossutil cp /dev/null {shlex.quote('oss://' + relay_bucket + '/' + marker)} "
-        f"{cfg} "
-        f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)}; "
+        f"mkdir -p {shlex.quote(config.sg_mount_root + '/' + meta_prefix)} && touch {shlex.quote(config.sg_mount_root + '/' + marker)}; "
         f"rc=$?; printf '%s\\n' \"$rc\" > \"$WD/relay.rc\"; exit \"$rc\""
     )
     xw = (
-        f"mkdir -p {shlex.quote(target)} \"$WD\"; trap 'rm -rf -- \"$WD/ckpt\"' EXIT; {xw_steps}; "
-        f"ossutil ls {shlex.quote('oss://' + relay_bucket + '/' + marker)} {cfg} --endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} >/dev/null 2>&1 || exit 75"
+        f"mkdir -p {shlex.quote(target)} \"$WD\"; total_b=0; total_o=0; {xw_steps}"
     )
     return {"sg": sg, "xw": xw, "target": target, "marker": marker, "config_path": config_path}
 
@@ -233,7 +233,6 @@ def submit(plan: dict, job_id: str, *, config: Optional[Config] = None, credenti
     validate_config(config)
     got = commands(plan, config, job_id, include_prefixes=include_prefixes)
     work = _job_dir(config, job_id)
-    ini = _oss_ini(credentials or {}, endpoint=config.relay_endpoint)
     path = got["config_path"]
     clients = []
     try:
@@ -243,8 +242,11 @@ def submit(plan: dict, job_id: str, *, config: Optional[Config] = None, credenti
         ):
             client = _connect(host, port, user, key, config.sg_host_key if host == config.sg_host else config.xw_host_key)
             clients.append(client)
-            _write_config(client, path, ini)
-            encoded = base64.b64encode((f"set -eu\nWD={shlex.quote(work)}\nexport WD\n{script}\nrc=$?; printf '%s\\n' \"$rc\" > \"$WD/{'relay' if host == config.sg_host else 'pull'}.rc\"\n").encode()).decode()
+            endpoint = config.source_endpoint if host == config.sg_host else config.relay_endpoint
+            _write_config(client, path, _oss_ini(credentials or {}, endpoint=endpoint))
+            stage = 'relay' if host == config.sg_host else 'pull'
+            worker = f"set -eu\nWD={shlex.quote(work)}\nexport WD\ntrap 'rc=$?; printf \"%s\\n\" \"$rc\" > \"$WD/{stage}.rc\"; rm -f -- {shlex.quote(path)}' EXIT\n{script}\n"
+            encoded = base64.b64encode(worker.encode()).decode()
             rc, out, err = _exec(client, f"mkdir -p {shlex.quote(work)}; nohup bash -c \"$(echo {encoded} | base64 -d)\" > {shlex.quote(work)}/{'relay' if host == config.sg_host else 'pull'}.log 2>&1 & echo $!", timeout=30)
             if rc != 0 or not out.strip():
                 raise XiwangError(f"曦望 worker 下发失败：{(err or out)[:240]}")
@@ -271,20 +273,30 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
     ):
         client = _connect(host, port, user, key, host_key)
         try:
-            rc, out, err = _exec(client, f"cat {shlex.quote(work)}/{marker}.rc 2>/dev/null || true; echo PROGRESS; cat {shlex.quote(work)}/progress 2>/dev/null || true")
-            raw, _, progress = out.partition("PROGRESS\n")
-            results.append((marker, raw.strip(), progress.strip()))
+            rc, out, err = _exec(client, f"cat {shlex.quote(work)}/{marker}.rc 2>/dev/null || true; echo PROGRESS; cat {shlex.quote(work)}/progress 2>/dev/null || true; echo LOG; tail -n 20 {shlex.quote(work)}/{marker}.log 2>/dev/null || true")
+            raw, _, rest = out.partition("PROGRESS\n")
+            progress, _, log = rest.partition("LOG\n")
+            results.append((marker, raw.strip(), progress.strip(), log.strip()))
         finally:
             client.close()
     info = {row[0]: row[1:] for row in results}
-    relay, pull = info.get("relay", ("", ""))[0], info.get("pull", ("", ""))[0]
-    progress = info.get("pull", ("", ""))[1].splitlines()
+    relay, pull = info.get("relay", ("", "", ""))[0], info.get("pull", ("", "", ""))[0]
+    progress = info.get("pull", ("", "", ""))[1].splitlines()
+    relay_log = info.get("relay", ("", "", ""))[2]
     bytes_done = int(progress[0]) if progress and progress[0].isdigit() else 0
     objects_done = int(progress[1]) if len(progress) > 1 and progress[1].isdigit() else 0
+    discovered = {}
+    match = re.search(r"(?:Estimated|Total)\s+(\d+) objects,\s*([0-9.]+)\s*(KiB|MiB|GiB|TiB)", relay_log)
+    if match:
+        factor = {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[match.group(3)]
+        discovered = {"source_objects": int(match.group(1)), "source_bytes": int(float(match.group(2)) * factor)}
+    percent = re.findall(r"(\d+(?:\.\d+)?)%", relay_log)
+    if percent:
+        discovered["source_percent"] = float(percent[-1])
     if pull == "0" and relay == "0":
-        return {"status": "DONE", "done": True, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done}
+        return {"status": "DONE", "done": True, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, **discovered}
     if relay.isdigit() and relay != "0":
-        return {"status": "FAILED", "done": False, "failed": True, "error": f"新加坡 worker 退出码 {relay}", "bytes": bytes_done, "objects": objects_done}
+        return {"status": "FAILED", "done": False, "failed": True, "error": f"新加坡 worker 退出码 {relay}", "bytes": bytes_done, "objects": objects_done, **discovered}
     if pull.isdigit() and pull != "0":
-        return {"status": "FAILED", "done": False, "failed": True, "error": f"曦望 worker 退出码 {pull}", "bytes": bytes_done, "objects": objects_done}
-    return {"status": "RUNNING", "done": False, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done}
+        return {"status": "FAILED", "done": False, "failed": True, "error": f"曦望 worker 退出码 {pull}", "bytes": bytes_done, "objects": objects_done, **discovered}
+    return {"status": "RUNNING", "done": False, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, **discovered}
