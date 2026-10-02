@@ -1086,18 +1086,14 @@ export function requestRoutes(ctx) {
   }
 
   function speedChart(rows) {
-    const w = 640, hgt = 150, pad = 8;
-    const vals = rows.flatMap(x => [Number(x.relay_bps || 0), Number(x.pull_bps || 0)]);
-    const max = Math.max(1, ...vals);
-    const line = (key, color) => rows.map((x, i) => {
-      const xx = pad + (w - pad * 2) * i / Math.max(1, rows.length - 1);
-      const yy = hgt - pad - (hgt - pad * 2) * Number(x[key] || 0) / max;
-      return `${xx.toFixed(1)},${yy.toFixed(1)}`;
-    }).join(" ");
-    return h("div", { class: "card speed-chart" }, h("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": "最近三小时两段传输速度" },
-      h("polyline", { points: line("relay_bps"), fill: "none", stroke: "#2563eb", "stroke-width": "2" }),
-      h("polyline", { points: line("pull_bps"), fill: "none", stroke: "#16a34a", "stroke-width": "2" })),
-      h("p", { class: "hint" }, "蓝线：杭州 → 新加坡；绿线：新加坡 → 曦望；每点为一分钟平均速度"));
+    const recent = (rows || []).slice(-60);
+    const max = Math.max(1, ...recent.flatMap(x => [Number(x.relay_bps || 0), Number(x.pull_bps || 0)]));
+    const bars = recent.map((x) => h("div", { class: "speed-row" },
+      h("span", { class: "speed-bar relay", style: `width:${Math.max(1, 100 * Number(x.relay_bps || 0) / max)}%` }),
+      h("span", { class: "speed-bar pull", style: `width:${Math.max(1, 100 * Number(x.pull_bps || 0) / max)}%` })));
+    return h("div", { class: "card speed-chart", role: "img", "aria-label": "最近三小时两段传输速度" },
+      bars.length ? bars : h("p", { class: "hint" }, "正在积累速度样本…"),
+      h("p", { class: "hint" }, "蓝色：杭州 → 新加坡；绿色：新加坡 → 曦望；每条为一分钟平均速度"));
   }
 
   function feishuLink(r) {
