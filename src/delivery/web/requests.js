@@ -1046,6 +1046,9 @@ export function requestRoutes(ctx) {
       admin && r.approval && r.approval.instance_code ? ["飞书审批实例", r.approval.instance_code] : null,
     ].filter(Boolean);
     nodes.push(h("section", { class: "group" }, h("div", { class: "group-label" }, "详情"), h("dl", { class: "card facts" }, facts.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v || "—")]))));
+    if (r.kind === "transfer" && (r.move_speed_history || []).length > 1) {
+      nodes.push(h("section", { class: "group" }, h("div", { class: "group-label" }, "最近 3 小时速度"), speedChart(r.move_speed_history)));
+    }
     nodes.push(
       h(
         "section",
@@ -1070,6 +1073,21 @@ export function requestRoutes(ctx) {
     const labels = { new: "等待提交", running: "传输中", done: "已完成", failed: "传输失败", review: "等待管理员确认" };
     const base = labels[r.move_stage] || r.move_stage || "等待调度";
     return r.move_stage === "running" ? `${base}（后台定时刷新）` : base;
+  }
+
+  function speedChart(rows) {
+    const w = 640, hgt = 150, pad = 8;
+    const vals = rows.flatMap(x => [Number(x.relay_bps || 0), Number(x.pull_bps || 0)]);
+    const max = Math.max(1, ...vals);
+    const line = (key, color) => rows.map((x, i) => {
+      const xx = pad + (w - pad * 2) * i / Math.max(1, rows.length - 1);
+      const yy = hgt - pad - (hgt - pad * 2) * Number(x[key] || 0) / max;
+      return `${xx.toFixed(1)},${yy.toFixed(1)}`;
+    }).join(" ");
+    return h("div", { class: "card speed-chart" }, h("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": "最近三小时两段传输速度" },
+      h("polyline", { points: line("relay_bps"), fill: "none", stroke: "#2563eb", "stroke-width": "2" }),
+      h("polyline", { points: line("pull_bps"), fill: "none", stroke: "#16a34a", "stroke-width": "2" })),
+      h("p", { class: "hint" }, "蓝线：杭州 → 新加坡；绿线：新加坡 → 曦望；每点为一分钟平均速度"));
   }
 
   function feishuLink(r) {
