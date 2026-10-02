@@ -35,7 +35,7 @@ class Config:
     xw_host_key: str = ""
     xw_dest_root: str = "/mnt/data04/296834/Wuji-Algorithm@wuji.tech/data"
     sg_mount_root: str = "/mnt"
-    relay_endpoint: str = "oss-cn-singapore.aliyuncs.com"
+    relay_endpoint: str = "oss-ap-southeast-1.aliyuncs.com"
     source_endpoint: str = "oss-cn-hangzhou-internal.aliyuncs.com"
     relay_region: str = "ap-southeast-1"
     source_region: str = "cn-hangzhou"
@@ -131,7 +131,7 @@ def commands(plan: dict, config: Config, job_id: str, include_prefixes=None) -> 
             for x in items
         ) + " wait"
         xw_steps = " ".join(
-            f"( i=0; while [ $i -lt 120960 ]; do ossutil stat {shlex.quote('oss://' + relay_bucket + '/' + meta_prefix + '/' + x + '.done')} {cfg} "
+            f"( i=0; while [ $i -lt 120960 ]; do ossutil cp {shlex.quote('oss://' + relay_bucket + '/' + meta_prefix + '/' + x + '.done')} \"$WD/ready-{x}\" {cfg} -f "
             f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} >/dev/null 2>&1 && break; i=$((i + 1)); sleep 10; done; "
             f"test $i -lt 120960 || exit 75; ossutil cp -r {shlex.quote(relay_uri + x + '/')} {shlex.quote(target + '/' + x + '/')} {cfg} "
             f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} --job 30 --parallel 16 --checkpoint-dir \"$WD/ckpt-{x}\" -u ) &"
@@ -142,12 +142,12 @@ def commands(plan: dict, config: Config, job_id: str, include_prefixes=None) -> 
         copies = (
             f"mkdir -p {shlex.quote(relay_mount)} && ossutil cp -r {shlex.quote(source_uri)} {shlex.quote(relay_mount + '/')} {cfg} "
             f"--endpoint {shlex.quote(config.source_endpoint)} --region {shlex.quote(config.source_region)} "
-            f"--job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\""
+            f"--job 30 --parallel 16 --checkpoint-dir \"$WD/ckpt\""
         )
         xw_steps = (
             f"ossutil cp -r {shlex.quote(relay_uri)} {shlex.quote(target + '/')} {cfg} "
             f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} "
-            f"--job 16 --parallel 8 --checkpoint-dir \"$WD/ckpt\" -u; "
+            f"--job 30 --parallel 16 --checkpoint-dir \"$WD/ckpt\" -u; "
             f"{{ du -sb {shlex.quote(target)} 2>/dev/null | awk '{{print $1}}'; find {shlex.quote(target)} -type f 2>/dev/null | wc -l; }} > \"$WD/progress\""
         )
     sg = (
