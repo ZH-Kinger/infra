@@ -284,10 +284,11 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
     bytes_done = int(progress[0]) if progress and progress[0].isdigit() else 0
     objects_done = int(progress[1]) if len(progress) > 1 and progress[1].isdigit() else 0
     discovered = {}
-    match = re.search(r"(?:Estimated|Total)\s+(\d+) objects,\s*([0-9.]+)\s*(KiB|MiB|GiB|TiB)", relay_log)
-    if match:
-        factor = {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[match.group(3)]
-        discovered = {"source_objects": int(match.group(1)), "source_bytes": int(float(match.group(2)) * factor)}
+    matches = re.findall(r"(?:Estimated|Total)\s+(\d+) objects,\s*([0-9.]+)\s*(KiB|MiB|GiB|TiB)", relay_log)
+    if matches:
+        match = matches[-1]
+        factor = {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[match[2]]
+        discovered = {"source_objects": int(match[0]), "source_bytes": int(float(match[1]) * factor)}
     percent = re.findall(r"(\d+(?:\.\d+)?)%", relay_log)
     if percent:
         discovered["source_percent"] = float(percent[-1])
