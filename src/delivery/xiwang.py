@@ -130,7 +130,7 @@ def commands(plan: dict, config: Config, job_id: str, include_prefixes=None) -> 
             f"touch {shlex.quote(config.sg_mount_root + '/' + meta_prefix + '/' + x + '.done')} ) &"
             for x in items
         ]
-        sg_steps = " ".join(" ".join(sg_parts[i:i + 4]) + " wait;" for i in range(0, len(sg_parts), 4))
+        sg_steps = "; ".join(" ".join(sg_parts[i:i + 4]) + " wait" for i in range(0, len(sg_parts), 4))
         xw_parts = [
             f"( i=0; while [ $i -lt 120960 ]; do ossutil cp {shlex.quote('oss://' + relay_bucket + '/' + meta_prefix + '/' + x + '.done')} \"$WD/ready-{x}\" {cfg} -f "
             f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} >/dev/null 2>&1 && break; i=$((i + 1)); sleep 10; done; "
@@ -138,7 +138,7 @@ def commands(plan: dict, config: Config, job_id: str, include_prefixes=None) -> 
             f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} --job 30 --parallel 16 --checkpoint-dir \"$WD/ckpt-{x}\" -u ) &"
             for x in items
         ]
-        xw_steps = " ".join(" ".join(xw_parts[i:i + 4]) + " wait;" for i in range(0, len(xw_parts), 4)) + " b=$(du -sb " + shlex.quote(target) + " 2>/dev/null | awk '{print $1}'); o=$(find " + shlex.quote(target) + " -type f 2>/dev/null | wc -l); printf '%s\\n%s\\n' \"$b\" \"$o\" > \"$WD/progress\""
+        xw_steps = "; ".join(" ".join(xw_parts[i:i + 4]) + " wait" for i in range(0, len(xw_parts), 4)) + "; b=$(du -sb " + shlex.quote(target) + " 2>/dev/null | awk '{print $1}'); o=$(find " + shlex.quote(target) + " -type f 2>/dev/null | wc -l); printf '%s\\n%s\\n' \"$b\" \"$o\" > \"$WD/progress\""
         copies = sg_steps
     else:
         copies = (
