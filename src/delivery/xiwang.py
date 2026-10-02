@@ -281,6 +281,7 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
     relay, pull = info.get("relay", ("", "", ""))[0], info.get("pull", ("", "", ""))[0]
     progress = info.get("pull", ("", "", ""))[1].splitlines()
     relay_log = info.get("relay", ("", "", ""))[2]
+    pull_log = info.get("pull", ("", "", ""))[2]
     bytes_done = int(progress[0]) if progress and progress[0].isdigit() else 0
     objects_done = int(progress[1]) if len(progress) > 1 and progress[1].isdigit() else 0
     discovered = {}
@@ -297,10 +298,21 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
         n, amount, unit = done[-1]
         bytes_done = int(float(amount) * {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[unit])
         objects_done = int(n)
+    pull_done = re.findall(r"done:\((\d+)\s+(?:files|objects),\s*([0-9.]+)\s*(KiB|MiB|GiB|TiB)\)", pull_log)
+    if pull_done:
+        n, amount, unit = pull_done[-1]
+        bytes_done = int(float(amount) * {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[unit])
+        objects_done = int(n)
+    speeds = re.findall(r"avg\s+([0-9.]+)\s*(KiB|MiB|GiB|TiB)/s", pull_log)
+    if speeds:
+        amount, unit = speeds[-1]
+        speed_bps = int(float(amount) * {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[unit])
+    else:
+        speed_bps = 0
     if pull == "0" and relay == "0":
-        return {"status": "DONE", "done": True, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, **discovered}
+        return {"status": "DONE", "done": True, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, **discovered}
     if relay.isdigit() and relay != "0":
-        return {"status": "FAILED", "done": False, "failed": True, "error": f"新加坡 worker 退出码 {relay}", "bytes": bytes_done, "objects": objects_done, **discovered}
+        return {"status": "FAILED", "done": False, "failed": True, "error": f"新加坡 worker 退出码 {relay}", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, **discovered}
     if pull.isdigit() and pull != "0":
-        return {"status": "FAILED", "done": False, "failed": True, "error": f"曦望 worker 退出码 {pull}", "bytes": bytes_done, "objects": objects_done, **discovered}
-    return {"status": "RUNNING", "done": False, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, **discovered}
+        return {"status": "FAILED", "done": False, "failed": True, "error": f"曦望 worker 退出码 {pull}", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, **discovered}
+    return {"status": "RUNNING", "done": False, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, **discovered}
