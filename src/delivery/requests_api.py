@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextlib
 import re
 import sys
+import time
 from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
@@ -154,6 +155,17 @@ def ticket_view(ticket: dict, *, viewer: Caller, links: Optional[dict] = None) -
         for e in ticket.get("events", [])
     ]
     claimed_password = password_claims(ticket) > 0
+    relay_speed = int(ticket.get("move_relay_speed_bps") or 0)
+    pull_speed = int(ticket.get("move_speed_bps") or 0)
+    total_bytes = int(ticket.get("move_source_bytes") or 0)
+    relay_done = int(ticket.get("move_relay_bytes") or 0)
+    pull_done = int(ticket.get("move_bytes") or 0)
+    relay_eta = int(max(0, total_bytes - relay_done) / relay_speed) if relay_speed and total_bytes else None
+    pull_eta = int(max(0, total_bytes - pull_done) / pull_speed) if pull_speed and total_bytes else None
+    eta_values = [x for x in (relay_eta, pull_eta) if x is not None]
+    elapsed = None
+    if ticket.get("move_started_ts"):
+        elapsed = max(0, int(time.time() - float(ticket["move_started_ts"])))
     view = {
         "id": ticket.get("id"),
         "kind": ticket.get("kind"),
@@ -193,6 +205,10 @@ def ticket_view(ticket: dict, *, viewer: Caller, links: Optional[dict] = None) -
         "move_updated_ts": ticket.get("move_updated_ts") if ticket.get("kind") == "transfer" else None,
         "move_speed_bps": ticket.get("move_speed_bps") if ticket.get("kind") == "transfer" else None,
         "move_relay_speed_bps": ticket.get("move_relay_speed_bps") if ticket.get("kind") == "transfer" else None,
+        "move_relay_eta_seconds": relay_eta if ticket.get("kind") == "transfer" else None,
+        "move_pull_eta_seconds": pull_eta if ticket.get("kind") == "transfer" else None,
+        "move_eta_seconds": max(eta_values) if eta_values else None,
+        "move_elapsed_seconds": elapsed if ticket.get("kind") == "transfer" else None,
         "move_speed_history": ticket.get("move_speed_history", [])[-180:] if ticket.get("kind") == "transfer" else [],
         "move_source_bytes": ticket.get("move_source_bytes") if ticket.get("kind") == "transfer" else None,
         "move_source_objects": ticket.get("move_source_objects") if ticket.get("kind") == "transfer" else None,

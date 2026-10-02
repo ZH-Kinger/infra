@@ -1037,6 +1037,8 @@ export function requestRoutes(ctx) {
       r.kind === "transfer" && r.move_relay_speed_bps ? ["杭州 → 新加坡", `${formatBytes(r.move_relay_speed_bps)}/秒`] : null,
       r.kind === "transfer" && r.move_speed_bps ? ["新加坡 → 曦望", `${formatBytes(r.move_speed_bps)}/秒`] : null,
       r.kind === "transfer" && r.move_source_bytes ? ["当前阶段扫描总量", `${formatBytes(r.move_source_bytes)}（${Number(r.move_source_percent || 0).toFixed(1)}%）`] : null,
+      r.kind === "transfer" && r.move_elapsed_seconds != null ? ["已耗时", formatDuration(r.move_elapsed_seconds)] : null,
+      r.kind === "transfer" && r.move_eta_seconds != null ? ["预计剩余", formatDuration(r.move_eta_seconds)] : null,
       r.kind === "transfer" && r.move_error ? ["迁移提示", r.move_error] : null,
       r.template.policies && r.template.policies.length ? ["授予的权限", policyList(r.template.policies)] : null,
       ["申请理由", r.reason],
@@ -1073,6 +1075,14 @@ export function requestRoutes(ctx) {
     const labels = { new: "等待提交", running: "传输中", done: "已完成", failed: "传输失败", review: "等待管理员确认" };
     const base = labels[r.move_stage] || r.move_stage || "等待调度";
     return r.move_stage === "running" ? `${base}（后台定时刷新）` : base;
+  }
+
+  function formatDuration(seconds) {
+    let n = Math.max(0, Number(seconds || 0));
+    const d = Math.floor(n / 86400); n %= 86400;
+    const h = Math.floor(n / 3600); n %= 3600;
+    const m = Math.floor(n / 60);
+    return `${d ? `${d}天 ` : ""}${h ? `${h}小时 ` : ""}${m}分钟`;
   }
 
   function speedChart(rows) {
