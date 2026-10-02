@@ -310,6 +310,11 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
         n, amount, unit = pull_done[-1]
         bytes_done = int(float(amount) * {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[unit])
         objects_done = int(n)
+    skipped = re.findall(r"skipped:\((\d+)\s+(?:files|objects),\s*([0-9.]+)\s*(KiB|MiB|GiB|TiB)\)", pull_log)
+    if skipped:
+        n, amount, unit = skipped[-1]
+        bytes_done += int(float(amount) * {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[unit])
+        objects_done += int(n)
     speeds = re.findall(r"avg\s+([0-9.]+)\s*(KiB|MiB|GiB|TiB)/s", pull_log)
     if speeds:
         amount, unit = speeds[-1]
