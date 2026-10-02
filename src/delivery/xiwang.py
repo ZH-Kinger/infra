@@ -309,10 +309,15 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
         speed_bps = int(float(amount) * {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[unit])
     else:
         speed_bps = 0
+    relay_speeds = re.findall(r"avg\s+([0-9.]+)\s*(KiB|MiB|GiB|TiB)/s", relay_log)
+    relay_speed_bps = 0
+    if relay_speeds:
+        amount, unit = relay_speeds[-1]
+        relay_speed_bps = int(float(amount) * {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[unit])
     if pull == "0" and relay == "0":
-        return {"status": "DONE", "done": True, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, **discovered}
+        return {"status": "DONE", "done": True, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, **discovered}
     if relay.isdigit() and relay != "0":
-        return {"status": "FAILED", "done": False, "failed": True, "error": f"新加坡 worker 退出码 {relay}", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, **discovered}
+        return {"status": "FAILED", "done": False, "failed": True, "error": f"新加坡 worker 退出码 {relay}", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, **discovered}
     if pull.isdigit() and pull != "0":
-        return {"status": "FAILED", "done": False, "failed": True, "error": f"曦望 worker 退出码 {pull}", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, **discovered}
-    return {"status": "RUNNING", "done": False, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, **discovered}
+        return {"status": "FAILED", "done": False, "failed": True, "error": f"曦望 worker 退出码 {pull}", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, **discovered}
+    return {"status": "RUNNING", "done": False, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, **discovered}

@@ -317,6 +317,11 @@ def advance(ticket: dict, status: dict, *, now: Optional[float] = None) -> dict:
         out["move_objects"] = int(status.get("objects") or 0)
         if status.get("speed_bps") is not None:
             out["move_speed_bps"] = int(status.get("speed_bps") or 0)
+        if status.get("relay_speed_bps") is not None:
+            out["move_relay_speed_bps"] = int(status.get("relay_speed_bps") or 0)
+        for key in ("source_bytes", "source_objects", "source_percent"):
+            if status.get(key) is not None:
+                out[f"move_{key}"] = status[key]
     if status.get("done"):
         out["move_stage"] = STAGE_DONE
         out["move_done_ts"] = at
