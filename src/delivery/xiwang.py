@@ -265,13 +265,18 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
     config = config or Config.from_env()
     work = _job_dir(config, job_id)
     results = []
+    connection_errors = []
     for host, port, user, key, host_key, marker in (
         (config.sg_host, config.sg_port, config.sg_user, config.sg_key_file, config.sg_host_key, "relay"),
         (config.xw_host, config.xw_port, config.xw_user, config.xw_key_file, config.xw_host_key, "pull"),
     ):
-        client = _connect(host, port, user, key, host_key)
         try:
-            rc, out, err = _exec(client, f"cat {shlex.quote(work)}/{marker}.rc 2>/dev/null || true; echo PROGRESS; cat {shlex.quote(work)}/progress 2>/dev/null || true; echo LOG; tail -n 20 {shlex.quote(work)}/{marker}.log 2>/dev/null || true")
+            client = _connect(host, port, user, key, host_key)
+        except XiwangError as exc:
+            connection_errors.append(f"{marker} 主机 {host}:{port}：{exc}")
+            continue
+        try:
+            rc, out, err = _exec(client, f"cat {shlex.quote(work)}/{marker}.rc 2>/dev/null || true; echo PROGRESS; cat {shlex.quote(work)}/progress 2>/dev/null || true; echo LOG; tail -c 12000 {shlex.quote(work)}/{marker}.log 2>/dev/null || true", timeout=12)
             raw, _, rest = out.partition("PROGRESS\n")
             progress, _, log = rest.partition("LOG\n")
             results.append((marker, raw.strip(), progress.strip(), log.strip()))
@@ -314,10 +319,10 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
     if relay_speeds:
         amount, unit = relay_speeds[-1]
         relay_speed_bps = int(float(amount) * {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[unit])
-    if pull == "0" and relay == "0":
+    if pull == "0" and relay == "0" and not connection_errors:
         return {"status": "DONE", "done": True, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, **discovered}
     if relay.isdigit() and relay != "0":
         return {"status": "FAILED", "done": False, "failed": True, "error": f"新加坡 worker 退出码 {relay}", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, **discovered}
     if pull.isdigit() and pull != "0":
         return {"status": "FAILED", "done": False, "failed": True, "error": f"曦望 worker 退出码 {pull}", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, **discovered}
-    return {"status": "RUNNING", "done": False, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, **discovered}
+    return {"status": "RUNNING", "done": False, "failed": False, "error": "; ".join(connection_errors), "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, **discovered}
