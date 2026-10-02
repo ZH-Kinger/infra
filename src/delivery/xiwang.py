@@ -122,21 +122,23 @@ def commands(plan: dict, config: Config, job_id: str, include_prefixes=None) -> 
     if items:
         if any(not re.fullmatch(r"[A-Za-z0-9._-]+", x) for x in items) or len(set(items)) != len(items):
             raise XiwangError("曦望同步子目录白名单不合法")
-        sg_steps = " ".join(
+        sg_parts = [
             f"( mkdir -p {shlex.quote(relay_mount + '/' + x)} && ossutil cp -r {shlex.quote(source_uri + x + '/') } {shlex.quote(relay_mount + '/' + x + '/') } {cfg} "
             f"--endpoint {shlex.quote(config.source_endpoint)} --region {shlex.quote(config.source_region)} "
             f"--job 30 --parallel 16 --checkpoint-dir \"$WD/ckpt-{x}\" && "
             f"mkdir -p {shlex.quote(config.sg_mount_root + '/' + meta_prefix)} && "
             f"touch {shlex.quote(config.sg_mount_root + '/' + meta_prefix + '/' + x + '.done')} ) &"
             for x in items
-        ) + " wait"
-        xw_steps = " ".join(
+        ]
+        sg_steps = " ".join(" ".join(sg_parts[i:i + 4]) + " wait" for i in range(0, len(sg_parts), 4))
+        xw_parts = [
             f"( i=0; while [ $i -lt 120960 ]; do ossutil cp {shlex.quote('oss://' + relay_bucket + '/' + meta_prefix + '/' + x + '.done')} \"$WD/ready-{x}\" {cfg} -f "
             f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} >/dev/null 2>&1 && break; i=$((i + 1)); sleep 10; done; "
             f"test $i -lt 120960 || exit 75; ossutil cp -r {shlex.quote(relay_uri + x + '/')} {shlex.quote(target + '/' + x + '/')} {cfg} "
             f"--endpoint {shlex.quote(config.relay_endpoint)} --region {shlex.quote(config.relay_region)} --job 30 --parallel 16 --checkpoint-dir \"$WD/ckpt-{x}\" -u ) &"
             for x in items
-        ) + " wait; b=$(du -sb " + shlex.quote(target) + " 2>/dev/null | awk '{print $1}'); o=$(find " + shlex.quote(target) + " -type f 2>/dev/null | wc -l); printf '%s\\n%s\\n' \"$b\" \"$o\" > \"$WD/progress\""
+        ]
+        xw_steps = " ".join(" ".join(xw_parts[i:i + 4]) + " wait" for i in range(0, len(xw_parts), 4)) + "; b=$(du -sb " + shlex.quote(target) + " 2>/dev/null | awk '{print $1}'); o=$(find " + shlex.quote(target) + " -type f 2>/dev/null | wc -l); printf '%s\\n%s\\n' \"$b\" \"$o\" > \"$WD/progress\""
         copies = sg_steps
     else:
         copies = (
