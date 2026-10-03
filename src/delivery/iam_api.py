@@ -34,6 +34,7 @@ DEFAULT_BASE = "https://iam.wuji-tech.com/ext/cloud-accounts"
 #: 接口回 400 是好的结局；真正危险的是拼成另一个存在的平台，把人的阿里云登录名写进火山
 APPS = {
     "aliyun/1704065796538912": "aliyun-main",
+    "aliyun/1339279783371949": "aliyun-it",
     "volcano/2111674479": "volcano-main",
 }
 
