@@ -323,6 +323,8 @@ def advance(ticket: dict, status: dict, *, now: Optional[float] = None) -> dict:
             out["move_relay_bytes"] = int(status.get("relay_bytes") or 0)
         if status.get("relay_objects") is not None:
             out["move_relay_objects"] = int(status.get("relay_objects") or 0)
+        if status.get("target_total_bytes") is not None:
+            out["move_xiwang_total_bytes"] = int(status.get("target_total_bytes") or 0)
         history = list(ticket.get("move_speed_history") or [])
         history.append({
             "ts": int(at),

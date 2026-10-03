@@ -202,6 +202,7 @@ def ticket_view(ticket: dict, *, viewer: Caller, links: Optional[dict] = None) -
         "move_bytes": ticket.get("move_bytes") if ticket.get("kind") == "transfer" else None,
         "move_objects": ticket.get("move_objects") if ticket.get("kind") == "transfer" else None,
         "move_xiwang_bytes": ticket.get("move_bytes") if ticket.get("kind") == "transfer" else None,
+        "move_xiwang_total_bytes": ticket.get("move_xiwang_total_bytes") if ticket.get("kind") == "transfer" else None,
         "move_xiwang_objects": ticket.get("move_objects") if ticket.get("kind") == "transfer" else None,
         "move_relay_bytes": ticket.get("move_relay_bytes") if ticket.get("kind") == "transfer" else None,
         "move_relay_objects": ticket.get("move_relay_objects") if ticket.get("kind") == "transfer" else None,

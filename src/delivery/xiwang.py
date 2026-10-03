@@ -246,7 +246,7 @@ def submit(plan: dict, job_id: str, *, config: Optional[Config] = None, credenti
             endpoint = config.source_endpoint if host == config.sg_host else config.relay_endpoint
             _write_config(client, path, _oss_ini(credentials or {}, endpoint=endpoint))
             stage = 'relay' if host == config.sg_host else 'pull'
-            worker = f"set -eu\nWD={shlex.quote(work)}\nexport WD\ntrap 'rc=$?; printf \"%s\\n\" \"$rc\" > \"$WD/{stage}.rc\"; rm -f -- {shlex.quote(path)}' EXIT\n{script}\n"
+            worker = f"set -eu\nWD={shlex.quote(work)}\nexport WD\nmkdir -p \"$WD\" && printf '%s\n' {shlex.quote(got['target'])} > \"$WD/target\"\ntrap 'rc=$?; printf \"%s\\n\" \"$rc\" > \"$WD/{stage}.rc\"; rm -f -- {shlex.quote(path)}' EXIT\n{script}\n"
             encoded = base64.b64encode(worker.encode()).decode()
             rc, out, err = _exec(client, f"mkdir -p {shlex.quote(work)}; nohup bash -c \"$(echo {encoded} | base64 -d)\" > {shlex.quote(work)}/{'relay' if host == config.sg_host else 'pull'}.log 2>&1 & echo $!", timeout=30)
             if rc != 0 or not out.strip():
@@ -279,10 +279,18 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
             connection_errors.append(f"{marker} 主机 {host}:{port}：{exc}")
             continue
         try:
-            rc, out, err = _exec(client, f"cat {shlex.quote(work)}/{marker}.rc 2>/dev/null || true; echo PROGRESS; cat {shlex.quote(work)}/progress 2>/dev/null || true; echo LOG; tail -c 12000 {shlex.quote(work)}/{marker}.log 2>/dev/null || true", timeout=12)
+            extra = ""
+            if marker == "pull":
+                # 目标目录总量每 5 分钟采一次并缓存，避免每次刷新都递归扫描 NAS。
+                extra = (f"; target=$(cat {shlex.quote(work)}/target 2>/dev/null || true); "
+                         f"if [ -n \"$target\" ] && ([ ! -s {shlex.quote(work)}/target-total ] || [ $(date +%s) -gt $(( $(stat -c %Y {shlex.quote(work)}/target-total 2>/dev/null || echo 0) + 300 )) ]); then "
+                         f"timeout 120 du -sb \"$target\" 2>/dev/null | awk '{{print $1}}' > {shlex.quote(work)}/target-total.tmp && mv -f {shlex.quote(work)}/target-total.tmp {shlex.quote(work)}/target-total || true; fi; "
+                         f"echo TARGET; cat {shlex.quote(work)}/target-total 2>/dev/null || true")
+            rc, out, err = _exec(client, f"cat {shlex.quote(work)}/{marker}.rc 2>/dev/null || true; echo PROGRESS; cat {shlex.quote(work)}/progress 2>/dev/null || true; echo LOG; tail -c 12000 {shlex.quote(work)}/{marker}.log 2>/dev/null || true{extra}", timeout=130)
             raw, _, rest = out.partition("PROGRESS\n")
-            progress, _, log = rest.partition("LOG\n")
-            results.append((marker, raw.strip(), progress.strip(), log.strip()))
+            progress, _, rest = rest.partition("LOG\n")
+            log, _, target_total = rest.partition("TARGET\n")
+            results.append((marker, raw.strip(), progress.strip(), log.strip(), target_total.strip()))
             try:
                 _, telemetry, _ = _exec(client, sample_command(job_id, f"/mnt/aliyun-hz/worldengine/.panel-meta/{job_id}"), timeout=8)
                 results[-1] = results[-1] + (parse_sample(telemetry.strip()),)
@@ -291,12 +299,17 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
         finally:
             client.close()
     info = {row[0]: row[1:] for row in results}
-    relay, pull = info.get("relay", ("", "", ""))[0], info.get("pull", ("", "", ""))[0]
-    progress = info.get("pull", ("", "", ""))[1].splitlines()
+    relay, pull = info.get("relay", ("", "", "", ""))[0], info.get("pull", ("", "", "", ""))[0]
+    target_total_raw = info.get("pull", ("", "", "", "", ""))[3] if len(info.get("pull", ())) > 3 else ""
+    try:
+        target_total_bytes = int(target_total_raw.splitlines()[0]) if target_total_raw else 0
+    except (ValueError, IndexError):
+        target_total_bytes = 0
+    progress = info.get("pull", ("", "", "", ""))[1].splitlines()
     relay_log = info.get("relay", ("", "", ""))[2]
     pull_log = info.get("pull", ("", "", ""))[2]
-    relay_telemetry = info.get("relay", ("", "", "", {}))[3]
-    pull_telemetry = info.get("pull", ("", "", "", {}))[3]
+    relay_telemetry = info.get("relay", ("", "", "", "", {}))[4]
+    pull_telemetry = info.get("pull", ("", "", "", "", {}))[4]
     bytes_done = int(progress[0]) if progress and progress[0].isdigit() else 0
     objects_done = int(progress[1]) if len(progress) > 1 and progress[1].isdigit() else 0
     relay_bytes_done = 0
@@ -350,9 +363,9 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
     active_batches = sorted(set(relay_telemetry.get("active", [])) | set(pull_telemetry.get("active", [])))
     completed_batches = sorted(set(relay_telemetry.get("completed", [])) | set(pull_telemetry.get("completed", [])))
     if pull == "0" and relay == "0" and not connection_errors:
-        return {"status": "DONE", "done": True, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, "relay_bytes": relay_bytes_done, "relay_objects": relay_objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, **discovered}
+        return {"status": "DONE", "done": True, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, "relay_bytes": relay_bytes_done, "relay_objects": relay_objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, "target_total_bytes": target_total_bytes, **discovered}
     if relay.isdigit() and relay != "0":
-        return {"status": "FAILED", "done": False, "failed": True, "error": f"新加坡 worker 退出码 {relay}", "bytes": bytes_done, "objects": objects_done, "relay_bytes": relay_bytes_done, "relay_objects": relay_objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, **discovered}
+        return {"status": "FAILED", "done": False, "failed": True, "error": f"新加坡 worker 退出码 {relay}", "bytes": bytes_done, "objects": objects_done, "relay_bytes": relay_bytes_done, "relay_objects": relay_objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, "target_total_bytes": target_total_bytes, **discovered}
     if pull.isdigit() and pull != "0":
-        return {"status": "FAILED", "done": False, "failed": True, "error": f"曦望 worker 退出码 {pull}", "bytes": bytes_done, "objects": objects_done, "relay_bytes": relay_bytes_done, "relay_objects": relay_objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, **discovered}
-    return {"status": "RUNNING", "done": False, "failed": False, "error": "; ".join(connection_errors), "bytes": bytes_done, "objects": objects_done, "relay_bytes": relay_bytes_done, "relay_objects": relay_objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, **discovered}
+        return {"status": "FAILED", "done": False, "failed": True, "error": f"曦望 worker 退出码 {pull}", "bytes": bytes_done, "objects": objects_done, "relay_bytes": relay_bytes_done, "relay_objects": relay_objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, "target_total_bytes": target_total_bytes, **discovered}
+    return {"status": "RUNNING", "done": False, "failed": False, "error": "; ".join(connection_errors), "bytes": bytes_done, "objects": objects_done, "relay_bytes": relay_bytes_done, "relay_objects": relay_objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, "target_total_bytes": target_total_bytes, **discovered}
