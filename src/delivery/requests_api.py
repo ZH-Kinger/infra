@@ -125,7 +125,7 @@ class Caller:
         )
 
 
-def ticket_view(ticket: dict, *, viewer: Caller, links: Optional[dict] = None) -> dict:
+def ticket_view(ticket: dict, *, viewer: Caller, links: Optional[dict] = None, include_history: bool = True) -> dict:
     """links：飞书审批实例的跳转链接 {"pc", "mobile"}，只给申请人本人和管理员。"""
     tpl = ticket.get("template") or {}
     own = ticket.get("applicant", {}).get("union_id") == viewer.union_id
@@ -215,7 +215,7 @@ def ticket_view(ticket: dict, *, viewer: Caller, links: Optional[dict] = None) -
         "move_pull_eta_seconds": pull_eta if ticket.get("kind") == "transfer" else None,
         "move_eta_seconds": max(eta_values) if eta_values else None,
         "move_elapsed_seconds": elapsed if ticket.get("kind") == "transfer" else None,
-        "move_speed_history": ticket.get("move_speed_history", [])[-180:] if ticket.get("kind") == "transfer" else [],
+        "move_speed_history": (ticket.get("move_speed_history", [])[-180:] if include_history else []) if ticket.get("kind") == "transfer" else [],
         "move_active_batches": ticket.get("move_active_batches", []) if ticket.get("kind") == "transfer" else [],
         "move_completed_batches": ticket.get("move_completed_batches", []) if ticket.get("kind") == "transfer" else [],
         "move_source_bytes": ticket.get("move_source_bytes") if ticket.get("kind") == "transfer" else None,
@@ -348,8 +348,8 @@ class RequestsApi:
             return 502, {"error": first[:300]}
 
     @staticmethod
-    def _view(flows: Flows, ticket: dict, caller: Caller) -> dict:
-        view = ticket_view(ticket, viewer=caller, links=flows.approval_links(ticket))
+    def _view(flows: Flows, ticket: dict, caller: Caller, *, include_history: bool = True) -> dict:
+        view = ticket_view(ticket, viewer=caller, links=flows.approval_links(ticket), include_history=include_history)
         if caller.admin:
             view["link_pending"] = flows.link_pending(ticket)
         return view
@@ -419,7 +419,7 @@ class RequestsApi:
                             _quiet_sync(flows, item["id"])
                     items = flows.store.mine(caller.union_id)
                 items = sorted(items, key=lambda x: x.get("created_at", ""), reverse=True)
-                return 200, {"requests": [self._view(flows, x, caller) for x in items]}
+                return 200, {"requests": [self._view(flows, x, caller, include_history=False) for x in items]}
             if method == "POST" and not admin:
                 ticket = flows.submit(
                     applicant=caller.applicant,
