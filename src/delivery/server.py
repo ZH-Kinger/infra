@@ -1999,6 +1999,14 @@ def make_handler(
                         "union_id": user.union_id,
                     },
                 )
+                # 控制台入口也按部门分流：账号归属仍以名册为准，只替换登录入口。
+                # 这样第二主账号尚未完成下一轮采集时，IT 人员也能先进入正确的 SSO。
+                it_sso, is_it = _aliyun_sso_for(found.person, app_id, app_secret)
+                if is_it and it_sso:
+                    for card in detail.get("accounts") or []:
+                        if card.get("platform") == "aliyun":
+                            card["console_url"] = it_sso
+                            card["console_label"] = "进入阿里云（信息技术部）控制台 ↗"
                 # 名下资源：管理员在资产页逐个指派的那些。放进账号卡片是因为「我在这个云账号里
                 # 有哪台机器」和「我在这个云账号里有什么权限」是同一个问题的两半，
                 # 分在两页看，人就得自己在脑子里拼

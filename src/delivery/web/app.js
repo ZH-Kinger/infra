@@ -452,7 +452,7 @@ function consoleLink(acct) {
     ? h(
         "a",
         { class: "btn ghost small push", href: url, target: "_blank", rel: "noopener noreferrer" },
-        "进入控制台 ↗",
+        acct.console_label || "进入控制台 ↗",
       )
     : null;
 }
