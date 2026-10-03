@@ -24,7 +24,8 @@ Environment=PYTHONPATH=/opt/infra/src
 # **`--directory feishu` 不能省。** 不带它默认是 `--directory none`，
 # 只用本地已有的映射，名册会从 219 人塌回 55 人 —— 而少掉的人表现为
 # 「没有 union_id」，和权限没配长得一模一样，查起来毫无线索。
-ExecStart=/usr/bin/python3 -m delivery.cli refresh --trust-unverified-when-derivable --directory feishu
+ExecStart=/usr/bin/python3 -m delivery.cli refresh --trust-unverified-when-derivable --directory feishu \
+  --aliyun-profile ALIYUN --aliyun-profile ALIYUN_IT_COLLECTOR
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

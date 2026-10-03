@@ -18,4 +18,5 @@ WorkingDirectory=/opt/infra
 EnvironmentFile=/etc/delivery/refresh.env
 Environment=PYTHONPATH=/opt/infra/src
 # 采不到的账号记 error，不写成「没有资源」—— 和权限快照同一个原则
-ExecStart=/usr/bin/python3 -m delivery.cli assets collect --out identity/assets.json
+ExecStart=/usr/bin/python3 -m delivery.cli assets collect --out identity/assets.json \
+  --aliyun-profile ALIYUN --aliyun-profile ALIYUN_IT_COLLECTOR
