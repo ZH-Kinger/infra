@@ -126,7 +126,7 @@ def commands(plan: dict, config: Config, job_id: str, include_prefixes=None) -> 
         sg_parts = [
             f"( mkdir -p {shlex.quote(relay_mount + '/' + x)} && ossutil cp -r {shlex.quote(source_uri + x + '/') } {shlex.quote(relay_mount + '/' + x + '/') } {cfg} "
             f"--endpoint {shlex.quote(config.source_endpoint)} --region {shlex.quote(config.source_region)} "
-            f"--job 30 --parallel 16 --checkpoint-dir \"$WD/ckpt-{x}\" && "
+            f"--job 30 --parallel 16 --checkpoint-dir \"$WD/ckpt-{x}\" -u && "
             f"mkdir -p {shlex.quote(config.sg_mount_root + '/' + meta_prefix)} && "
             f"touch {shlex.quote(config.sg_mount_root + '/' + meta_prefix + '/' + x + '.done')} ) &"
             for x in items
@@ -145,7 +145,7 @@ def commands(plan: dict, config: Config, job_id: str, include_prefixes=None) -> 
         copies = (
             f"mkdir -p {shlex.quote(relay_mount)} && ossutil cp -r {shlex.quote(source_uri)} {shlex.quote(relay_mount + '/')} {cfg} "
             f"--endpoint {shlex.quote(config.source_endpoint)} --region {shlex.quote(config.source_region)} "
-            f"--job 30 --parallel 16 --checkpoint-dir \"$WD/ckpt\""
+            f"--job 30 --parallel 16 --checkpoint-dir \"$WD/ckpt\" -u"
         )
         xw_steps = (
             f"ossutil cp -r {shlex.quote(relay_uri)} {shlex.quote(target + '/')} {cfg} "
