@@ -1099,16 +1099,26 @@ export function requestRoutes(ctx) {
 
   function speedChart(rows) {
     const raw = (rows || []).slice(-180);
-    const sample = (key, count = 180) => {
-      if (!raw.length) return [];
-      if (raw.length === 1) return Array(count).fill(Number(raw[0][key] || 0));
-      return Array.from({ length: count }, (_, i) => {
-        const pos = i * (raw.length - 1) / (count - 1);
-        const lo = Math.floor(pos); const hi = Math.ceil(pos); const f = pos - lo;
-        return Number(raw[lo][key] || 0) * (1 - f) + Number(raw[hi][key] || 0) * f;
+    const clean = (key) => {
+      const values = raw.map(x => Math.max(0, Number(x[key] || 0)));
+      // 只剔除孤立突刺；连续升高的真实速度不会被当成异常。
+      return values.map((v, i) => {
+        const around = values.slice(Math.max(0, i - 2), Math.min(values.length, i + 3)).filter(Boolean).sort((a, b) => a - b);
+        if (!around.length) return 0;
+        const median = around[Math.floor(around.length / 2)];
+        return v > median * 4 || v < median / 4 ? median : v;
       });
     };
-    const relay = sample("relay_bps"); const pull = sample("pull_bps");
+    const sample = (values, count = 180) => {
+      if (!values.length) return [];
+      if (values.length === 1) return Array(count).fill(values[0]);
+      return Array.from({ length: count }, (_, i) => {
+        const pos = i * (values.length - 1) / (count - 1);
+        const lo = Math.floor(pos); const hi = Math.ceil(pos); const f = pos - lo;
+        return values[lo] * (1 - f) + values[hi] * f;
+      });
+    };
+    const relay = sample(clean("relay_bps")); const pull = sample(clean("pull_bps"));
     const canvas = h("canvas", { class: "speed-canvas", width: "900", height: "250", role: "img", "aria-label": "最近三小时两段传输速度曲线" });
     const draw = () => {
       const ctx = canvas.getContext("2d"); const dpr = window.devicePixelRatio || 1;
