@@ -1,0 +1,14 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Action": "sts:AssumeRole",
+      "Effect": "Allow",
+      "Principal": {
+        "RAM": [
+          "acs:ram::1339279783371949:user/panel-executor"
+        ]
+      }
+    }
+  ]
+}
