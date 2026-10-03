@@ -14,7 +14,7 @@ import { renderIam } from "./iam.js";
 import { renderOffline } from "./offline.js";
 import { accessRoutes } from "./access.js";
 import { permissionRoutes } from "./permissions.js";
-import { requestRoutes } from "./requests.js?v=20261002-speed-bars";
+import { requestRoutes } from "./requests.js?v=20261003-arrival-bytes";
 
 const state = { session: null, loginUrl: "", peopleFilter: "all", peopleAccount: "", peopleQuery: "", peopleCache: null, peopleJump: "", flash: null };
 
