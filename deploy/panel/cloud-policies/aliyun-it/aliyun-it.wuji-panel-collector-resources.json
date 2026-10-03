@@ -1,0 +1,50 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "oss:ListBuckets",
+        "oss:GetBucketInfo",
+        "oss:GetBucketLocation",
+        "ecs:DescribeInstances",
+        "ecs:DescribeDisks",
+        "ecs:DescribeSecurityGroups",
+        "ecs:DescribeSecurityGroupAttribute",
+        "ecs:DescribeImages",
+        "ecs:DescribeZones",
+        "ecs:DescribeRegions",
+        "ecs:DescribeInstanceTypes",
+        "ecs:DescribeAvailableResource",
+        "ecs:DescribeNetworkInterfaces",
+        "ecs:DescribeSnapshots",
+        "vpc:DescribeVpcs",
+        "vpc:DescribeVSwitches",
+        "vpc:DescribeNatGateways",
+        "vpc:DescribeEipAddresses",
+        "vpc:DescribeRouteTableList"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Deny",
+      "Action": [
+        "ecs:Run*",
+        "ecs:Create*",
+        "ecs:Delete*",
+        "ecs:Modify*",
+        "ecs:Start*",
+        "ecs:Stop*",
+        "ecs:Reboot*",
+        "ecs:Attach*",
+        "ecs:Detach*",
+        "ecs:Authorize*",
+        "ecs:Revoke*",
+        "vpc:Create*",
+        "vpc:Delete*",
+        "vpc:Modify*"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
