@@ -198,8 +198,13 @@ def ticket_view(ticket: dict, *, viewer: Caller, links: Optional[dict] = None) -
         "result": ticket.get("result", ""),
         # 搬运进行到哪一步。关单时前端要据此提醒「在途迁移关掉后云上任务会失败」
         "move_stage": ticket.get("move_stage", "") if ticket.get("kind") == "transfer" else "",
+        # 最终到达曦望的数据单独命名，避免把中转段进度误看成落盘进度。
         "move_bytes": ticket.get("move_bytes") if ticket.get("kind") == "transfer" else None,
         "move_objects": ticket.get("move_objects") if ticket.get("kind") == "transfer" else None,
+        "move_xiwang_bytes": ticket.get("move_bytes") if ticket.get("kind") == "transfer" else None,
+        "move_xiwang_objects": ticket.get("move_objects") if ticket.get("kind") == "transfer" else None,
+        "move_relay_bytes": ticket.get("move_relay_bytes") if ticket.get("kind") == "transfer" else None,
+        "move_relay_objects": ticket.get("move_relay_objects") if ticket.get("kind") == "transfer" else None,
         "move_error": ticket.get("move_error", "") if ticket.get("kind") == "transfer" else "",
         "move_started_ts": ticket.get("move_started_ts") if ticket.get("kind") == "transfer" else None,
         "move_updated_ts": ticket.get("move_updated_ts") if ticket.get("kind") == "transfer" else None,

@@ -1031,8 +1031,8 @@ export function requestRoutes(ctx) {
     const facts = [
       ["申请内容", r.summary],
       r.kind === "transfer" && r.move_stage ? ["迁移进度", transferProgress(r)] : null,
-      r.kind === "transfer" && r.move_objects !== undefined ? ["已处理对象", `${Number(r.move_objects || 0).toLocaleString()} 个`] : null,
-      r.kind === "transfer" && r.move_bytes !== undefined ? ["已处理数据", formatBytes(r.move_bytes)] : null,
+      r.kind === "transfer" && r.move_xiwang_objects !== undefined ? ["已到达曦望", `${formatBytes(r.move_xiwang_bytes || 0)}（${Number(r.move_xiwang_objects || 0).toLocaleString()} 个对象）`] : null,
+      r.kind === "transfer" && r.move_relay_objects !== undefined ? ["已到新加坡中转", `${formatBytes(r.move_relay_bytes || 0)}（${Number(r.move_relay_objects || 0).toLocaleString()} 个对象）`] : null,
       r.kind === "transfer" && r.move_speed_bps ? ["当前速度", `${formatBytes(r.move_speed_bps)}/秒`] : null,
       r.kind === "transfer" && r.move_relay_speed_bps ? ["杭州 → 新加坡", `${formatBytes(r.move_relay_speed_bps)}/秒`] : null,
       r.kind === "transfer" && r.move_speed_bps ? ["新加坡 → 曦望", `${formatBytes(r.move_speed_bps)}/秒`] : null,
@@ -1116,7 +1116,7 @@ export function requestRoutes(ctx) {
         return r.kind === "credential" ? "审批已通过，正在发放凭证。" : "审批已通过，正在开通。";
       case "fulfilling":
         if (r.kind === "transfer" && r.move_stage === "running") {
-          return `迁移正在进行：${transferProgress(r)}。${r.move_objects !== undefined ? `已处理 ${Number(r.move_objects || 0).toLocaleString()} 个对象、${formatBytes(r.move_bytes || 0)}。` : "后台会继续刷新进度。"}`;
+          return `迁移正在进行：${transferProgress(r)}。${r.move_xiwang_objects !== undefined ? `已到达曦望 ${Number(r.move_xiwang_objects || 0).toLocaleString()} 个对象、${formatBytes(r.move_xiwang_bytes || 0)}。` : "后台会继续刷新进度。"}`;
         }
         if (isManualAccount(r)) {
           const where = PLATFORM_NAME[(r.template || {}).platform || r.platform] || "那个平台";

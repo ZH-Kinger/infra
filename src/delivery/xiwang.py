@@ -299,6 +299,8 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
     pull_telemetry = info.get("pull", ("", "", "", {}))[3]
     bytes_done = int(progress[0]) if progress and progress[0].isdigit() else 0
     objects_done = int(progress[1]) if len(progress) > 1 and progress[1].isdigit() else 0
+    relay_bytes_done = 0
+    relay_objects_done = 0
     discovered = {}
     matches = re.findall(r"(?:Estimated|Total)\s+(\d+) objects,\s*([0-9.]+)\s*(KiB|MiB|GiB|TiB)", relay_log)
     if matches:
@@ -311,8 +313,13 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
     done = re.findall(r"done:\((\d+)\s+(?:files|objects),\s*([0-9.]+)\s*(KiB|MiB|GiB|TiB)\)", relay_log)
     if done:
         n, amount, unit = done[-1]
-        bytes_done = int(float(amount) * {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[unit])
-        objects_done = int(n)
+        relay_bytes_done = int(float(amount) * {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[unit])
+        relay_objects_done = int(n)
+    relay_skipped = re.findall(r"skipped:\((\d+)\s+(?:files|objects),\s*([0-9.]+)\s*(KiB|MiB|GiB|TiB)\)", relay_log)
+    if relay_skipped:
+        n, amount, unit = relay_skipped[-1]
+        relay_bytes_done += int(float(amount) * {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[unit])
+        relay_objects_done += int(n)
     pull_done = re.findall(r"done:\((\d+)\s+(?:files|objects),\s*([0-9.]+)\s*(KiB|MiB|GiB|TiB)\)", pull_log)
     if pull_done:
         n, amount, unit = pull_done[-1]
@@ -339,9 +346,9 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
     active_batches = sorted(set(relay_telemetry.get("active", [])) | set(pull_telemetry.get("active", [])))
     completed_batches = sorted(set(relay_telemetry.get("completed", [])) | set(pull_telemetry.get("completed", [])))
     if pull == "0" and relay == "0" and not connection_errors:
-        return {"status": "DONE", "done": True, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, **discovered}
+        return {"status": "DONE", "done": True, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, "relay_bytes": relay_bytes_done, "relay_objects": relay_objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, **discovered}
     if relay.isdigit() and relay != "0":
-        return {"status": "FAILED", "done": False, "failed": True, "error": f"新加坡 worker 退出码 {relay}", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, **discovered}
+        return {"status": "FAILED", "done": False, "failed": True, "error": f"新加坡 worker 退出码 {relay}", "bytes": bytes_done, "objects": objects_done, "relay_bytes": relay_bytes_done, "relay_objects": relay_objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, **discovered}
     if pull.isdigit() and pull != "0":
-        return {"status": "FAILED", "done": False, "failed": True, "error": f"曦望 worker 退出码 {pull}", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, **discovered}
-    return {"status": "RUNNING", "done": False, "failed": False, "error": "; ".join(connection_errors), "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, **discovered}
+        return {"status": "FAILED", "done": False, "failed": True, "error": f"曦望 worker 退出码 {pull}", "bytes": bytes_done, "objects": objects_done, "relay_bytes": relay_bytes_done, "relay_objects": relay_objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, **discovered}
+    return {"status": "RUNNING", "done": False, "failed": False, "error": "; ".join(connection_errors), "bytes": bytes_done, "objects": objects_done, "relay_bytes": relay_bytes_done, "relay_objects": relay_objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, **discovered}
