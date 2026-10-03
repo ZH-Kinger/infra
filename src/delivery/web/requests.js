@@ -953,7 +953,16 @@ export function requestRoutes(ctx) {
     const url = admin ? `/api/admin/requests/${encodeURIComponent(id)}` : `/api/requests/${encodeURIComponent(id)}`;
     return load(
       async () => (await Promise.all([api(url), loadAccountLabels()]))[0],
-      (data) => mount(detailPage(data.request, { admin, fresh })),
+      (data) => {
+        mount(detailPage(data.request, { admin, fresh }));
+        // 迁移详情页自动刷新，避免用户停留在旧快照；列表页仍按进入时读取。
+        if (data.request?.kind === "transfer" && data.request?.move_stage === "running") {
+          window.setTimeout(() => {
+            const expected = `${admin ? "#admin/" : "#"}request=${encodeURIComponent(id)}`;
+            if (window.location.hash === expected) renderDetail(id, { admin, fresh: false });
+          }, 20000);
+        }
+      },
     );
   }
 
@@ -987,7 +996,7 @@ export function requestRoutes(ctx) {
       isManualAccount(r)
         ? ` 面板开不了${PLATFORM_NAME[(r.template || {}).platform || r.platform] || "这个平台"}的号，要管理员去它的控制台手工建。建好之后这里会更新。`
         : r.kind === "transfer" && r.move_stage === "running"
-          ? ` 已处理 ${Number(r.move_objects || 0).toLocaleString()} 个对象，${formatBytes(r.move_bytes || 0)}；后台会持续刷新。`
+          ? ` 已到达曦望 ${Number(r.move_xiwang_objects || 0).toLocaleString()} 个对象，${formatBytes(r.move_xiwang_bytes || 0)}；每 20 秒自动刷新。`
           : " 这类资源由管理员按 IaC 流程创建，面板不直接创建。开通后这里会更新。"));
     if (r.kind === "credential" && ["done", "revoked"].includes(r.status)) nodes.push(h("div", { class: "banner" }, h("b", {}, "查看凭证的地址在飞书审批的评论里。"), " 那个链接可以反复打开，每次打开都会记在下面的事件里。面板存的是密文，自己也解不开。"));
 
