@@ -341,8 +341,12 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
     if relay_speeds:
         amount, unit = relay_speeds[-1]
         relay_speed_bps = int(float(amount) * {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[unit])
-    relay_speed_bps = int(relay_telemetry.get("speed_bps") or relay_speed_bps)
-    speed_bps = int(pull_telemetry.get("speed_bps") or speed_bps)
+    # /proc/io 统计会把 ossutil 的多个进程和缓存写入重复计数，可能出现
+    # 数 GB/s 的虚高值；原始 ossutil avg 才是链路速率。只有日志没有速率时才用采样兜底。
+    if relay_speed_bps <= 0:
+        relay_speed_bps = int(relay_telemetry.get("speed_bps") or 0)
+    if speed_bps <= 0:
+        speed_bps = int(pull_telemetry.get("speed_bps") or 0)
     active_batches = sorted(set(relay_telemetry.get("active", [])) | set(pull_telemetry.get("active", [])))
     completed_batches = sorted(set(relay_telemetry.get("completed", [])) | set(pull_telemetry.get("completed", [])))
     if pull == "0" and relay == "0" and not connection_errors:
