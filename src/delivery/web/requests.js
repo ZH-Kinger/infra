@@ -1047,7 +1047,7 @@ export function requestRoutes(ctx) {
       r.kind === "transfer" && r.move_speed_bps ? ["新加坡 → 曦望", `${formatBytes(r.move_speed_bps)}/秒`] : null,
       r.kind === "transfer" && r.move_completed_batches?.length ? ["已完成批次", r.move_completed_batches.join("、")] : null,
       r.kind === "transfer" && r.move_active_batches?.length ? ["正在传输", r.move_active_batches.join("、")] : null,
-      r.kind === "transfer" && r.move_source_bytes ? ["当前阶段扫描总量", `${formatBytes(r.move_source_bytes)}（${Number(r.move_source_percent || 0).toFixed(1)}%）`] : null,
+      r.kind === "transfer" && r.move_source_bytes ? ["当前批次扫描总量", `${formatBytes(r.move_source_bytes)}（${Number(r.move_source_percent || 0).toFixed(1)}%）`] : null,
       r.kind === "transfer" && r.move_elapsed_seconds != null ? ["已耗时", formatDuration(r.move_elapsed_seconds)] : null,
       r.kind === "transfer" && r.move_eta_seconds != null ? ["预计剩余", formatDuration(r.move_eta_seconds)] : null,
       r.kind === "transfer" && r.move_error ? ["迁移提示", r.move_error] : null,
@@ -1098,13 +1098,43 @@ export function requestRoutes(ctx) {
 
   function speedChart(rows) {
     const recent = (rows || []).slice(-60);
-    const max = Math.max(1, ...recent.flatMap(x => [Number(x.relay_bps || 0), Number(x.pull_bps || 0)]));
-    const bars = recent.map((x) => h("div", { class: "speed-row" },
-      h("span", { class: "speed-bar relay", style: `width:${Math.max(1, 100 * Number(x.relay_bps || 0) / max)}%` }),
-      h("span", { class: "speed-bar pull", style: `width:${Math.max(1, 100 * Number(x.pull_bps || 0) / max)}%` })));
-    return h("div", { class: "card speed-chart", role: "img", "aria-label": "最近三小时两段传输速度" },
-      bars.length ? bars : h("p", { class: "hint" }, "正在积累速度样本…"),
-      h("p", { class: "hint" }, "蓝色：杭州 → 新加坡；绿色：新加坡 → 曦望；每条为一分钟平均速度"));
+    const canvas = h("canvas", { class: "speed-canvas", width: "900", height: "220", role: "img", "aria-label": "最近三小时两段传输速度曲线" });
+    const draw = () => {
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width; const hgt = canvas.height;
+      const dpr = window.devicePixelRatio || 1;
+      const cssW = canvas.clientWidth || w;
+      if (cssW && Math.abs(canvas.width - cssW * dpr) > 2) {
+        canvas.width = Math.round(cssW * dpr); canvas.height = Math.round(220 * dpr);
+        ctx.scale(dpr, dpr);
+      }
+      const cw = canvas.clientWidth || 900; const ch = 220;
+      ctx.clearRect(0, 0, cw, ch);
+      const relay = recent.map(x => Number(x.relay_bps || 0));
+      const pull = recent.map(x => Number(x.pull_bps || 0));
+      const max = Math.max(1, ...relay, ...pull);
+      const pad = { l: 8, r: 8, t: 12, b: 18 };
+      const plotW = cw - pad.l - pad.r; const plotH = ch - pad.t - pad.b;
+      ctx.strokeStyle = "rgba(148,163,184,.22)"; ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = pad.t + plotH * i / 4;
+        ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(cw - pad.r, y); ctx.stroke();
+      }
+      const path = (values, color, fill) => {
+        if (!values.length) return;
+        const point = (i, v) => [pad.l + (values.length === 1 ? plotW / 2 : plotW * i / (values.length - 1)), pad.t + plotH * (1 - v / max)];
+        ctx.beginPath(); values.forEach((v, i) => { const [x, y] = point(i, v); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+        ctx.lineTo(point(values.length - 1, 0)[0], pad.t + plotH); ctx.lineTo(point(0, 0)[0], pad.t + plotH); ctx.closePath();
+        ctx.fillStyle = fill; ctx.fill();
+        ctx.beginPath(); values.forEach((v, i) => { const [x, y] = point(i, v); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+        ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.stroke();
+      };
+      path(relay, "#2563eb", "rgba(37,99,235,.12)");
+      path(pull, "#16a34a", "rgba(22,163,74,.12)");
+    };
+    requestAnimationFrame(draw);
+    window.addEventListener("resize", draw, { once: true });
+    return h("div", { class: "card speed-chart" }, canvas, h("p", { class: "hint" }, "蓝色：杭州 → 新加坡；绿色：新加坡 → 曦望；每个点为一分钟平均速度"));
   }
 
   function feishuLink(r) {

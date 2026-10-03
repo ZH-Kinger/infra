@@ -203,7 +203,7 @@ h2{font:var(--t-title) var(--ui); letter-spacing:var(--tr-title); margin:0; text
 button.btn{border:0; cursor:pointer; font:inherit}
 button.btn.ghost{border:1px solid var(--hair)}
 button.btn:disabled{opacity:.5; cursor:progress}
-.speed-chart{padding:.75rem; overflow:hidden}.speed-row{display:flex; gap:2px; height:4px; margin:2px 0; background:var(--surface-2)}.speed-bar{display:block; height:4px; min-width:1px}.speed-bar.relay{background:#2563eb}.speed-bar.pull{background:#16a34a}
+.speed-chart{padding:.75rem;overflow:hidden}.speed-canvas{display:block;width:100%;height:220px;background:linear-gradient(180deg,rgba(148,163,184,.06),rgba(148,163,184,.01));border-radius:6px}
 /* 密集表格再紧一档：行距 1.45。数字等宽，列才对得齐 */
 table{border-collapse:collapse; width:100%; font:var(--t-sub) var(--ui); line-height:1.45;
       letter-spacing:var(--tr-sub); font-variant-numeric:tabular-nums}
