@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import stat
+from .transfer_telemetry import parse_sample, sample_command
 from dataclasses import dataclass
 from typing import Optional
 
@@ -282,6 +283,11 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
             raw, _, rest = out.partition("PROGRESS\n")
             progress, _, log = rest.partition("LOG\n")
             results.append((marker, raw.strip(), progress.strip(), log.strip()))
+            try:
+                _, telemetry, _ = _exec(client, sample_command(job_id, f"/mnt/aliyun-hz/worldengine/.panel-meta/{job_id}"), timeout=8)
+                results[-1] = results[-1] + (parse_sample(telemetry.strip()),)
+            except Exception:
+                results[-1] = results[-1] + ({},)
         finally:
             client.close()
     info = {row[0]: row[1:] for row in results}
@@ -289,6 +295,8 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
     progress = info.get("pull", ("", "", ""))[1].splitlines()
     relay_log = info.get("relay", ("", "", ""))[2]
     pull_log = info.get("pull", ("", "", ""))[2]
+    relay_telemetry = info.get("relay", ("", "", "", {}))[3]
+    pull_telemetry = info.get("pull", ("", "", "", {}))[3]
     bytes_done = int(progress[0]) if progress and progress[0].isdigit() else 0
     objects_done = int(progress[1]) if len(progress) > 1 and progress[1].isdigit() else 0
     discovered = {}
@@ -326,10 +334,14 @@ def poll(job_id: str, *, config: Optional[Config] = None) -> dict:
     if relay_speeds:
         amount, unit = relay_speeds[-1]
         relay_speed_bps = int(float(amount) * {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}[unit])
+    relay_speed_bps = int(relay_telemetry.get("speed_bps") or relay_speed_bps)
+    speed_bps = int(pull_telemetry.get("speed_bps") or speed_bps)
+    active_batches = sorted(set(relay_telemetry.get("active", [])) | set(pull_telemetry.get("active", [])))
+    completed_batches = sorted(set(relay_telemetry.get("completed", [])) | set(pull_telemetry.get("completed", [])))
     if pull == "0" and relay == "0" and not connection_errors:
-        return {"status": "DONE", "done": True, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, **discovered}
+        return {"status": "DONE", "done": True, "failed": False, "error": "", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, **discovered}
     if relay.isdigit() and relay != "0":
-        return {"status": "FAILED", "done": False, "failed": True, "error": f"新加坡 worker 退出码 {relay}", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, **discovered}
+        return {"status": "FAILED", "done": False, "failed": True, "error": f"新加坡 worker 退出码 {relay}", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, **discovered}
     if pull.isdigit() and pull != "0":
-        return {"status": "FAILED", "done": False, "failed": True, "error": f"曦望 worker 退出码 {pull}", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, **discovered}
-    return {"status": "RUNNING", "done": False, "failed": False, "error": "; ".join(connection_errors), "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, **discovered}
+        return {"status": "FAILED", "done": False, "failed": True, "error": f"曦望 worker 退出码 {pull}", "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, **discovered}
+    return {"status": "RUNNING", "done": False, "failed": False, "error": "; ".join(connection_errors), "bytes": bytes_done, "objects": objects_done, "speed_bps": speed_bps, "relay_speed_bps": relay_speed_bps, "active_batches": active_batches, "completed_batches": completed_batches, **discovered}

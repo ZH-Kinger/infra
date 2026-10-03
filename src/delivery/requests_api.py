@@ -210,6 +210,8 @@ def ticket_view(ticket: dict, *, viewer: Caller, links: Optional[dict] = None) -
         "move_eta_seconds": max(eta_values) if eta_values else None,
         "move_elapsed_seconds": elapsed if ticket.get("kind") == "transfer" else None,
         "move_speed_history": ticket.get("move_speed_history", [])[-180:] if ticket.get("kind") == "transfer" else [],
+        "move_active_batches": ticket.get("move_active_batches", []) if ticket.get("kind") == "transfer" else [],
+        "move_completed_batches": ticket.get("move_completed_batches", []) if ticket.get("kind") == "transfer" else [],
         "move_source_bytes": ticket.get("move_source_bytes") if ticket.get("kind") == "transfer" else None,
         "move_source_objects": ticket.get("move_source_objects") if ticket.get("kind") == "transfer" else None,
         "move_source_percent": ticket.get("move_source_percent") if ticket.get("kind") == "transfer" else None,

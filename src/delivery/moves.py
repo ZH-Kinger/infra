@@ -331,6 +331,9 @@ def advance(ticket: dict, status: dict, *, now: Optional[float] = None) -> dict:
         for key in ("source_bytes", "source_objects", "source_percent"):
             if status.get(key) is not None:
                 out[f"move_{key}"] = status[key]
+        for key in ("active_batches", "completed_batches"):
+            if status.get(key) is not None:
+                out[f"move_{key}"] = list(status[key])
     if status.get("done"):
         out["move_stage"] = STAGE_DONE
         out["move_done_ts"] = at

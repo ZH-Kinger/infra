@@ -1036,6 +1036,8 @@ export function requestRoutes(ctx) {
       r.kind === "transfer" && r.move_speed_bps ? ["当前速度", `${formatBytes(r.move_speed_bps)}/秒`] : null,
       r.kind === "transfer" && r.move_relay_speed_bps ? ["杭州 → 新加坡", `${formatBytes(r.move_relay_speed_bps)}/秒`] : null,
       r.kind === "transfer" && r.move_speed_bps ? ["新加坡 → 曦望", `${formatBytes(r.move_speed_bps)}/秒`] : null,
+      r.kind === "transfer" && r.move_completed_batches?.length ? ["已完成批次", r.move_completed_batches.join("、")] : null,
+      r.kind === "transfer" && r.move_active_batches?.length ? ["正在传输", r.move_active_batches.join("、")] : null,
       r.kind === "transfer" && r.move_source_bytes ? ["当前阶段扫描总量", `${formatBytes(r.move_source_bytes)}（${Number(r.move_source_percent || 0).toFixed(1)}%）`] : null,
       r.kind === "transfer" && r.move_elapsed_seconds != null ? ["已耗时", formatDuration(r.move_elapsed_seconds)] : null,
       r.kind === "transfer" && r.move_eta_seconds != null ? ["预计剩余", formatDuration(r.move_eta_seconds)] : null,
