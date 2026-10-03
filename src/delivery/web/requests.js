@@ -1048,7 +1048,7 @@ export function requestRoutes(ctx) {
       r.kind === "transfer" && r.move_speed_bps ? ["新加坡 → 曦望", `${formatBytes(r.move_speed_bps)}/秒`] : null,
       r.kind === "transfer" && r.move_completed_batches?.length ? ["已完成批次", r.move_completed_batches.join("、")] : null,
       r.kind === "transfer" && r.move_active_batches?.length ? ["正在传输", r.move_active_batches.join("、")] : null,
-      r.kind === "transfer" && r.move_source_bytes ? ["当前批次扫描总量", `${formatBytes(r.move_source_bytes)}（${Number(r.move_source_percent || 0).toFixed(1)}%）`] : null,
+      r.kind === "transfer" && r.move_source_bytes ? ["当前阶段扫描总量", `${formatBytes(r.move_source_bytes)}（${Number(r.move_source_percent || 0).toFixed(1)}%）`] : null,
       r.kind === "transfer" && r.move_elapsed_seconds != null ? ["已耗时", formatDuration(r.move_elapsed_seconds)] : null,
       r.kind === "transfer" && r.move_eta_seconds != null ? ["预计剩余", formatDuration(r.move_eta_seconds)] : null,
       r.kind === "transfer" && r.move_error ? ["迁移提示", r.move_error] : null,
@@ -1101,7 +1101,6 @@ export function requestRoutes(ctx) {
     const raw = (rows || []).slice(-180);
     const clean = (key) => {
       const values = raw.map(x => Math.max(0, Number(x[key] || 0)));
-      // 只剔除孤立突刺；连续升高的真实速度不会被当成异常。
       return values.map((v, i) => {
         const around = values.slice(Math.max(0, i - 2), Math.min(values.length, i + 3)).filter(Boolean).sort((a, b) => a - b);
         if (!around.length) return 0;
@@ -1147,3 +1146,198 @@ export function requestRoutes(ctx) {
     return h("div", { class: "card speed-chart" }, canvas, h("p", { class: "hint" }, "蓝色：杭州 → 新加坡；绿色：新加坡 → 曦望；每个点为一分钟平均速度，纵轴为 MiB/s 或 GiB/s"));
   }
 
+  function feishuLink(r) {
+    // 飞书 AppLink 手机端和电脑端是两条路径：窄屏或移动端 UA 用手机链接
+    const mobile = window.matchMedia("(max-width: 640px)").matches || /Android|iPhone|iPad/i.test(navigator.userAgent);
+    const url = safeHttps(mobile ? r.approval_url_mobile || r.approval_url : r.approval_url);
+    return url ? h("a", { class: "btn ghost small", href: url, target: "_blank", rel: "noopener noreferrer" }, "在飞书中查看审批 ↗") : null;
+  }
+
+  // 状态卡片里的一句话：现在卡在哪、接下来会发生什么
+  function nextStep(r, admin) {
+    const who = admin ? "申请人" : "你";
+    switch (r.status) {
+      case "pending_approval":
+        return "等审批人在飞书里处理。通过后自动开通，这里会同步更新。";
+      case "approved":
+      case "executing":
+        return r.kind === "credential" ? "审批已通过，正在发放凭证。" : "审批已通过，正在开通。";
+      case "fulfilling":
+        if (r.kind === "transfer" && r.move_stage === "running") {
+          return `迁移正在进行：${transferProgress(r)}。${r.move_xiwang_objects !== undefined ? `已到达曦望 ${Number(r.move_xiwang_objects || 0).toLocaleString()} 个对象、${formatBytes(r.move_xiwang_bytes || 0)}。` : "后台会继续刷新进度。"}`;
+        }
+        if (isManualAccount(r)) {
+          const where = PLATFORM_NAME[(r.template || {}).platform || r.platform] || "那个平台";
+          return admin
+            ? `审批已通过。**面板开不了${where}的号** —— 去它的控制台建好，回来点「回填登录名」，这张单才算完。`
+            : `审批已通过。${where}的号要管理员手工开，开好之后这里会更新。`;
+        }
+        return admin ? "审批已通过。按 IaC 流程创建好之后，点「登记开通结果」把实例信息填进台账。" : "审批已通过，等管理员开通。开通后这里会更新。";
+      case "done":
+        if (r.actions.push_iam) return `子账号已建好，但登录名没写进公司 IAM —— **${who}现在登不进去**。管理员点「补写登录名到公司 IAM」即可。`;
+        if (r.actions.password) return `子账号已开通。${who}可以领取一次性初始密码，首次登录必须修改。`;
+        if (r.kind === "credential") return r.expires_at ? `凭证已签发，查看地址在飞书审批的评论里，${fmtTime(r.expires_at)} 到期。` : "凭证已签发，查看地址在飞书审批的评论里。";
+        return r.expires_at ? `已开通，${fmtTime(r.expires_at)} 到期后自动收回。需要继续用请在到期前重新申请。` : "已开通。";
+      case "failed":
+        return admin ? "开通失败。核对原因后可以重试，或关闭这张申请。" : "";
+      case "withdrawn":
+        return "申请已撤回。";
+      case "closed":
+        // 「原审批继续有效」是这里最要紧的一句：不说的话，管理员的默认反应是让人重新申请、
+        // 重新找人批一遍，而那张批条其实一直还在，每次开通都会重新核对
+        // 不能写成「原审批仍然有效」：被「只有申请人自己批」关掉的单子也走这里，
+        // 对它那句话恰好是反的。重试时会重新核对，核不过就还是开不了 —— 照这个说
+        if (r.actions.reopen) return "这张申请已关闭。原来那张飞书审批还在，「重新打开」后重试开通时会重新核对它，不用重新申请。";
+        return admin ? "这张申请已关闭。云上可能还留着子账号，要收回请用「作废凭证」；清干净后才能重新打开。" : "这张申请已关闭。需要的话可以重新提交一张。";
+      case "revoked":
+        return r.kind === "credential" ? "凭证已到期失效，云上的子账号和密钥已清理。" : "权限已到期收回。";
+      default:
+        return "";
+    }
+  }
+
+  function policyList(policies) {
+    return h(
+      "ul",
+      { class: "policy-facts" },
+      policies.map((p) => h("li", {}, h("code", {}, p.name), p.type === "Custom" ? h("span", { class: "pill" }, "自定义") : null, p.risk ? riskPill(p.risk) : null)),
+    );
+  }
+
+  function lastNote(r) {
+    const e = [...r.events].reverse().find((x) => x.note && ["execute_failed", "submit_failed"].includes(x.event));
+    return e ? e.note : "";
+  }
+
+  function simpleAction(label, url, question, admin, ghost) {
+    const btn = h("button", { type: "button", class: ghost ? "btn ghost small" : "btn small" }, label);
+    btn.addEventListener("click", async () => {
+      if (!window.confirm(question)) return;
+      btn.disabled = true;
+      try {
+        await apiPost(url, {});
+        ctx.route();
+      } catch (err) {
+        btn.disabled = false;
+        window.alert(err.message);
+      }
+    });
+    return btn;
+  }
+
+  //: 人工平台（九章 / TurboAI）的开号单。面板开不了它们的号，回填的是**登录名**，
+  //: 不是实例 ID —— 两件事共用同一个 fulfil 动作，但界面必须分开说。
+  //: 不分开的话管理员照着「例：ECS 通用 2 核 8G」写一句话，会被登录名校验拒成 400，
+  //: 而这是整条链上**唯一一个人类动作**。
+  const MANUAL_PLATFORMS = new Set(["jiuzhang", "turboai"]);
+  function isManualAccount(r) {
+    return r.kind === "account" && MANUAL_PLATFORMS.has((r.template || {}).platform || r.platform);
+  }
+
+  function fulfilManualAction(r) {
+    const where = PLATFORM_NAME[(r.template || {}).platform || r.platform] || "那个平台";
+    const btn = h("button", { type: "button", class: "btn small" }, "回填登录名");
+    btn.addEventListener("click", () => {
+      openDrawer("fulfil-title", (close) => {
+        const login = h("input", { id: "f-login", class: "input", type: "text", placeholder: "wuji-zhangsan" });
+        const msg = h("p", { class: "muted" });
+        const save = h("button", { class: "btn", type: "button" }, "回填");
+        save.addEventListener("click", async () => {
+          if (!login.value.trim()) { msg.textContent = "填你在控制台建好的那个登录名。"; return; }
+          save.disabled = true;
+          msg.textContent = "回填中…";
+          try {
+            await apiPost(`/api/admin/requests/${encodeURIComponent(r.id)}/fulfil`, { note: login.value.trim() });
+            close();
+            ctx.route();
+          } catch (err) { msg.textContent = err.message; save.disabled = false; }
+        });
+        return h("div", { class: "drawer-card" },
+          h("h2", { id: "fulfil-title" }, `回填${where}登录名`),
+          h("div", { class: "drawer-body" },
+            h("p", { class: "muted" }, `面板开不了${where}的号。在它的控制台建好之后，把登录名填这里，这张单才算完。`),
+            field("f-login", "登录名", login, "就是你在控制台里建的那个名字，填错了名册会对不上人。")),
+          h("div", { class: "drawer-foot" }, h("div", { class: "actions" }, save,
+            h("button", { class: "btn ghost", type: "button", onclick: close }, "取消")), msg));
+      });
+    });
+    return btn;
+  }
+
+  function fulfilAction(r) {
+    if (isManualAccount(r)) return fulfilManualAction(r);
+    const btn = h("button", { type: "button", class: "btn small" }, "登记开通结果");
+    btn.addEventListener("click", () => {
+      openDrawer("fulfil-title", (close) => {
+        // 实例 ID 单独一栏，不要埋在描述里：**开通这一刻是唯一确定「这台机器是谁的」
+        // 的时机**，填了这一栏，资产页的归属当场就指给申请人；埋在句子里就只能事后靠猜
+        const ids = h("textarea", { id: "f-ids", class: "input", rows: "3", placeholder: "i-bp1xxxxxxxx\ni-bp1yyyyyyyy" });
+        const note = h("input", { id: "f-note", class: "input", type: "text", placeholder: "例：ECS 通用 2 核 8G，杭州可用区 B" });
+        const msg = h("p", { class: "muted" });
+        const save = h("button", { class: "btn", type: "button" }, "登记");
+        save.addEventListener("click", async () => {
+          if (!note.value.trim()) { msg.textContent = "写一句开通了什么，这行会进台账。"; return; }
+          save.disabled = true;
+          msg.textContent = "登记中…";
+          try {
+            await apiPost(`/api/admin/requests/${encodeURIComponent(r.id)}/fulfil`, {
+              note: note.value.trim(),
+              resource_ids: ids.value.split(/[\s,，、;；]+/).filter(Boolean),
+            });
+            close();
+            ctx.route();
+          } catch (err) { msg.textContent = err.message; save.disabled = false; }
+        });
+        return h("div", { class: "drawer-card" },
+          h("h2", { id: "fulfil-title" }, "登记开通结果"),
+          h("div", { class: "drawer-body" },
+            field("f-ids", "实例 ID", ids, "一行一个，或用逗号分隔。填了就会把这些资源在资产页指给申请人。"),
+            field("f-note", "开通了什么", note, "规格、地域、数量——这行会进台账，申请人看得到。")),
+          h("div", { class: "drawer-foot" }, h("div", { class: "actions" }, save,
+            h("button", { class: "btn ghost", type: "button", onclick: close }, "取消")), msg));
+      });
+    });
+    return btn;
+  }
+
+  function passwordAction(r, slot) {
+    const btn = h("button", { type: "button", class: "btn small" }, "领取控制台初始密码");
+    btn.addEventListener("click", async () => {
+      if (!window.confirm("初始密码只能领取一次，领取后请马上登录并修改。现在领取？")) return;
+      btn.disabled = true;
+      try {
+        const res = await apiPost(`/api/requests/${encodeURIComponent(r.id)}/password`, {});
+        const l = res.login;
+        const link = safeHttps(l.login_url);
+        const panel = h(
+            "div",
+            { class: "card secret" },
+            h("div", { class: "secret-head" }, h("div", {}, h("h2", {}, "控制台登录信息"), h("p", { class: "muted" }, "只显示这一次，5 分钟后自动收起。首次登录必须修改密码。"))),
+            h(
+              "dl",
+              { class: "kv" },
+              h("dt", {}, "用户名"),
+              h("dd", {}, h("code", { class: "secret-value" }, l.username), copyButton(() => l.username)),
+              h("dt", {}, "初始密码"),
+              h("dd", {}, h("code", { class: "secret-value" }, l.password), copyButton(() => l.password)),
+            ),
+            link ? h("div", { class: "form-foot" }, h("a", { class: "btn small", href: link, target: "_blank", rel: "noopener noreferrer" }, "打开控制台登录页")) : null,
+        );
+        fill(slot, panel);
+        // 和凭证一样 5 分钟后收起
+        setTimeout(() => panel.remove(), 5 * 60 * 1000);
+        btn.remove();
+      } catch (err) {
+        btn.disabled = false;
+        window.alert(err.message);
+      }
+    });
+    return btn;
+  }
+
+  // applyForm / applyPage 页面本身用不到（走 openForm → openDrawer / renderApply → mount），
+  // 导出它们是为了能被测试直接调用：申请页是「后端加了一种轴、前端不认识」和
+  // 「切换分类时页面闪一下」这两类 bug 的藏身处，而它们都藏在 load() 和 openDrawer 后面，
+  // 从 renderApply 那头点进来要连带 stub 掉整个请求层和对话框
+  return { renderApply, renderMine, renderAdminList, renderDetail, applyForm, applyPage };
+}
