@@ -1,0 +1,1581 @@
+{
+  "schema": "wuji-request-templates@1",
+  "_note": "桶的地域是匿名探测确认的（OSS 跨地域访问会在错误体里吐出正确 endpoint，TOS 用 403/404 区分），不是猜的。改桶清单时记得一并确认地域，写错会让使用方拿到凭证却连不上。",
+  "templates": [
+    {
+      "id": "aliyun-new-user",
+      "kind": "account",
+      "platform": "aliyun",
+      "account": "1704065796538912",
+      "title": "阿里云子账号",
+      "category": "开账号",
+      "description": "新同事开通阿里云控制台。开通后需由 IT 写入 SSO 属性才能用公司账号登录。默认加入算法组（wuji_Algorithm）—— 云上 73 个子账号里 52 个在这个组，单独再走一张权限单只是让人多等一次",
+      "username_pattern": "^[a-z][a-z0-9.-]{1,31}$",
+      "console_login": true,
+      "risk": "medium",
+      "groups": [
+        "wuji_Algorithm"
+      ],
+      "workspaces": [
+        "hz"
+      ]
+    },
+    {
+      "id": "volcano-new-user",
+      "kind": "account",
+      "platform": "volcano",
+      "account": "2111674479",
+      "title": "火山引擎子账号",
+      "category": "开账号",
+      "description": "新同事开通火山引擎控制台。默认加入 wuji_group —— 火山 46 个子账号里 36 个在这个组，和阿里那边的算法组同理，单独再走一张权限单只是让人多等一次",
+      "username_pattern": "^[A-Za-z][A-Za-z0-9.-]{1,31}$",
+      "console_login": true,
+      "risk": "medium",
+      "groups": [
+        "wuji_group"
+      ]
+    },
+    {
+      "id": "aliyun-algo-group",
+      "kind": "permission",
+      "platform": "aliyun",
+      "account": "1704065796538912",
+      "title": "算法组权限",
+      "category": "用户组",
+      "description": "加入 wuji_Algorithm 用户组，获得该组的既有权限。",
+      "groups": [
+        "wuji_Algorithm"
+      ],
+      "max_days": 180,
+      "risk": "medium"
+    },
+    {
+      "id": "aliyun-oss-download",
+      "kind": "credential",
+      "platform": "aliyun",
+      "account": "1704065796538912",
+      "title": "数据访问凭证 · 下载",
+      "category": "访问凭证",
+      "description": "看清单 + 下载文件内容。不含上传，也不含任何删除。",
+      "role_arn": "acs:ram::1704065796538912:role/panel-oss-download",
+      "caps": [
+        "list",
+        "download"
+      ],
+      "allow_prefix": true,
+      "max_hours": 2160,
+      "buckets": [
+        {
+          "name": "wuji-bucket-hangzhou",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-rl-dataset",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-datasets-hz-6c661af0",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-ego-processed",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "rl-data",
+          "region": "cn-huhehaote"
+        },
+        {
+          "name": "ai-prod-wj-wl-oss",
+          "region": "cn-wulanchabu"
+        },
+        {
+          "name": "data-factorys",
+          "region": "cn-shenzhen"
+        },
+        {
+          "name": "wuji-test-data",
+          "region": "cn-beijing"
+        },
+        {
+          "name": "wuji-bangkok",
+          "region": "ap-southeast-7"
+        },
+        {
+          "name": "wuji-sing",
+          "region": "ap-southeast-1"
+        },
+        {
+          "name": "wuji-data-tran",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "data-infra-emr-log-hgh",
+          "region": "cn-hangzhou"
+        }
+      ],
+      "risk": "medium"
+    },
+    {
+      "id": "aliyun-oss-write",
+      "kind": "credential",
+      "platform": "aliyun",
+      "account": "1704065796538912",
+      "title": "数据访问凭证 · 上传",
+      "category": "访问凭证",
+      "description": "看清单 + 下载 + 上传（含分片）。不含任何删除权限。",
+      "role_arn": "acs:ram::1704065796538912:role/panel-oss-write",
+      "caps": [
+        "list",
+        "download",
+        "write"
+      ],
+      "allow_prefix": true,
+      "max_hours": 2160,
+      "buckets": [
+        {
+          "name": "wuji-bucket-hangzhou",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-rl-dataset",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-datasets-hz-6c661af0",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-ego-processed",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "rl-data",
+          "region": "cn-huhehaote"
+        },
+        {
+          "name": "ai-prod-wj-wl-oss",
+          "region": "cn-wulanchabu"
+        },
+        {
+          "name": "data-factorys",
+          "region": "cn-shenzhen"
+        },
+        {
+          "name": "wuji-test-data",
+          "region": "cn-beijing"
+        },
+        {
+          "name": "wuji-bangkok",
+          "region": "ap-southeast-7"
+        },
+        {
+          "name": "wuji-sing",
+          "region": "ap-southeast-1"
+        },
+        {
+          "name": "wuji-data-tran",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "data-infra-emr-log-hgh",
+          "region": "cn-hangzhou"
+        }
+      ],
+      "risk": "medium"
+    },
+    {
+      "id": "volcano-tos-upload",
+      "kind": "credential",
+      "platform": "volcano",
+      "account": "2111674479",
+      "title": "TOS 访问凭证 · 上传",
+      "category": "访问凭证",
+      "description": "火山 TOS：看清单 + 上传（含分片）。不含下载，不含任何删除。给数据采集方用。",
+      "caps": [
+        "list",
+        "write"
+      ],
+      "allow_prefix": true,
+      "max_hours": 2160,
+      "buckets": [
+        {
+          "name": "wuji-dc-shanghai",
+          "region": "cn-shanghai"
+        },
+        {
+          "name": "data-tran",
+          "region": "cn-shanghai"
+        }
+      ],
+      "risk": "medium"
+    },
+    {
+      "id": "volcano-tos-download",
+      "kind": "credential",
+      "platform": "volcano",
+      "account": "2111674479",
+      "title": "TOS 访问凭证 · 下载",
+      "category": "访问凭证",
+      "description": "火山 TOS：看清单 + 下载。不含上传，也不含任何删除。",
+      "caps": [
+        "list",
+        "download"
+      ],
+      "allow_prefix": true,
+      "max_hours": 2160,
+      "buckets": [
+        {
+          "name": "wuji-dc-shanghai",
+          "region": "cn-shanghai"
+        },
+        {
+          "name": "data-tran",
+          "region": "cn-shanghai"
+        }
+      ],
+      "risk": "medium"
+    },
+    {
+      "id": "aliyun-ecs",
+      "kind": "resource",
+      "platform": "aliyun",
+      "account": "1704065796538912",
+      "title": "ECS 云服务器",
+      "category": "计算",
+      "description": "杭州可用区 B。审批通过后由管理员按 IaC 流程创建，面板负责审批和台账。",
+      "resource_type": "ecs",
+      "region": "cn-hangzhou",
+      "max_days": 365,
+      "params": {
+        "ZoneId": "cn-hangzhou-b",
+        "VSwitchId": "vsw-bp1fv5lj7oh7hbii0j0ae",
+        "SecurityGroupId": "sg-bp15crg7b65gbv69sjd2",
+        "ImageId": "aliyun_4_x64_20G_pro_alibase_20260723.vhd",
+        "InstanceChargeType": "PostPaid",
+        "SystemDisk.Category": "cloud_essd",
+        "InternetMaxBandwidthOut": "0"
+      },
+      "options": [
+        {
+          "id": "project",
+          "label": "项目/系统名称",
+          "text": {
+            "max": 60,
+            "hint": "这台机器给哪个项目用"
+          }
+        },
+        {
+          "id": "env",
+          "label": "使用环境",
+          "choices": [
+            {
+              "id": "dev",
+              "label": "开发",
+              "params": {}
+            },
+            {
+              "id": "test",
+              "label": "测试",
+              "params": {}
+            },
+            {
+              "id": "staging",
+              "label": "预发",
+              "params": {}
+            },
+            {
+              "id": "prod",
+              "label": "生产",
+              "params": {}
+            }
+          ]
+        },
+        {
+          "id": "spec",
+          "label": "规格",
+          "choices": [
+            {
+              "id": "g8i-l",
+              "label": "通用 2 核 8G",
+              "params": {
+                "InstanceType": "ecs.g8i.large"
+              }
+            },
+            {
+              "id": "g8i-xl",
+              "label": "通用 4 核 16G",
+              "params": {
+                "InstanceType": "ecs.g8i.xlarge"
+              }
+            },
+            {
+              "id": "g8i-2xl",
+              "label": "通用 8 核 32G",
+              "params": {
+                "InstanceType": "ecs.g8i.2xlarge"
+              }
+            },
+            {
+              "id": "g8i-3xl",
+              "label": "通用 12 核 48G",
+              "params": {
+                "InstanceType": "ecs.g8i.3xlarge"
+              }
+            },
+            {
+              "id": "g8i-4xl",
+              "label": "通用 16 核 64G",
+              "params": {
+                "InstanceType": "ecs.g8i.4xlarge"
+              }
+            },
+            {
+              "id": "g8i-6xl",
+              "label": "通用 24 核 96G",
+              "params": {
+                "InstanceType": "ecs.g8i.6xlarge"
+              }
+            },
+            {
+              "id": "g8i-8xl",
+              "label": "通用 32 核 128G",
+              "params": {
+                "InstanceType": "ecs.g8i.8xlarge"
+              }
+            },
+            {
+              "id": "c8i-l",
+              "label": "计算 2 核 4G",
+              "params": {
+                "InstanceType": "ecs.c8i.large"
+              }
+            },
+            {
+              "id": "c8i-xl",
+              "label": "计算 4 核 8G",
+              "params": {
+                "InstanceType": "ecs.c8i.xlarge"
+              }
+            },
+            {
+              "id": "c8i-2xl",
+              "label": "计算 8 核 16G",
+              "params": {
+                "InstanceType": "ecs.c8i.2xlarge"
+              }
+            },
+            {
+              "id": "c8i-4xl",
+              "label": "计算 16 核 32G",
+              "params": {
+                "InstanceType": "ecs.c8i.4xlarge"
+              }
+            },
+            {
+              "id": "c8i-8xl",
+              "label": "计算 32 核 64G",
+              "params": {
+                "InstanceType": "ecs.c8i.8xlarge"
+              }
+            },
+            {
+              "id": "r8i-l",
+              "label": "内存 2 核 16G",
+              "params": {
+                "InstanceType": "ecs.r8i.large"
+              }
+            },
+            {
+              "id": "r8i-xl",
+              "label": "内存 4 核 32G",
+              "params": {
+                "InstanceType": "ecs.r8i.xlarge"
+              }
+            },
+            {
+              "id": "r8i-2xl",
+              "label": "内存 8 核 64G",
+              "params": {
+                "InstanceType": "ecs.r8i.2xlarge"
+              }
+            },
+            {
+              "id": "r8i-4xl",
+              "label": "内存 16 核 128G",
+              "params": {
+                "InstanceType": "ecs.r8i.4xlarge"
+              }
+            },
+            {
+              "id": "r8i-8xl",
+              "label": "内存 32 核 256G",
+              "params": {
+                "InstanceType": "ecs.r8i.8xlarge"
+              }
+            }
+          ]
+        },
+        {
+          "id": "image",
+          "label": "操作系统",
+          "choices": [
+            {
+              "id": "alinux4",
+              "label": "Alibaba Cloud Linux 4",
+              "params": {
+                "ImageId": "aliyun_4_x64_20G_alibase_20260901.vhd"
+              }
+            },
+            {
+              "id": "alinux3",
+              "label": "Alibaba Cloud Linux 3",
+              "params": {
+                "ImageId": "aliyun_3_x64_20G_alibase_20260828.vhd"
+              }
+            },
+            {
+              "id": "ubuntu26",
+              "label": "Ubuntu 26.04",
+              "params": {
+                "ImageId": "ubuntu_26_04_x64_20G_alibase_20260828.vhd"
+              }
+            },
+            {
+              "id": "ubuntu24",
+              "label": "Ubuntu 24.04",
+              "params": {
+                "ImageId": "ubuntu_24_04_x64_20G_alibase_20260828.vhd"
+              }
+            },
+            {
+              "id": "ubuntu22",
+              "label": "Ubuntu 22.04",
+              "params": {
+                "ImageId": "ubuntu_22_04_x64_20G_alibase_20260828.vhd"
+              }
+            },
+            {
+              "id": "ubuntu20",
+              "label": "Ubuntu 20.04",
+              "params": {
+                "ImageId": "ubuntu_20_04_x64_20G_alibase_20251031.vhd"
+              }
+            },
+            {
+              "id": "debian13",
+              "label": "Debian 13",
+              "params": {
+                "ImageId": "debian_13_6_x64_20G_alibase_20260828.vhd"
+              }
+            },
+            {
+              "id": "debian12",
+              "label": "Debian 12",
+              "params": {
+                "ImageId": "debian_12_15_x64_20G_alibase_20260828.vhd"
+              }
+            },
+            {
+              "id": "rocky9",
+              "label": "Rocky Linux 9",
+              "params": {
+                "ImageId": "rockylinux_9_8_x64_20G_alibase_20260827.vhd"
+              }
+            },
+            {
+              "id": "rocky8",
+              "label": "Rocky Linux 8",
+              "params": {
+                "ImageId": "rockylinux_8_10_x64_20G_alibase_20260827.vhd"
+              }
+            },
+            {
+              "id": "centos79",
+              "label": "CentOS 7.9",
+              "params": {
+                "ImageId": "centos_7_9_x64_20G_alibase_20240628.vhd"
+              }
+            }
+          ]
+        },
+        {
+          "id": "sysdisk",
+          "label": "系统盘",
+          "number": {
+            "param": "SystemDisk.Size",
+            "min": 40,
+            "max": 500,
+            "step": 10,
+            "default": 100,
+            "unit": " GB"
+          }
+        },
+        {
+          "id": "datadisk",
+          "label": "数据盘",
+          "number": {
+            "param": "DataDisk.1.Size",
+            "min": 20,
+            "max": 32768,
+            "step": 10,
+            "default": 0,
+            "unit": " GB",
+            "omit_zero": true,
+            "with_params": {
+              "DataDisk.1.Category": "cloud_essd",
+              "DataDisk.1.DeleteWithInstance": "true"
+            }
+          }
+        },
+        {
+          "id": "net",
+          "label": "公网带宽",
+          "choices": [
+            {
+              "id": "none",
+              "label": "不要公网 IP",
+              "params": {
+                "InternetMaxBandwidthOut": "0"
+              }
+            },
+            {
+              "id": "m5",
+              "label": "5 Mbps",
+              "params": {
+                "InternetMaxBandwidthOut": "5"
+              }
+            },
+            {
+              "id": "m10",
+              "label": "10 Mbps",
+              "params": {
+                "InternetMaxBandwidthOut": "10"
+              }
+            },
+            {
+              "id": "m50",
+              "label": "50 Mbps",
+              "params": {
+                "InternetMaxBandwidthOut": "50"
+              }
+            },
+            {
+              "id": "m100",
+              "label": "100 Mbps",
+              "params": {
+                "InternetMaxBandwidthOut": "100"
+              }
+            },
+            {
+              "id": "m200",
+              "label": "200 Mbps",
+              "params": {
+                "InternetMaxBandwidthOut": "200"
+              }
+            }
+          ]
+        },
+        {
+          "id": "billing",
+          "label": "公网计费",
+          "hidden_when": {
+            "net": [
+              "none"
+            ]
+          },
+          "choices": [
+            {
+              "id": "traffic",
+              "label": "按流量",
+              "params": {
+                "InternetChargeType": "PayByTraffic"
+              }
+            },
+            {
+              "id": "bandwidth",
+              "label": "固定带宽",
+              "params": {
+                "InternetChargeType": "PayByBandwidth"
+              }
+            }
+          ]
+        }
+      ],
+      "cost_centers": [
+        {
+          "id": "algo",
+          "label": "算法组"
+        },
+        {
+          "id": "data",
+          "label": "数据采集组"
+        },
+        {
+          "id": "infra",
+          "label": "基础设施"
+        },
+        {
+          "id": "product",
+          "label": "产品线"
+        }
+      ],
+      "risk": "medium",
+      "cost_center_other": true,
+      "_network": "安全组 sg-bp15crg7b65gbv69sjd2（wuji-panel-ecs）入方向只有 VPC 内网 10.32.0.0/16 的 22 和 ICMP，没有任何 0.0.0.0/0 规则。要从办公网直连 改 identity/setup-ecs-securitygroup.py 的 OFFICE_CIDRS 再跑一次。",
+      "_no_gpu": "带显卡的规格刻意不放进来：GPU 机器贵且稀缺，走单独的流程，不从这里自助开。"
+    },
+    {
+      "id": "aliyun-rds",
+      "kind": "resource",
+      "platform": "aliyun",
+      "account": "1704065796538912",
+      "title": "RDS 数据库",
+      "category": "数据库",
+      "description": "申请一个 RDS 实例。审批通过后由管理员创建，面板负责审批和台账。",
+      "spec_hint": "上面没覆盖到的写这里：字符集、参数模板、白名单、是否要只读实例。",
+      "max_days": 365,
+      "risk": "high",
+      "cost_centers": [
+        {
+          "id": "algo",
+          "label": "算法组"
+        },
+        {
+          "id": "data",
+          "label": "数据采集组"
+        },
+        {
+          "id": "infra",
+          "label": "基础设施"
+        },
+        {
+          "id": "product",
+          "label": "产品线"
+        }
+      ],
+      "options": [
+        {
+          "id": "project",
+          "label": "项目/系统名称",
+          "text": {
+            "max": 60,
+            "hint": "这个库给哪个项目用"
+          }
+        },
+        {
+          "id": "usage",
+          "label": "存什么",
+          "text": {
+            "max": 120,
+            "hint": "例：标注任务的状态和结果；例：训练任务台账"
+          }
+        },
+        {
+          "id": "env",
+          "label": "使用环境",
+          "choices": [
+            {
+              "id": "dev",
+              "label": "开发",
+              "params": {}
+            },
+            {
+              "id": "test",
+              "label": "测试",
+              "params": {}
+            },
+            {
+              "id": "staging",
+              "label": "预发",
+              "params": {}
+            },
+            {
+              "id": "prod",
+              "label": "生产",
+              "params": {}
+            }
+          ]
+        },
+        {
+          "id": "region",
+          "label": "地域",
+          "choices": [
+            {
+              "id": "hz",
+              "label": "杭州 cn-hangzhou",
+              "params": {}
+            },
+            {
+              "id": "sh",
+              "label": "上海 cn-shanghai",
+              "params": {}
+            },
+            {
+              "id": "bj",
+              "label": "北京 cn-beijing",
+              "params": {}
+            },
+            {
+              "id": "sg",
+              "label": "新加坡 ap-southeast-1",
+              "params": {}
+            }
+          ]
+        },
+        {
+          "id": "engine",
+          "label": "数据库引擎",
+          "choices": [
+            {
+              "id": "mysql80",
+              "label": "MySQL 8.0",
+              "params": {}
+            },
+            {
+              "id": "mysql57",
+              "label": "MySQL 5.7",
+              "params": {}
+            },
+            {
+              "id": "pg16",
+              "label": "PostgreSQL 16",
+              "params": {}
+            },
+            {
+              "id": "pg14",
+              "label": "PostgreSQL 14",
+              "params": {}
+            },
+            {
+              "id": "mssql",
+              "label": "SQL Server",
+              "params": {}
+            }
+          ]
+        },
+        {
+          "id": "arch",
+          "label": "部署形态",
+          "choices": [
+            {
+              "id": "basic",
+              "label": "单机基础版（便宜，重启会断）",
+              "params": {}
+            },
+            {
+              "id": "ha",
+              "label": "主备高可用（默认）",
+              "params": {}
+            },
+            {
+              "id": "cluster",
+              "label": "集群版（带只读节点）",
+              "params": {}
+            }
+          ]
+        },
+        {
+          "id": "spec",
+          "label": "规格",
+          "choices": [
+            {
+              "id": "c1m2",
+              "label": "1 核 2 GB",
+              "params": {}
+            },
+            {
+              "id": "c2m4",
+              "label": "2 核 4 GB",
+              "params": {}
+            },
+            {
+              "id": "c4m8",
+              "label": "4 核 8 GB",
+              "params": {}
+            },
+            {
+              "id": "c8m16",
+              "label": "8 核 16 GB",
+              "params": {}
+            },
+            {
+              "id": "c16m64",
+              "label": "16 核 64 GB",
+              "params": {}
+            },
+            {
+              "id": "c32m128",
+              "label": "32 核 128 GB",
+              "params": {}
+            }
+          ]
+        },
+        {
+          "id": "storage",
+          "label": "存储空间",
+          "number": {
+            "min": 20,
+            "max": 3000,
+            "step": 20,
+            "default": 100,
+            "unit": " GB"
+          }
+        },
+        {
+          "id": "backup",
+          "label": "备份保留",
+          "number": {
+            "min": 7,
+            "max": 730,
+            "step": 1,
+            "default": 7,
+            "unit": " 天"
+          }
+        },
+        {
+          "id": "net",
+          "label": "访问方式",
+          "choices": [
+            {
+              "id": "vpc",
+              "label": "只走内网（默认）",
+              "params": {}
+            },
+            {
+              "id": "public",
+              "label": "还要公网地址",
+              "params": {}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "volcano-ecs",
+      "kind": "resource",
+      "platform": "volcano",
+      "account": "2111674479",
+      "title": "火山云服务器",
+      "category": "计算",
+      "description": "上海可用区 A。审批通过后由管理员按 IaC 流程创建。",
+      "resource_type": "ecs",
+      "region": "cn-shanghai",
+      "max_days": 365,
+      "_naming": "参数名和阿里是两套：规格 InstanceTypeId（阿里 InstanceType）、磁盘 Volumes.N.*（阿里 SystemDisk/DataDisk.N）、数量 Count（阿里 Amount）、安全组 SecurityGroupIds.N（阿里 SecurityGroupId）。见 docs/collab/research/ecs-run-instances-aliyun-vs-volcano.md 的差异清单。",
+      "_network": "安全组 sg-1pmdxp9n1kyyo643rg0rnpqye（wuji-panel-ecs）入方向只有内网 192.168.0.0/16 的 22 和 ICMP，零个 0.0.0.0/0。子网 Subnet-WQyu-A-wuji-i 在 cn-shanghai-a，250 个可用 IP。",
+      "_charge": "火山没有阿里 AutoPay 那种刹车，而且包年包月实例到期或退订前删不掉 —— 误建只能人工退订。所以钉死 PostPaid。另：火山官方请求示例自带 EipAddress.*，照抄即出计费公网 IP，这里整组不传，公网由选项轴显式给。",
+      "params": {
+        "ZoneId": "cn-shanghai-a",
+        "SubnetId": "subnet-3v9jp0br25fcw1w7k951p9bo2",
+        "SecurityGroupIds.1": "sg-1pmdxp9n1kyyo643rg0rnpqye",
+        "ImageId": "image-ydeyv75w64m05jldmzkm",
+        "InstanceChargeType": "PostPaid",
+        "Volumes.1.VolumeType": "ESSD_PL0"
+      },
+      "options": [
+        {
+          "id": "project",
+          "label": "项目/系统名称",
+          "text": {
+            "max": 60,
+            "hint": "这台机器给哪个项目用"
+          }
+        },
+        {
+          "id": "env",
+          "label": "使用环境",
+          "choices": [
+            {
+              "id": "dev",
+              "label": "开发",
+              "params": {}
+            },
+            {
+              "id": "test",
+              "label": "测试",
+              "params": {}
+            },
+            {
+              "id": "staging",
+              "label": "预发",
+              "params": {}
+            },
+            {
+              "id": "prod",
+              "label": "生产",
+              "params": {}
+            }
+          ]
+        },
+        {
+          "id": "spec",
+          "label": "规格",
+          "choices": [
+            {
+              "id": "g4i-l",
+              "label": "通用 2 核 8G",
+              "params": {
+                "InstanceTypeId": "ecs.g4i.large"
+              }
+            },
+            {
+              "id": "g4i-xl",
+              "label": "通用 4 核 16G",
+              "params": {
+                "InstanceTypeId": "ecs.g4i.xlarge"
+              }
+            },
+            {
+              "id": "g4i-2xl",
+              "label": "通用 8 核 32G",
+              "params": {
+                "InstanceTypeId": "ecs.g4i.2xlarge"
+              }
+            },
+            {
+              "id": "g4i-4xl",
+              "label": "通用 16 核 64G",
+              "params": {
+                "InstanceTypeId": "ecs.g4i.4xlarge"
+              }
+            },
+            {
+              "id": "g4i-8xl",
+              "label": "通用 32 核 128G",
+              "params": {
+                "InstanceTypeId": "ecs.g4i.8xlarge"
+              }
+            },
+            {
+              "id": "c4i-l",
+              "label": "计算 2 核 4G",
+              "params": {
+                "InstanceTypeId": "ecs.c4i.large"
+              }
+            },
+            {
+              "id": "c4i-xl",
+              "label": "计算 4 核 8G",
+              "params": {
+                "InstanceTypeId": "ecs.c4i.xlarge"
+              }
+            },
+            {
+              "id": "c4i-2xl",
+              "label": "计算 8 核 16G",
+              "params": {
+                "InstanceTypeId": "ecs.c4i.2xlarge"
+              }
+            },
+            {
+              "id": "c4i-4xl",
+              "label": "计算 16 核 32G",
+              "params": {
+                "InstanceTypeId": "ecs.c4i.4xlarge"
+              }
+            },
+            {
+              "id": "c4i-8xl",
+              "label": "计算 32 核 64G",
+              "params": {
+                "InstanceTypeId": "ecs.c4i.8xlarge"
+              }
+            },
+            {
+              "id": "r4i-l",
+              "label": "内存 2 核 16G",
+              "params": {
+                "InstanceTypeId": "ecs.r4i.large"
+              }
+            },
+            {
+              "id": "r4i-xl",
+              "label": "内存 4 核 32G",
+              "params": {
+                "InstanceTypeId": "ecs.r4i.xlarge"
+              }
+            },
+            {
+              "id": "r4i-2xl",
+              "label": "内存 8 核 64G",
+              "params": {
+                "InstanceTypeId": "ecs.r4i.2xlarge"
+              }
+            },
+            {
+              "id": "r4i-4xl",
+              "label": "内存 16 核 128G",
+              "params": {
+                "InstanceTypeId": "ecs.r4i.4xlarge"
+              }
+            }
+          ]
+        },
+        {
+          "id": "image",
+          "label": "操作系统",
+          "choices": [
+            {
+              "id": "ubuntu24",
+              "label": "Ubuntu 24.04",
+              "params": {
+                "ImageId": "image-ydeyv75w64m05jldmzkm"
+              }
+            },
+            {
+              "id": "ubuntu22",
+              "label": "Ubuntu 22.04",
+              "params": {
+                "ImageId": "image-ybzgkd6yzam05lcwpg41"
+              }
+            },
+            {
+              "id": "ubuntu20",
+              "label": "Ubuntu 20.04",
+              "params": {
+                "ImageId": "image-ybo1s36210glgrl51nbv"
+              }
+            },
+            {
+              "id": "rocky95",
+              "label": "Rocky Linux 9.5",
+              "params": {
+                "ImageId": "image-yzpyj8j5sl4e0wax4krm"
+              }
+            },
+            {
+              "id": "rocky810",
+              "label": "Rocky Linux 8.10",
+              "params": {
+                "ImageId": "image-ydhmbtps08m05kxcflkc"
+              }
+            },
+            {
+              "id": "velinux2",
+              "label": "veLinux 2.0",
+              "params": {
+                "ImageId": "image-yd7m6t27j4m05k8nxjhb"
+              }
+            },
+            {
+              "id": "velinux1",
+              "label": "veLinux 1.0",
+              "params": {
+                "ImageId": "image-ybpsave0h6b1wzqzvuvt"
+              }
+            }
+          ]
+        },
+        {
+          "id": "sysdisk",
+          "label": "系统盘",
+          "number": {
+            "param": "Volumes.1.Size",
+            "min": 40,
+            "max": 500,
+            "step": 10,
+            "default": 100,
+            "unit": " GB"
+          }
+        },
+        {
+          "id": "datadisk",
+          "label": "数据盘",
+          "number": {
+            "param": "Volumes.2.Size",
+            "min": 20,
+            "max": 32768,
+            "step": 10,
+            "default": 0,
+            "unit": " GB",
+            "omit_zero": true,
+            "with_params": {
+              "Volumes.2.VolumeType": "ESSD_PL0",
+              "Volumes.2.DeleteWithInstance": "true"
+            }
+          }
+        },
+        {
+          "id": "net",
+          "label": "公网带宽",
+          "choices": [
+            {
+              "id": "none",
+              "label": "不要公网 IP",
+              "params": {}
+            },
+            {
+              "id": "m5",
+              "label": "5 Mbps",
+              "params": {
+                "EipAddress.BandwidthMbps": "5"
+              }
+            },
+            {
+              "id": "m10",
+              "label": "10 Mbps",
+              "params": {
+                "EipAddress.BandwidthMbps": "10"
+              }
+            },
+            {
+              "id": "m50",
+              "label": "50 Mbps",
+              "params": {
+                "EipAddress.BandwidthMbps": "50"
+              }
+            },
+            {
+              "id": "m100",
+              "label": "100 Mbps",
+              "params": {
+                "EipAddress.BandwidthMbps": "100"
+              }
+            }
+          ]
+        },
+        {
+          "id": "billing",
+          "label": "公网计费",
+          "hidden_when": {
+            "net": [
+              "none"
+            ]
+          },
+          "choices": [
+            {
+              "id": "traffic",
+              "label": "按流量",
+              "params": {
+                "EipAddress.ChargeType": "PayByTraffic"
+              }
+            },
+            {
+              "id": "bandwidth",
+              "label": "固定带宽",
+              "params": {
+                "EipAddress.ChargeType": "PayByBandwidth"
+              }
+            }
+          ]
+        }
+      ],
+      "cost_centers": [
+        {
+          "id": "algo",
+          "label": "算法组"
+        },
+        {
+          "id": "data",
+          "label": "数据采集组"
+        },
+        {
+          "id": "infra",
+          "label": "基础设施"
+        },
+        {
+          "id": "product",
+          "label": "产品线"
+        }
+      ],
+      "cost_center_other": true,
+      "risk": "medium"
+    },
+    {
+      "id": "oss-dir",
+      "kind": "storage",
+      "platform": "aliyun",
+      "account": "1704065796538912",
+      "title": "新建数据目录",
+      "category": "存储",
+      "risk": "low",
+      "description": "在数据桶里开一个新批次的目录。选桶和数据类型，按规范逐层填（来源、批次……），路径由系统拼。能选哪些类型由数据类型词表决定。",
+      "buckets": [
+        {
+          "name": "wuji-provider-hz",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-bucket-hangzhou",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-sing",
+          "region": "ap-southeast-1"
+        },
+        {
+          "name": "wuji-processed-hz",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-processed-sing",
+          "region": "ap-southeast-1"
+        }
+      ]
+    },
+    {
+      "id": "data-type-new",
+      "kind": "datatype",
+      "platform": "aliyun",
+      "account": "1704065796538912",
+      "title": "新增数据类型",
+      "category": "存储",
+      "risk": "medium",
+      "description": "给数据桶加一种新的一级目录（比如仿真数据）。所有桶共用一张词表，审批通过后自动写进去，「新建数据目录」里就能选。",
+      "buckets": [
+        {
+          "name": "wuji-provider-hz",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-bucket-hangzhou",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-sing",
+          "region": "ap-southeast-1"
+        },
+        {
+          "name": "wuji-processed-hz",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-processed-sing",
+          "region": "ap-southeast-1"
+        }
+      ]
+    },
+    {
+      "id": "oss-move",
+      "kind": "transfer",
+      "platform": "aliyun",
+      "account": "1704065796538912",
+      "title": "数据迁移",
+      "category": "存储",
+      "risk": "medium",
+      "description": "把一个目录搬到另一个地方。填两个路径，走哪条链由系统判断 —— 同云、跨云、并行文件系统，以及九章 GPFS 往返都走这一个入口。九章回传先落 wuji-data-tran/staging/，校验后再沉降到主数据桶。",
+      "buckets": [
+        {
+          "name": "wuji-bucket-hangzhou",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-egocentric-processed",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-data-tran",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-test-data",
+          "region": "cn-beijing"
+        },
+        {
+          "name": "wuji-sing",
+          "region": "ap-southeast-1"
+        },
+        {
+          "name": "wuji-bangkok",
+          "region": "ap-southeast-7"
+        },
+        {
+          "name": "data-factorys",
+          "region": "cn-shenzhen"
+        },
+        {
+          "name": "data-tran",
+          "region": "cn-shanghai"
+        },
+        {
+          "name": "wuji-dc-shanghai",
+          "region": "cn-shanghai"
+        },
+        {
+          "name": "wuji-ego-processed",
+          "region": "cn-shanghai"
+        },
+        {
+          "name": "wuji-egocentric-data",
+          "region": "cn-shanghai"
+        },
+        {
+          "name": "ego-output",
+          "region": "cn-shanghai"
+        },
+        {
+          "name": "data-infra-sha",
+          "region": "cn-shanghai"
+        },
+        {
+          "name": "data-sync-b2d",
+          "region": "cn-shanghai"
+        },
+        {
+          "name": "eog-pretrain-code",
+          "region": "cn-shanghai"
+        },
+        {
+          "name": "umi-tos-raw",
+          "region": "cn-guangzhou"
+        },
+        {
+          "name": "umi-tos-lerobot",
+          "region": "cn-guangzhou"
+        },
+        {
+          "name": "umi-tos-lance",
+          "region": "cn-guangzhou"
+        },
+        {
+          "name": "umi-tos-internet",
+          "region": "cn-guangzhou"
+        },
+        {
+          "name": "umi-tos-internet-lance",
+          "region": "cn-guangzhou"
+        }
+      ],
+      "filesystems": [
+        {
+          "id": "bmcpfs-00000ub3ici1dnniit2i0",
+          "region": "cn-hangzhou"
+        },
+        {
+          "id": "vepfs-cnshef4f4b647664",
+          "region": "cn-shanghai"
+        },
+        {
+          "id": "jz-b200",
+          "region": "cn-beijing",
+          "cloud": "jiuzhang"
+        }
+      ]
+    },
+    {
+      "id": "pai-workspace-hz",
+      "kind": "permission",
+      "platform": "aliyun",
+      "account": "1704065796538912",
+      "title": "加入工作空间 · 杭州",
+      "category": "工作空间",
+      "risk": "low",
+      "description": "加入杭州的 PAI 工作空间，并开好个人目录（CPFS + OSS 各一条数据集）。新开的阿里云账号会自动加入；老账号、或者开号时没加上的，从这里补。",
+      "workspaces": [
+        "hz"
+      ]
+    },
+    {
+      "id": "pai-workspace-sing",
+      "kind": "permission",
+      "platform": "aliyun",
+      "account": "1704065796538912",
+      "title": "加入工作空间 · 新加坡",
+      "category": "工作空间",
+      "risk": "low",
+      "description": "加入新加坡的 PAI 工作空间（DSW / DLC / 数据集都在里面），并在那儿给你开个人目录（CPFS + OSS 各一条数据集）。",
+      "workspaces": [
+        "sing"
+      ]
+    },
+    {
+      "id": "aliyun-it-new-user",
+      "kind": "account",
+      "platform": "aliyun",
+      "account": "1339279783371949",
+      "title": "阿里云（IT部）子账号",
+      "category": "开账号",
+      "description": "仅对IT部开放。创建后加入 wuji-it 用户组，通过信息技术部阿里云 SSO 登录。",
+      "username_pattern": "^[a-z][a-z0-9.-]{1,31}$",
+      "console_login": true,
+      "risk": "medium",
+      "groups": [
+        "wuji-it"
+      ],
+      "workspaces": [],
+      "departments": [
+        "IT部"
+      ]
+    },
+    {
+      "id": "aliyun-it-group",
+      "kind": "permission",
+      "platform": "aliyun",
+      "account": "1339279783371949",
+      "title": "阿里云（IT部）用户组权限",
+      "category": "用户组",
+      "description": "仅对IT部开放，加入 wuji-it 用户组。",
+      "groups": [
+        "wuji-it"
+      ],
+      "max_days": 180,
+      "risk": "medium",
+      "departments": [
+        "IT部"
+      ]
+    },
+    {
+      "id": "aliyun-it-oss-download",
+      "kind": "credential",
+      "platform": "aliyun",
+      "account": "1339279783371949",
+      "title": "阿里云（IT部）OSS · 下载",
+      "category": "访问凭证",
+      "description": "仅对IT部开放。只允许第二主账号登记的 OSS 桶。",
+      "role_arn": "acs:ram::1339279783371949:role/panel-oss-download",
+      "caps": [
+        "list",
+        "download"
+      ],
+      "allow_prefix": true,
+      "max_hours": 2160,
+      "buckets": [
+        {
+          "name": "wuji-it",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-product",
+          "region": "cn-shenzhen"
+        }
+      ],
+      "risk": "medium",
+      "departments": [
+        "IT部"
+      ],
+      "groups": []
+    },
+    {
+      "id": "aliyun-it-oss-write",
+      "kind": "credential",
+      "platform": "aliyun",
+      "account": "1339279783371949",
+      "title": "阿里云（IT部）OSS · 上传",
+      "category": "访问凭证",
+      "description": "仅对IT部开放。只允许第二主账号登记的 OSS 桶。",
+      "role_arn": "acs:ram::1339279783371949:role/panel-oss-write",
+      "caps": [
+        "list",
+        "download",
+        "write"
+      ],
+      "allow_prefix": true,
+      "max_hours": 2160,
+      "buckets": [
+        {
+          "name": "wuji-it",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-product",
+          "region": "cn-shenzhen"
+        }
+      ],
+      "risk": "medium",
+      "departments": [
+        "IT部"
+      ],
+      "groups": []
+    },
+    {
+      "id": "aliyun-information-new-user",
+      "kind": "account",
+      "platform": "aliyun",
+      "account": "1339279783371949",
+      "title": "阿里云（信息化中心）子账号",
+      "category": "开账号",
+      "description": "仅对信息化中心开放。创建后加入 wuji-information 用户组，通过信息技术部阿里云 SSO 登录。",
+      "username_pattern": "^[a-z][a-z0-9.-]{1,31}$",
+      "console_login": true,
+      "risk": "medium",
+      "groups": [
+        "wuji-information"
+      ],
+      "workspaces": [],
+      "departments": [
+        "信息化中心"
+      ]
+    },
+    {
+      "id": "aliyun-information-group",
+      "kind": "permission",
+      "platform": "aliyun",
+      "account": "1339279783371949",
+      "title": "阿里云（信息化中心）用户组权限",
+      "category": "用户组",
+      "description": "仅对信息化中心开放，加入 wuji-information 用户组。",
+      "groups": [
+        "wuji-information"
+      ],
+      "max_days": 180,
+      "risk": "medium",
+      "departments": [
+        "信息化中心"
+      ]
+    },
+    {
+      "id": "aliyun-information-oss-download",
+      "kind": "credential",
+      "platform": "aliyun",
+      "account": "1339279783371949",
+      "title": "阿里云（信息化中心）OSS · 下载",
+      "category": "访问凭证",
+      "description": "仅对信息化中心开放。只允许第二主账号登记的 OSS 桶。",
+      "role_arn": "acs:ram::1339279783371949:role/panel-oss-download",
+      "caps": [
+        "list",
+        "download"
+      ],
+      "allow_prefix": true,
+      "max_hours": 2160,
+      "buckets": [
+        {
+          "name": "wuji-it",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-product",
+          "region": "cn-shenzhen"
+        }
+      ],
+      "risk": "medium",
+      "departments": [
+        "信息化中心"
+      ],
+      "groups": []
+    },
+    {
+      "id": "aliyun-information-oss-write",
+      "kind": "credential",
+      "platform": "aliyun",
+      "account": "1339279783371949",
+      "title": "阿里云（信息化中心）OSS · 上传",
+      "category": "访问凭证",
+      "description": "仅对信息化中心开放。只允许第二主账号登记的 OSS 桶。",
+      "role_arn": "acs:ram::1339279783371949:role/panel-oss-write",
+      "caps": [
+        "list",
+        "download",
+        "write"
+      ],
+      "allow_prefix": true,
+      "max_hours": 2160,
+      "buckets": [
+        {
+          "name": "wuji-it",
+          "region": "cn-hangzhou"
+        },
+        {
+          "name": "wuji-product",
+          "region": "cn-shenzhen"
+        }
+      ],
+      "risk": "medium",
+      "departments": [
+        "信息化中心"
+      ],
+      "groups": []
+    }
+  ]
+}

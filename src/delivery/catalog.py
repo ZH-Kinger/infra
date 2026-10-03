@@ -157,6 +157,8 @@ class Template:
     category: str = ""
     #: permission：加入的用户组；account：新账号默认加入的用户组
     groups: tuple = ()
+    #: 申请人必须属于这些飞书部门之一；空 = 不按部门限制
+    departments: tuple = ()
     #: credential：≤12 小时走 STS 时扮演的角色（留空则这个模板只发长期凭证）
     role_arn: str = ""
     #: credential：最长有效期（小时）。申请人填的时长决定用 STS 还是长期 AK
@@ -1005,6 +1007,11 @@ def parse_template(spec: object, index: int, registry=None, types=None) -> Templ
         isinstance(g, str) and _GROUP.match(g) for g in groups
     ):
         raise CatalogError(f"{where}：groups 必须是用户组名数组")
+    departments = spec.get("departments", [])
+    if not isinstance(departments, list) or not all(
+        isinstance(d, str) and d.strip() for d in departments
+    ):
+        raise CatalogError(f"{where}：departments 必须是部门名数组")
 
     kw: dict = {}
     if kind == KIND_PERMISSION:
@@ -1173,6 +1180,7 @@ def parse_template(spec: object, index: int, registry=None, types=None) -> Templ
         category=category,
         approval=approval,
         groups=tuple(groups),
+        departments=tuple(d.strip() for d in departments),
         **kw,
     )
 

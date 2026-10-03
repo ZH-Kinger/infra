@@ -546,6 +546,7 @@ class Flows:
         #: (platform, account) -> bool；这个云账号的凭证发放身份配了没有。None = 不判断
         issuer_ready: Optional[Callable[[str, str], bool]] = None,
         workspace_choices: Optional[Callable[[str, str, str, str], list]] = None,
+        template_allowed: Optional[Callable[[str, object], bool]] = None,
         clock: Callable[[], float] = time.time,
     ):
         self.store = store
@@ -568,6 +569,7 @@ class Flows:
         self._executor_ready = executor_ready
         self._issuer_ready = issuer_ready
         self._workspace_choices = workspace_choices
+        self._template_allowed = template_allowed
         self._clock = clock
         self._last_sync: dict = {}
 
@@ -709,6 +711,15 @@ class Flows:
                 available=state in ("available", "owned")
                 and not (tpl.kind == catalog_mod.KIND_ACCOUNT and state == "owned"),
             )
+            if (
+                tpl.departments
+                and self._template_allowed is not None
+                and not self._template_allowed(union_id, tpl)
+            ):
+                item["state"] = "unavailable"
+                item["available"] = False
+                item["state_note"] = "这个入口仅对对应部门开放"
+                item["unavailable_reason"] = item["state_note"]
             item["unavailable_reason"] = "" if item["available"] else note
             if tpl.kind == catalog_mod.KIND_PERMISSION and self._workspace_choices:
                 choices = {}
@@ -1123,6 +1134,12 @@ class Flows:
     def _validate(self, tpl: catalog_mod.Template, applicant: Applicant, payload: dict) -> tuple:
         payload = payload if isinstance(payload, dict) else {}
         where = f"{catalog_mod.KIND_LABELS[tpl.kind]}「{tpl.title}」"
+        if (
+            tpl.departments
+            and self._template_allowed is not None
+            and not self._template_allowed(applicant.union_id, tpl)
+        ):
+            raise FlowError("这个申请入口只对指定部门开放", 403)
         mine = [
             a
             for a in self.my_accounts(applicant.union_id)

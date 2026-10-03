@@ -1139,6 +1139,22 @@ class Backend:
 
         return self._cached("inventory", self._stamp(self.inventory_path), build)
 
+    def template_allowed(self, union_id: str, tpl) -> bool:
+        """按飞书部门限制申请模板；部门缓存未命中时先保守拒绝，后台刷新后重试。"""
+        wanted = set(getattr(tpl, "departments", ()) or ())
+        if not wanted:
+            return True
+        person = self.people().resolve(union_id=union_id).person
+        if person is None or not person.email:
+            return False
+        app_id = os.environ.get("DELIVERY_FEISHU_APP_ID", "")
+        secret = os.environ.get("DELIVERY_FEISHU_APP_SECRET", "")
+        info = _staff_fast(app_id, secret).get(person.email.lower()) or {}
+        names = set(info.get("department_path") or ())
+        if not names:
+            names.add(str(info.get("department") or ""))
+        return bool(names.intersection(wanted))
+
     def service_names(self) -> list:
         """服务号清单（体检时这些不算「无主」）。没配就是空清单 —— 只会多报几条，不会漏。"""
 
@@ -1452,6 +1468,7 @@ class Backend:
                 executor_ready=provision_executor_configured,
                 issuer_ready=provision_issuer_configured,
                 workspace_choices=self.workspace_choices,
+                template_allowed=self.template_allowed,
             )
         return self._flows
 
