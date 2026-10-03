@@ -720,7 +720,12 @@ class Flows:
                 item["available"] = False
                 item["state_note"] = "这个入口仅对对应部门开放"
                 item["unavailable_reason"] = item["state_note"]
-            item["unavailable_reason"] = "" if item["available"] else note
+            # 部门限制的说明必须保留；这里不能再用上面的通用 note 覆盖，
+            # 否则用户看到的是「没有子账号」等无关原因，误以为账号配置坏了。
+            if item["available"]:
+                item["unavailable_reason"] = ""
+            elif not item.get("unavailable_reason"):
+                item["unavailable_reason"] = item.get("state_note") or note
             if tpl.kind == catalog_mod.KIND_PERMISSION and self._workspace_choices:
                 choices = {}
                 for ws in tpl.workspaces:
