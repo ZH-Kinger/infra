@@ -3469,6 +3469,7 @@ def _employment_statuses(roster, app_id: str, app_secret: str) -> tuple:
 
 
 _staff_cache: dict = {"key": None, "at": 0.0, "value": None}
+_staff_refreshing = set()
 
 # 阿里云第二主账号的入口按飞书部门分流。部门信息来自通讯录缓存，不从浏览器传入，
 # 这样用户不能改请求头把自己伪装成 IT 部门。环境变量允许部署时替换应用地址或部门名。
@@ -3499,12 +3500,34 @@ def _staff(app_id: str, app_secret: str) -> dict:
     return dict(value)
 
 
+def _staff_fast(app_id: str, app_secret: str) -> dict:
+    """不阻塞页面的部门查询：返回缓存，首次查询放后台。"""
+    now = time.time()
+    with _status_lock:
+        cached = _staff_cache.get("value") if _staff_cache.get("key") == app_id else None
+        fresh = bool(cached is not None and now - _staff_cache.get("at", 0.0) < _STATUS_TTL)
+        if app_id not in _staff_refreshing and not fresh:
+            _staff_refreshing.add(app_id)
+
+            def refresh() -> None:
+                try:
+                    _staff(app_id, app_secret)
+                except Exception as exc:  # noqa: BLE001 — 后台刷新不能影响面板
+                    print(f"[sso-route] 后台部门刷新失败：{type(exc).__name__}", file=sys.stderr)
+                finally:
+                    with _status_lock:
+                        _staff_refreshing.discard(app_id)
+
+            threading.Thread(target=refresh, name="sso-department-refresh", daemon=True).start()
+    return dict(cached or {})
+
+
 def _aliyun_sso_for(person, app_id: str, app_secret: str) -> tuple:
     """返回 `(入口, 是否为 IT 分流)`；通讯录暂时不可用时返回空入口。"""
     if person is None or not getattr(person, "email", "") or not app_id or not app_secret:
         return "", False
     try:
-        info = _staff(app_id, app_secret).get(person.email.strip().lower()) or {}
+        info = _staff_fast(app_id, app_secret).get(person.email.strip().lower()) or {}
     except Exception as exc:  # noqa: BLE001 — 登录页不能因通讯录故障崩溃
         print(f"[sso-route] 部门查询失败：{type(exc).__name__}", file=sys.stderr)
         return "", False
