@@ -315,10 +315,11 @@ def advance(ticket: dict, status: dict, *, now: Optional[float] = None) -> dict:
         out["move_updated_ts"] = at
         out["move_bytes"] = int(status.get("bytes") or 0)
         out["move_objects"] = int(status.get("objects") or 0)
+        max_link_bps = 250 * 1024 * 1024
         if status.get("speed_bps") is not None:
-            out["move_speed_bps"] = int(status.get("speed_bps") or 0)
+            out["move_speed_bps"] = min(int(status.get("speed_bps") or 0), max_link_bps)
         if status.get("relay_speed_bps") is not None:
-            out["move_relay_speed_bps"] = int(status.get("relay_speed_bps") or 0)
+            out["move_relay_speed_bps"] = min(int(status.get("relay_speed_bps") or 0), max_link_bps)
         if status.get("relay_bytes") is not None:
             out["move_relay_bytes"] = int(status.get("relay_bytes") or 0)
         if status.get("relay_objects") is not None:

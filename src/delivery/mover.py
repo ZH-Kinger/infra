@@ -729,7 +729,7 @@ def advance_one(
         previous = int(ticket.get("move_bytes") or 0)
         elapsed = float((now or time.time()) - float(ticket.get("move_updated_ts") or ticket.get("move_started_ts") or 0))
         if elapsed > 0 and int(status.get("bytes") or 0) >= previous:
-            status["speed_bps"] = int((int(status.get("bytes") or 0) - previous) / elapsed)
+            status["speed_bps"] = min(int((int(status.get("bytes") or 0) - previous) / elapsed), 250 * 1024 * 1024)
     return moves.advance(ticket, status, now=now)
 
 
