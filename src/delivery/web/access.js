@@ -49,7 +49,7 @@ function platformCard(p) {
     h(
       "div",
       { class: "opt-side" },
-      p.console_url ? h("a", { class: "btn ghost small", href: p.console_url, target: "_blank", rel: "noreferrer noopener" }, "打开控制台") : null,
+      p.console_url ? h("a", { class: "btn ghost small", href: p.console_url, target: "_blank", rel: "noreferrer noopener" }, p.console_label || "打开控制台") : null,
     ),
   );
 }

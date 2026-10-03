@@ -306,7 +306,7 @@ def departments(app_id: str, app_secret: str, *, get=None, token: str = "") -> d
 def staff_index(app_id: str, app_secret: str, *, get=None, token: str = "") -> dict:
     """走完整棵部门树，按**公司邮箱**建索引。
 
-    `{邮箱小写: {"union_id", "name", "department", "department_id"}}`
+    `{邮箱小写: {"union_id", "name", "department", "department_id", "department_path"}}`
 
     为什么用邮箱而不是 union_id：新人**没登录过面板就没有 union_id**，而目录这件事
     不该等他登录。名册里本来就有公司邮箱，飞书的部门成员对象里也带
@@ -327,6 +327,19 @@ def staff_index(app_id: str, app_secret: str, *, get=None, token: str = "") -> d
         while cur and cur in tree:
             n, cur = n + 1, tree[cur][1]
         return n
+
+    def path(did: str) -> tuple:
+        """返回从顶层到当前部门的名称链，路由可以识别任一层部门。"""
+        out = []
+        seen = set()
+        cur = did
+        while cur and cur in tree and cur not in seen:
+            seen.add(cur)
+            name, parent = tree[cur]
+            if name:
+                out.append(name)
+            cur = parent
+        return tuple(reversed(out))
 
     best: dict = {}
     for did, (name, _parent) in tree.items():
@@ -351,6 +364,7 @@ def staff_index(app_id: str, app_secret: str, *, get=None, token: str = "") -> d
                     "name": str(m.get("name") or ""),
                     "department": name,
                     "department_id": did,
+                    "department_path": path(did),
                 },
             )
     return {mail: info for mail, (_d, info) in best.items()}

@@ -2030,6 +2030,7 @@ def make_handler(
                 found = backend.people().resolve(
                     union_id=user.union_id, enterprise_email=user.enterprise_email
                 )
+                it_sso, is_it = _aliyun_sso_for(found.person, app_id, app_secret)
                 mine: dict = {}
                 for ref in found.person.accounts if found.person else ():
                     mine.setdefault(ref.platform, []).append(ref.name)
@@ -2050,6 +2051,9 @@ def make_handler(
                         accounts=sorted(names),
                         notes=list(platform.notes),
                     )
+                    if platform.id == "aliyun" and is_it and it_sso:
+                        got["console_url"] = it_sso
+                        got["console_label"] = "进入阿里云（信息技术部）控制台 ↗"
                     out.append(got)
                 return self._json(200, {"platforms": out})
             if path == "/api/downloads":
@@ -3458,6 +3462,18 @@ def _employment_statuses(roster, app_id: str, app_secret: str) -> tuple:
 
 _staff_cache: dict = {"key": None, "at": 0.0, "value": None}
 
+# 阿里云第二主账号的入口按飞书部门分流。部门信息来自通讯录缓存，不从浏览器传入，
+# 这样用户不能改请求头把自己伪装成 IT 部门。环境变量允许部署时替换应用地址或部门名。
+_ALIYUN_IT_SSO_URL = os.environ.get(
+    "DELIVERY_ALIYUN_IT_SSO_URL",
+    "https://iam.wuji-tech.com/application/saml/aliyun-it/sso/binding/init/",
+)
+_ALIYUN_IT_DEPARTMENTS = tuple(
+    x.strip()
+    for x in os.environ.get("DELIVERY_ALIYUN_IT_DEPARTMENTS", "IT部,信息化中心").split(",")
+    if x.strip()
+)
+
 
 def _staff(app_id: str, app_secret: str) -> dict:
     """在职的人，按公司邮箱索引（`directory.staff_index`）。缓存同 `_employment_statuses`。
@@ -3473,6 +3489,21 @@ def _staff(app_id: str, app_secret: str) -> dict:
     with _status_lock:
         _staff_cache.update(key=app_id, at=time.time(), value=value)
     return dict(value)
+
+
+def _aliyun_sso_for(person, app_id: str, app_secret: str) -> tuple:
+    """返回 `(入口, 是否为 IT 分流)`；通讯录暂时不可用时返回空入口。"""
+    if person is None or not getattr(person, "email", "") or not app_id or not app_secret:
+        return "", False
+    try:
+        info = _staff(app_id, app_secret).get(person.email.strip().lower()) or {}
+    except Exception as exc:  # noqa: BLE001 — 登录页不能因通讯录故障崩溃
+        print(f"[sso-route] 部门查询失败：{type(exc).__name__}", file=sys.stderr)
+        return "", False
+    names = set(info.get("department_path") or ())
+    if not names:
+        names.add(str(info.get("department") or ""))
+    return (_ALIYUN_IT_SSO_URL, True) if names.intersection(_ALIYUN_IT_DEPARTMENTS) else ("", False)
 
 
 def serve(
