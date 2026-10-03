@@ -402,6 +402,7 @@ _COMMON = {
     "risk",
     "category",
     "approval",
+    "departments",
 }
 #: 服务键的字符集。和用户名那套一样严 —— 它要在两个系统之间对字符串
 _SERVICE_KEY = re.compile(r"\A[a-z][a-z0-9-]{1,31}\Z")

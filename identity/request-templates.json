@@ -1443,8 +1443,7 @@
       "risk": "medium",
       "departments": [
         "IT部"
-      ],
-      "groups": []
+      ]
     },
     {
       "id": "aliyun-it-oss-write",
@@ -1475,8 +1474,7 @@
       "risk": "medium",
       "departments": [
         "IT部"
-      ],
-      "groups": []
+      ]
     },
     {
       "id": "aliyun-information-new-user",
@@ -1542,8 +1540,7 @@
       "risk": "medium",
       "departments": [
         "信息化中心"
-      ],
-      "groups": []
+      ]
     },
     {
       "id": "aliyun-information-oss-write",
@@ -1574,8 +1571,7 @@
       "risk": "medium",
       "departments": [
         "信息化中心"
-      ],
-      "groups": []
+      ]
     }
   ]
 }
