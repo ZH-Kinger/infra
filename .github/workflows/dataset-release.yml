@@ -92,7 +92,7 @@ jobs:
       cpfs_runner: ${{ steps.check.outputs.cpfs_runner }}
       pai_dataset_id: ${{ steps.check.outputs.pai_dataset_id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 校验 ref 不是可变引用
         run: |
@@ -134,7 +134,7 @@ jobs:
       # 数据源注册表校验：oss-ingest 的来源必须是注册过的、内容稳定的位置。
       # 单独成 step 而不是塞进上面的 case——heredoc 的结束符必须落在
       # YAML 块标量的基准缩进上，嵌在 case 里就永远不会闭合。
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         if: inputs.mode == 'oss-ingest'
         with:
           python-version: "3.11"
@@ -256,8 +256,8 @@ jobs:
       object_store_uri: ${{ steps.archive.outputs.object_store_uri }}
       object_store_prefix: ${{ steps.archive.outputs.object_store_prefix }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - run: python -m pip install -e '.[all]'
@@ -330,7 +330,7 @@ jobs:
               print(f"object_store_prefix={os.environ['INPUT_ARCHIVE_PREFIX'].strip('/')}")
           PY
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.MANIFEST_ARTIFACT }}
           path: ${{ runner.temp }}/manifest.jsonl
@@ -357,8 +357,8 @@ jobs:
       manifest_sha256: ${{ steps.scan.outputs.manifest_sha256 }}
       file_count: ${{ steps.scan.outputs.file_count }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - run: python -m pip install -e '.[all]'
@@ -406,7 +406,7 @@ jobs:
           print(f"file_count={d['file_count']}")
           PY
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.MANIFEST_ARTIFACT }}
           path: ${{ runner.temp }}/manifest.jsonl
@@ -440,13 +440,13 @@ jobs:
     outputs:
       commit_id: ${{ steps.commit.outputs.commit_id }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - run: python -m pip install -e '.[lakefs]'
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ${{ env.MANIFEST_ARTIFACT }}
           path: ${{ runner.temp }}
@@ -525,15 +525,15 @@ jobs:
         ${{ (inputs.mode == 'cpfs-ingest' || inputs.mode == 'cpfs-adopt' || inputs.mode == 'oss-ingest')
         && needs.ingest-commit.outputs.commit_id || inputs.ref }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - run: python -m pip install -e '.[all]'
 
       - name: 取回 scan 生成的 manifest
         if: inputs.mode == 'cpfs-ingest' || inputs.mode == 'cpfs-adopt' || inputs.mode == 'oss-ingest'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ env.MANIFEST_ARTIFACT }}
           path: ${{ runner.temp }}
@@ -650,8 +650,8 @@ jobs:
     needs: [preflight, publish]
     runs-on: ${{ needs.preflight.outputs.cpfs_runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - run: python -m pip install -e .
@@ -691,7 +691,7 @@ jobs:
             --output "$RUNNER_TEMP/pai-request.json"
           cat "$RUNNER_TEMP/pai-request.json"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: pai-request-${{ needs.publish.outputs.commit }}
           path: ${{ runner.temp }}/pai-request.json
@@ -705,13 +705,13 @@ jobs:
     needs: [publish, build-request]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - run: python -m pip install -e .
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: pai-request-${{ needs.publish.outputs.commit }}
           path: ${{ runner.temp }}
@@ -739,13 +739,13 @@ jobs:
     runs-on: ubuntu-latest
     environment: dataset-release
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - run: python -m pip install -e .
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: pai-request-${{ needs.publish.outputs.commit }}
           path: ${{ runner.temp }}
@@ -766,7 +766,7 @@ jobs:
             --region '${{ vars.ALIBABA_CLOUD_REGION }}' \
             --execute | tee "$RUNNER_TEMP/register-result.json"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: register-result-${{ needs.publish.outputs.commit }}
           path: ${{ runner.temp }}/register-result.json
@@ -782,7 +782,7 @@ jobs:
     if: ${{ vars.SMOKE_TEST_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 假设 DlcSubmitRole
         uses: aliyun/configure-aliyun-credentials-action@v1
